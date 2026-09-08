@@ -1,0 +1,14 @@
+{
+  "name": "step-tracker-pro-example",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-native": "0.76.5",
+    "react-native-step-tracker-pro": "link:.."
+  }
+}

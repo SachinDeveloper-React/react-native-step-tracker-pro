@@ -1,0 +1,9 @@
+<resources>
+    <string name="stp_channel_name">Step tracking</string>
+    <string name="stp_channel_description">Keeps counting your steps while the app is closed.</string>
+    <string name="stp_notification_text">%1$s km · %2$s kcal · %3$d%% of goal</string>
+    <string name="stp_action_open">Open</string>
+    <string name="stp_action_pause">Pause</string>
+    <string name="stp_action_resume">Resume</string>
+    <string name="stp_paused_text">Tracking paused</string>
+</resources>

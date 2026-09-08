@@ -1,0 +1,7 @@
+example/
+android/build/
+android/.gradle/
+android/local.properties
+android/settings.gradle
+android/schemas/
+*.log

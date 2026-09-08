@@ -1,0 +1,119 @@
+buildscript {
+    // Consumers can override any of these in the app's root build.gradle:
+    //   ext { kotlinVersion = "2.0.21"; kspVersion = "2.0.21-1.0.25"; roomVersion = "2.7.1" }
+    ext.stp_kotlinVersion = rootProject.ext.has("kotlinVersion")
+            ? rootProject.ext.get("kotlinVersion") : "1.9.24"
+    ext.stp_kspVersion = rootProject.ext.has("kspVersion")
+            ? rootProject.ext.get("kspVersion") : "1.9.24-1.0.20"
+
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.6.0"
+        // Bare references, not ${ext.…}: inside a nested dependencies{} block
+        // `ext` resolves to the buildscript's own extra properties, not the
+        // project's, so the ext-qualified form fails to resolve at all.
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$stp_kotlinVersion"
+        classpath "com.google.devtools.ksp:com.google.devtools.ksp.gradle.plugin:$stp_kspVersion"
+    }
+}
+
+def isNewArchitectureEnabled() {
+    return project.hasProperty("newArchEnabled") && project.newArchEnabled == "true"
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.google.devtools.ksp"
+if (isNewArchitectureEnabled()) {
+    apply plugin: "com.facebook.react"
+}
+
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+def roomVersion = safeExtGet("roomVersion", "2.6.1")
+// 1.1.0 stable requires compileSdk 36 and AGP 8.9.1+, which React Native did
+// not ship until long after 0.76 - depending on it would silently break every
+// consumer inside the react-native range peerDependencies claims to support.
+// 1.1.0-beta01 is the newest release that still builds against compileSdk 35
+// and carries the same Metadata API. Consumers on a newer toolchain can opt up
+// with ext.healthConnectVersion.
+def healthConnectVersion = safeExtGet("healthConnectVersion", "1.1.0-beta01")
+def workVersion = safeExtGet("workVersion", "2.9.1")
+
+android {
+    namespace "com.steptrackerpro"
+    compileSdk safeExtGet("compileSdkVersion", 35)
+
+    defaultConfig {
+        // 26 is the floor for java.time and for the Health Connect client.
+        minSdk safeExtGet("minSdkVersion", 26)
+        targetSdk safeExtGet("targetSdkVersion", 35)
+        consumerProguardFiles "consumer-rules.pro"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+        freeCompilerArgs += ["-Xjvm-default=all"]
+    }
+
+    sourceSets {
+        main {
+            if (isNewArchitectureEnabled()) {
+                java.srcDirs += ["src/newarch/java", "${project.buildDir}/generated/source/codegen/java"]
+            } else {
+                java.srcDirs += ["src/oldarch/java"]
+            }
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+    arg("room.incremental", "true")
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1"
+    implementation "androidx.core:core-ktx:1.13.1"
+    implementation "androidx.lifecycle:lifecycle-service:2.8.4"
+    implementation "androidx.activity:activity-ktx:1.9.2"
+
+    implementation "androidx.room:room-runtime:$roomVersion"
+    implementation "androidx.room:room-ktx:$roomVersion"
+    ksp "androidx.room:room-compiler:$roomVersion"
+
+    implementation "androidx.work:work-runtime-ktx:$workVersion"
+    implementation "androidx.health.connect:connect-client:$healthConnectVersion"
+
+    androidTestImplementation "androidx.test:core-ktx:1.6.1"
+    androidTestImplementation "androidx.test:runner:1.6.2"
+    androidTestImplementation "androidx.test.ext:junit:1.2.1"
+}

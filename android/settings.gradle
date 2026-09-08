@@ -1,0 +1,25 @@
+// Dev-only: lets the library be compiled on its own, without a host app.
+// A consuming app ignores a subproject's settings.gradle, so nothing here
+// affects how the package builds when it is autolinked normally.
+rootProject.name = 'react-native-step-tracker-pro'
+
+dependencyResolutionManagement {
+    repositoriesMode = RepositoriesMode.PREFER_SETTINGS
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+// build.gradle declares `com.facebook.react:react-android` without a version,
+// because the host app's React gradle plugin supplies it. Standalone there is
+// no host app, so pin it to the version in devDependencies.
+gradle.beforeProject { project ->
+    project.configurations.all {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'com.facebook.react' && !details.requested.version) {
+                details.useVersion '0.76.5'
+            }
+        }
+    }
+}
