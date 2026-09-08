@@ -45,8 +45,9 @@ history to survive reinstalls, sync to Health Connect or set `remoteSyncUrl`.
 
 ## Build fails: KSP version mismatch
 
-Your app is on Kotlin 2.x and the library defaults to 1.9.24. Set `kotlinVersion`
-and a matching `kspVersion` in the app's root `build.gradle` — see
+React Native sets `rootProject.ext.kotlinVersion` and the library follows it, so
+this should not happen on a stock app. If it does, set `kotlinVersion` in the
+app's root `build.gradle` — see
 [INSTALLATION.md](INSTALLATION.md#3-kotlin-2x-only-if-your-app-is-already-on-it).
 
 ## Build fails: `minSdkVersion 24 cannot be smaller than 26`

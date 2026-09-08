@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| React Native | ≥ 0.74 (old and new architecture both supported) |
+| React Native | ≥ 0.77 (old and new architecture both supported) |
 | `minSdkVersion` | 26 — `java.time` and the Health Connect client both need it |
 | `compileSdkVersion` / `targetSdkVersion` | 35 |
 | Java | 17 |
@@ -44,8 +44,7 @@ so, or the build fails with a KSP/Kotlin mismatch.
 buildscript {
     ext {
         kotlinVersion = "2.0.21"
-        kspVersion = "2.0.21-1.0.25"   // must match kotlinVersion exactly
-        roomVersion = "2.7.1"
+        roomVersion = "2.7.2"
     }
 }
 ```
@@ -56,7 +55,7 @@ Other overridable properties: `healthConnectVersion` (default `1.1.0-beta01`),
 `healthConnectVersion` is held at `1.1.0-beta01` on purpose: `1.1.0` stable
 requires `compileSdk 36` and Android Gradle Plugin 8.9.1+, which React Native
 did not ship until well after 0.76, so depending on it would fail
-`checkDebugAarMetadata` in every app inside the `react-native >= 0.74` range
+`checkDebugAarMetadata` in every app inside the `react-native >= 0.77` range
 this package claims to support. `1.1.0-beta01` is the newest release that still
 builds against `compileSdk 35` and exposes the same `Metadata` API. If your app
 is already on `compileSdk 36` and AGP 8.9.1+, opt up with:
@@ -68,8 +67,24 @@ ext {
 ```
 
 
-If Gradle warns that the Kotlin plugin is loaded twice with different versions,
-that is this mismatch — set `kotlinVersion` and `kspVersion` as above.
+Room's annotation processing runs through **kapt**, not KSP. A KSP plugin
+version has to match the Kotlin plugin version exactly, and a library cannot
+know which Kotlin its host app will bring — pinning one breaks every app on a
+different Kotlin, and the KSP suffix cannot be derived from the Kotlin version.
+kapt ships inside the Kotlin Gradle plugin, so it always matches. There is no
+`kspVersion` to set.
+
+The React Native floor is ≥ 0.77 because Room 2.7 is the first release whose
+bundled `kotlinx-metadata` can read Kotlin 2.x metadata, and Room 2.7 itself
+needs Kotlin 2.0+. On react-native 0.74–0.76 (Kotlin 1.9.24) the package still
+works if you pin the older pair:
+
+```groovy
+ext {
+    kotlinVersion = "1.9.24"
+    roomVersion = "2.6.1"
+}
+```
 
 ## 4. Manifest entries your app must add
 

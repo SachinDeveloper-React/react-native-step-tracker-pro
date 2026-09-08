@@ -1,6 +1,6 @@
 {
   "name": "react-native-step-tracker-pro",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Production-grade Android step tracking for React Native: hardware step counter, foreground service, Room storage, Health Connect sync, boot recovery and goals.",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
@@ -45,7 +45,7 @@
   "author": "Helper <sachinkumarq87@gmail.com>",
   "peerDependencies": {
     "react": ">=18.0.0",
-    "react-native": ">=0.74.0"
+    "react-native": ">=0.77.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

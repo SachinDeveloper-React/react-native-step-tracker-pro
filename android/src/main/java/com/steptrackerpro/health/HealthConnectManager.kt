@@ -7,6 +7,7 @@ import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.aggregate.AggregationResultGroupedByPeriod
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.metadata.Device
@@ -136,7 +137,10 @@ class HealthConnectManager(
         val version = state.nextHealthRecordVersion()
         val device = Device(type = Device.TYPE_PHONE)
 
-        val records = listOf(
+        // Explicitly typed: the three record classes share only the
+        // library-internal IntervalRecord supertype, which Kotlin 2.x refuses
+        // to infer as a type argument.
+        val records = listOf<Record>(
             StepsRecord(
                 count = totals.steps.toLong(),
                 startTime = start,

@@ -306,7 +306,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun requestPermissions(promise: Promise) {
-        val activity = currentActivity
+        val activity = getCurrentActivity()
         if (activity !is PermissionAwareActivity) {
             promise.reject("E_NO_ACTIVITY", "No foreground activity to attach the dialog to")
             return
@@ -350,7 +350,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun requestDisableBatteryOptimization(promise: Promise) {
         runSafely(promise) {
-            val host = currentActivity ?: reactContext
+            val host = getCurrentActivity() ?: reactContext
             promise.resolve(BatteryOptimizationHelper.requestExemption(host))
         }
     }
@@ -358,7 +358,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun openBatteryOptimizationSettings(promise: Promise) {
         runSafely(promise) {
-            promise.resolve(BatteryOptimizationHelper.openSettings(currentActivity ?: reactContext))
+            promise.resolve(BatteryOptimizationHelper.openSettings(getCurrentActivity() ?: reactContext))
         }
     }
 
@@ -366,7 +366,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun openManufacturerAutoStartSettings(promise: Promise) {
         runSafely(promise) {
             promise.resolve(
-                BatteryOptimizationHelper.openAutoStartSettings(currentActivity ?: reactContext)
+                BatteryOptimizationHelper.openAutoStartSettings(getCurrentActivity() ?: reactContext)
             )
         }
     }
@@ -388,7 +388,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             )
             return
         }
-        val activity: Activity? = currentActivity
+        val activity: Activity? = getCurrentActivity()
         if (activity == null) {
             promise.reject("E_NO_ACTIVITY", "No foreground activity to launch the request from")
             return

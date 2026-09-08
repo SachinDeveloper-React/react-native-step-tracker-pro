@@ -37,7 +37,7 @@ cd android && ./gradlew clean
 npx react-native run-android
 ```
 
-Requires `minSdk 26`, `compileSdk 35`, RN ≥ 0.74. Full steps, including the
+Requires `minSdk 26`, `compileSdk 35`, RN ≥ 0.77. Full steps, including the
 Gradle overrides for Kotlin 2.x and the manifest entries your app has to add:
 [docs/INSTALLATION.md](docs/INSTALLATION.md).
 

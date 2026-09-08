@@ -1,10 +1,19 @@
 buildscript {
-    // Consumers can override any of these in the app's root build.gradle:
-    //   ext { kotlinVersion = "2.0.21"; kspVersion = "2.0.21-1.0.25"; roomVersion = "2.7.1" }
+    // Consumers can override in the app's root build.gradle:
+    //   ext { kotlinVersion = "2.2.0"; roomVersion = "2.7.1" }
+    //
+    // Room's annotation processing runs through kapt rather than KSP on
+    // purpose. A KSP plugin version has to match the Kotlin plugin version
+    // exactly, and a library cannot know which Kotlin the host app will bring:
+    // pinning one here breaks every app on a different Kotlin, and there is no
+    // way to derive the KSP suffix from the Kotlin version. kapt ships inside
+    // the Kotlin Gradle plugin, so it matches the host automatically, and this
+    // module's processing surface is two entities and two DAOs.
+    // Only used when this module is built on its own; inside an app the host's
+    // Kotlin plugin is already on the classpath and wins. React Native sets
+    // rootProject.ext.kotlinVersion, so consumers are picked up automatically.
     ext.stp_kotlinVersion = rootProject.ext.has("kotlinVersion")
-            ? rootProject.ext.get("kotlinVersion") : "1.9.24"
-    ext.stp_kspVersion = rootProject.ext.has("kspVersion")
-            ? rootProject.ext.get("kspVersion") : "1.9.24-1.0.20"
+            ? rootProject.ext.get("kotlinVersion") : "2.0.21"
 
     repositories {
         google()
@@ -17,7 +26,6 @@ buildscript {
         // `ext` resolves to the buildscript's own extra properties, not the
         // project's, so the ext-qualified form fails to resolve at all.
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$stp_kotlinVersion"
-        classpath "com.google.devtools.ksp:com.google.devtools.ksp.gradle.plugin:$stp_kspVersion"
     }
 }
 
@@ -27,7 +35,7 @@ def isNewArchitectureEnabled() {
 
 apply plugin: "com.android.library"
 apply plugin: "org.jetbrains.kotlin.android"
-apply plugin: "com.google.devtools.ksp"
+apply plugin: "org.jetbrains.kotlin.kapt"
 if (isNewArchitectureEnabled()) {
     apply plugin: "com.facebook.react"
 }
@@ -36,7 +44,12 @@ def safeExtGet(prop, fallback) {
     rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
-def roomVersion = safeExtGet("roomVersion", "2.6.1")
+// Room 2.7+ is required to read Kotlin 2.x metadata: 2.6.1's bundled
+// kotlinx-metadata rejects anything above Kotlin 2.0 with "Provided Metadata
+// instance has version 2.2.0, while maximum supported version is 2.0.0". It in
+// turn needs Kotlin 2.0+, which is what sets this package's React Native floor.
+// On react-native 0.74-0.76 (Kotlin 1.9.24), pin roomVersion = "2.6.1".
+def roomVersion = safeExtGet("roomVersion", "2.7.2")
 // 1.1.0 stable requires compileSdk 36 and AGP 8.9.1+, which React Native did
 // not ship until long after 0.76 - depending on it would silently break every
 // consumer inside the react-native range peerDependencies claims to support.
@@ -88,9 +101,11 @@ android {
     }
 }
 
-ksp {
-    arg("room.schemaLocation", "$projectDir/schemas")
-    arg("room.incremental", "true")
+kapt {
+    arguments {
+        arg("room.schemaLocation", "$projectDir/schemas")
+        arg("room.incremental", "true")
+    }
 }
 
 repositories {
@@ -108,7 +123,7 @@ dependencies {
 
     implementation "androidx.room:room-runtime:$roomVersion"
     implementation "androidx.room:room-ktx:$roomVersion"
-    ksp "androidx.room:room-compiler:$roomVersion"
+    kapt "androidx.room:room-compiler:$roomVersion"
 
     implementation "androidx.work:work-runtime-ktx:$workVersion"
     implementation "androidx.health.connect:connect-client:$healthConnectVersion"
