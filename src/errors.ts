@@ -5,6 +5,10 @@ export type StepTrackerErrorCode =
   | 'E_PERMISSION_DENIED'
   | 'E_SERVICE_START_FAILED'
   | 'E_HEALTH_CONNECT_UNAVAILABLE'
+  /** No provider installed. Answer with `installHealthConnect()`. */
+  | 'E_HEALTH_CONNECT_NOT_INSTALLED'
+  /** Provider too old. Also answered by `installHealthConnect()`. */
+  | 'E_HEALTH_CONNECT_UPDATE_REQUIRED'
   | 'E_HEALTH_CONNECT_DENIED'
   | 'E_DATABASE'
   | 'E_INVALID_CONFIG'

@@ -48,11 +48,19 @@ export interface Spec extends TurboModule {
 
   // ---- health connect --------------------------------------------------
   getHealthConnectStatus(): Promise<UnsafeObject>;
-  requestHealthConnectPermissions(): Promise<UnsafeObject>;
+  requestHealthConnectPermissions(options: UnsafeObject): Promise<UnsafeObject>;
   openHealthConnectSettings(): Promise<boolean>;
+  installHealthConnect(): Promise<boolean>;
+  revokeHealthConnectPermissions(): Promise<boolean>;
   readHealthConnectSteps(startIso: string, endIso: string): Promise<UnsafeObject>;
   writeHealthConnectSteps(date: string): Promise<boolean>;
   syncWithHealthConnect(): Promise<UnsafeObject>;
+
+  // ---- step sources ----------------------------------------------------
+  getStepSources(startDate: string, endDate: string): Promise<UnsafeObject>;
+  getCurrentStepSource(): Promise<UnsafeObject>;
+  setPreferredStepSource(packageName: string | null): Promise<UnsafeObject>;
+  getInstalledCompanionApps(): Promise<UnsafeObject>;
 
   // ---- sync ------------------------------------------------------------
   getPendingSyncCount(): Promise<number>;

@@ -1,6 +1,7 @@
 <!--
-  What the HOST APP has to add. Everything else (the service, the boot
-  receiver, the sensor permissions) is merged in from the library manifest.
+  What the HOST APP has to add. Everything else — the service, the boot
+  receiver, the sensor and Health Connect permissions, and the Health Connect
+  privacy-policy activity — is merged in from the library manifest.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -22,27 +23,34 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
-            <!--
-              Health Connect requires a rationale screen. Play rejects the app
-              without it. Point it at whichever activity shows your privacy
-              policy; here it is the main activity.
-            -->
-            <intent-filter>
-                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
-            </intent-filter>
         </activity>
 
-        <!-- Android 14+ uses this alias instead of the intent filter above. -->
-        <activity-alias
-            android:name="ViewPermissionUsageActivity"
-            android:exported="true"
-            android:permission="android.permission.START_VIEW_PERMISSION_USAGE"
-            android:targetActivity=".MainActivity">
+        <!--
+          Health Connect requires a privacy-policy screen and Play rejects the
+          app without one. The library ships that activity and both of its
+          intent filters, so nothing is needed here — just set `privacyPolicyUrl`
+          when you call StepTracker.initialize().
+
+          To show your own screen instead, declare it with the two filters below
+          and remove the library's, so that only one activity answers each:
+
+          <activity android:name=".PrivacyPolicyActivity" android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
-                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+              <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
             </intent-filter>
-        </activity-alias>
+          </activity>
+          <activity-alias android:name="ViewPermissionUsageActivity"
+              android:targetActivity=".PrivacyPolicyActivity" android:exported="true"
+              android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+              <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+              <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+          </activity-alias>
+          <activity android:name="com.steptrackerpro.health.HealthPrivacyPolicyActivity"
+              tools:node="remove" />
+          <activity-alias android:name="com.steptrackerpro.health.ViewPermissionUsageActivity"
+              tools:node="remove" />
+        -->
     </application>
 </manifest>

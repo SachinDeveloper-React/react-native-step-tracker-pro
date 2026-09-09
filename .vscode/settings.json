@@ -1,3 +1,9 @@
 {
-  "java.configuration.updateBuildConfiguration": "interactive"
+  "java.configuration.updateBuildConfiguration": "interactive",
+  // Import with the Gradle the build actually uses
+  // (android/gradle/wrapper/gradle-wrapper.properties), not the language
+  // server's bundled one. Without this the IDE can pin a different Gradle in
+  // its own workspace cache and report version-check failures against an AGP
+  // this project never declares, while ./gradlew builds fine.
+  "java.import.gradle.wrapper.enabled": true
 }

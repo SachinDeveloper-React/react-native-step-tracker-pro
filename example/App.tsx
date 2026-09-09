@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import StepTracker, {
   isSupported,
+  useHealthConnect,
   useStepStats,
   useStepTracker,
 } from 'react-native-step-tracker-pro';
@@ -29,6 +30,36 @@ const palette = {
 
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
+/** Turns the status shape into one line a user can act on. */
+function healthSummary(health: ReturnType<typeof useHealthConnect>): string {
+  if (health.loading) return 'Checking…';
+  const status = health.status;
+  if (!status) return 'Unavailable.';
+  switch (status.availability) {
+    case 'not_supported':
+      return 'Not available on this device.';
+    case 'not_installed':
+      return 'Not installed. Install it to sync with a watch or other apps.';
+    case 'update_required':
+      return 'Needs an update before it can be used.';
+    default:
+      break;
+  }
+  if (status.granted) {
+    return health.hasWearable
+      ? 'Connected. A wearable is publishing steps.'
+      : 'Connected.';
+  }
+  if (status.shouldOpenSettings) {
+    // Health Connect stops showing its sheet after two refusals, so asking
+    // again does nothing visible — the settings screen is the only route left.
+    return 'Access was declined twice, so the prompt no longer appears. Grant it in Health Connect settings.';
+  }
+  return status.canRead
+    ? 'Partly connected — reading is allowed but writing is not.'
+    : 'Not connected.';
+}
+
 export default function App() {
   const { snapshot, state, ready, error, start, pause, resume, stop, requestPermissions } =
     useStepTracker({
@@ -37,11 +68,18 @@ export default function App() {
       dailyGoal: 10000,
       historyRetentionDays: 31,
       notificationTitle: '{steps} steps today',
+      // Required before Play will accept health permissions; Health Connect
+      // links to it from its own permission sheet.
+      privacyPolicyUrl: 'https://example.com/privacy',
+      // Take the phone's count or a paired watch's, whichever saw more of the
+      // day. Never both added together.
+      stepSource: 'auto',
       onGoalReached: (event) =>
         Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
     });
 
   const { stats } = useStepStats('week');
+  const health = useHealthConnect();
   const [battery, setBattery] = useState<boolean | null>(null);
   const [pending, setPending] = useState(0);
 
@@ -98,7 +136,13 @@ export default function App() {
       <StatusBar barStyle="dark-content" backgroundColor={palette.surface} />
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.count}>{steps.toLocaleString()}</Text>
-        <Text style={styles.countLabel}>steps today</Text>
+        <Text style={styles.countLabel}>
+          {/* Attribution matters when the number was measured by hardware this
+              app did not write. */}
+          {snapshot?.stepSource?.usedExternal
+            ? `steps today · from ${snapshot.stepSource.appName}`
+            : 'steps today'}
+        </Text>
 
         {/* The lane: filled portion is distance covered, ticks are 25% marks. */}
         <View style={styles.lane}>
@@ -155,17 +199,25 @@ export default function App() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Health Connect</Text>
-          <Text style={styles.body}>
-            {pending} {pending === 1 ? 'day' : 'days'} waiting to sync.
-          </Text>
+          <Text style={styles.body}>{healthSummary(health)}</Text>
+
           <View style={styles.controls}>
-            <Button
-              label="Grant access"
-              onPress={async () => {
-                const status = await StepTracker.requestHealthConnectPermissions();
-                if (!status.granted) StepTracker.openHealthConnectSettings();
-              }}
-            />
+            {/*
+              Which button to show is entirely decided by the status shape:
+              nothing to offer, install, ask, or go to settings because the
+              provider has stopped showing its sheet. `enable()` walks the same
+              ladder in one call if you would rather not branch.
+            */}
+            {health.status?.availability === 'not_supported' ? null : health.status
+                ?.installable ? (
+              <Button label="Install Health Connect" onPress={health.install} primary />
+            ) : health.status?.shouldOpenSettings ? (
+              <Button label="Open settings" onPress={health.openSettings} primary />
+            ) : !health.status?.granted ? (
+              <Button label="Connect" onPress={health.enable} primary />
+            ) : (
+              <Button label="Disconnect" onPress={health.revoke} />
+            )}
             <Button
               label="Sync now"
               onPress={async () => {
@@ -174,7 +226,45 @@ export default function App() {
               }}
             />
           </View>
+
+          <Text style={styles.body}>
+            {pending} {pending === 1 ? 'day' : 'days'} waiting to sync.
+          </Text>
         </View>
+
+        {/*
+          Every app publishing steps, so the user can choose. These totals are
+          per-source counts of the same walking, not slices of it — picking one
+          is the whole point, adding them would roughly double the number.
+        */}
+        {health.sources.length > 0 && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Step source</Text>
+            <Text style={styles.body}>
+              Phone counted {health.current?.deviceSteps.toLocaleString() ?? 0}
+              {health.current?.externalSteps
+                ? ` · best other source ${health.current.externalSteps.toLocaleString()}`
+                : ''}
+            </Text>
+            <View style={styles.controls}>
+              <Button
+                label="This phone"
+                primary={!health.current?.usedExternal}
+                onPress={() => health.selectSource(null)}
+              />
+              {health.sources
+                .filter((source) => !source.isSelf)
+                .map((source) => (
+                  <Button
+                    key={source.packageName}
+                    label={`${source.appName}${source.isWearable ? ' ⌚' : ''} · ${source.steps.toLocaleString()}`}
+                    primary={health.current?.packageName === source.packageName}
+                    onPress={() => health.selectSource(source.packageName)}
+                  />
+                ))}
+            </View>
+          </View>
+        )}
 
         {battery === true && (
           <Pressable

@@ -1,0 +1,182 @@
+package com.steptrackerpro.health
+
+import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.MetricsCalculator
+import com.steptrackerpro.core.StepTrackerConfig
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * The rule under test is that origins are never summed. Everything else here
+ * is about which single origin gets picked.
+ */
+class StepSourceResolverTest {
+
+    private val metrics = MetricsCalculator(StepTrackerConfig().sanitised())
+    private val date = "2026-09-09"
+
+    private fun device(steps: Int) =
+        DayTotals(date, steps, metrics.distance(steps), metrics.calories(steps))
+
+    private fun source(
+        pkg: String,
+        steps: Int,
+        kind: StepSourceKind,
+        distance: Double = 0.0,
+        calories: Double = 0.0,
+        isSelf: Boolean = false
+    ) = StepSource(pkg, pkg, kind, steps, distance, calories, 0L, isSelf)
+
+    private fun resolve(
+        policy: StepSourcePolicy,
+        device: DayTotals,
+        sources: List<StepSource>,
+        preferred: String? = null
+    ) = StepSourceResolver.resolve(policy, device, sources, preferred, metrics)
+
+    @Test
+    fun `never sums the phone and a watch covering the same day`() {
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(7_800), listOf(watch))
+
+        assertEquals(8_000, result.totals.steps)
+        assertTrue(result.totals.steps < 7_800 + 8_000)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
+    fun `device policy ignores Health Connect entirely`() {
+        val watch = source("com.fitbit.FitbitMobile", 20_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.DEVICE, device(500), listOf(watch))
+
+        assertEquals(500, result.totals.steps)
+        assertFalse(result.usedExternal)
+        assertEquals(StepSourceKind.SELF, result.kind)
+    }
+
+    @Test
+    fun `auto keeps the phone when it counted more`() {
+        val watch = source("com.fitbit.FitbitMobile", 3_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(9_000), listOf(watch))
+
+        assertEquals(9_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+        // The alternative is still reported, so a UI can offer the switch.
+        assertEquals(3_000, result.externalSteps)
+    }
+
+    @Test
+    fun `wearable policy prefers the watch even when it counted less`() {
+        val watch = source("com.fitbit.FitbitMobile", 3_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.WEARABLE, device(9_000), listOf(watch))
+
+        assertEquals(3_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertEquals(9_000, result.deviceSteps)
+    }
+
+    @Test
+    fun `wearable policy falls back to the phone when only phone apps published`() {
+        val other = source("cc.pacer.androidapp", 12_000, StepSourceKind.PHONE)
+        val result = resolve(StepSourcePolicy.WEARABLE, device(9_000), listOf(other))
+
+        assertEquals(9_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `health_connect policy takes the best external source of any kind`() {
+        val other = source("cc.pacer.androidapp", 12_000, StepSourceKind.PHONE)
+        val result = resolve(StepSourcePolicy.HEALTH_CONNECT, device(9_000), listOf(other))
+
+        assertEquals(12_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
+    fun `our own mirror is never treated as an external source`() {
+        // Without the isSelf filter this is what a stale write of our own looks
+        // like: it would beat the live count and freeze the day's total.
+        val mirror = source("com.example.app", 4_000, StepSourceKind.PHONE, isSelf = true)
+        val result = resolve(StepSourcePolicy.AUTO, device(6_000), listOf(mirror))
+
+        assertEquals(6_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `a pinned package wins over a higher-counting one`() {
+        val garmin = source("com.garmin.android.apps.connectmobile", 4_000, StepSourceKind.WATCH)
+        val fitbit = source("com.fitbit.FitbitMobile", 11_000, StepSourceKind.WATCH)
+        val result = resolve(
+            StepSourcePolicy.AUTO,
+            device(1_000),
+            listOf(fitbit, garmin),
+            preferred = "com.garmin.android.apps.connectmobile"
+        )
+
+        assertEquals(4_000, result.totals.steps)
+        assertEquals("com.garmin.android.apps.connectmobile", result.sourcePackage)
+    }
+
+    @Test
+    fun `a pin naming a source with no data falls back rather than reporting zero`() {
+        val fitbit = source("com.fitbit.FitbitMobile", 11_000, StepSourceKind.WATCH)
+        val result = resolve(
+            StepSourcePolicy.AUTO,
+            device(1_000),
+            listOf(fitbit),
+            preferred = "com.garmin.android.apps.connectmobile"
+        )
+
+        assertEquals(1_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `distance is derived when the watch published steps but no distance`() {
+        val watch = source("com.fitbit.FitbitMobile", 10_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.WEARABLE, device(0), listOf(watch))
+
+        assertEquals(metrics.distance(10_000), result.totals.distance, 0.001)
+        assertEquals(metrics.calories(10_000), result.totals.calories, 0.001)
+    }
+
+    @Test
+    fun `a watch's own distance is kept over the derived estimate`() {
+        val watch = source(
+            "com.fitbit.FitbitMobile", 10_000, StepSourceKind.WATCH,
+            distance = 7_500.0, calories = 410.0
+        )
+        val result = resolve(StepSourcePolicy.WEARABLE, device(0), listOf(watch))
+
+        assertEquals(7_500.0, result.totals.distance, 0.001)
+        assertEquals(410.0, result.totals.calories, 0.001)
+    }
+
+    @Test
+    fun `no Health Connect data leaves the phone's numbers untouched`() {
+        val result = resolve(StepSourcePolicy.AUTO, device(5_432), emptyList())
+
+        assertEquals(5_432, result.totals.steps)
+        assertFalse(result.usedExternal)
+        assertEquals(0, result.externalSteps)
+    }
+
+    @Test
+    fun `ties go to the phone because its count is live`() {
+        val watch = source("com.fitbit.FitbitMobile", 5_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(5_000), listOf(watch))
+
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `an unknown policy string resolves to auto`() {
+        assertEquals(StepSourcePolicy.AUTO, StepSourcePolicy.from("nonsense"))
+        assertEquals(StepSourcePolicy.AUTO, StepSourcePolicy.from(null))
+        assertEquals(StepSourcePolicy.DEVICE, StepSourcePolicy.from("device"))
+    }
+}

@@ -17,6 +17,10 @@ export const DEFAULT_CONFIG: Required<
     | 'persistEveryNSteps'
     | 'healthConnectEnabled'
     | 'healthConnectSyncIntervalMinutes'
+    | 'healthConnectWriteEnabled'
+    | 'healthConnectBackgroundRead'
+    | 'healthConnectHistoryRead'
+    | 'stepSource'
     | 'autoStartOnBoot'
   >
 > = {
@@ -32,6 +36,10 @@ export const DEFAULT_CONFIG: Required<
   persistEveryNSteps: 10,
   healthConnectEnabled: true,
   healthConnectSyncIntervalMinutes: 30,
+  healthConnectWriteEnabled: true,
+  healthConnectBackgroundRead: false,
+  healthConnectHistoryRead: false,
+  stepSource: 'auto',
   autoStartOnBoot: true,
 };
 
@@ -41,3 +49,13 @@ export const STRIDE_COEFFICIENT = {
   female: 0.413,
   unspecified: 0.414,
 } as const;
+
+/** Health Connect's own provider package. */
+export const HEALTH_CONNECT_PACKAGE = 'com.google.android.apps.healthdata';
+
+/**
+ * Health Connect stops showing its permission sheet after this many refusals.
+ * Past it, `HealthConnectStatus.shouldOpenSettings` turns true and the only
+ * route left is `openHealthConnectSettings()`.
+ */
+export const HEALTH_CONNECT_MAX_PROMPTS = 2;

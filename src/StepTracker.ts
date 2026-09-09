@@ -4,6 +4,8 @@ import type { Spec } from './NativeStepTrackerPro';
 import { DEFAULT_CONFIG, MODULE_NAME, STRIDE_COEFFICIENT } from './constants';
 import { StepTrackerError, toStepTrackerError } from './errors';
 import type {
+  CompanionApp,
+  CurrentStepSource,
   DayRecord,
   DeviceCapabilities,
   EventSubscription,
@@ -11,7 +13,10 @@ import type {
   PermissionStatus,
   RangeOptions,
   RangeStats,
+  RequestHealthConnectOptions,
+  ResolvedStepSource,
   StepSnapshot,
+  StepSourceList,
   StepTrackerConfig,
   StepTrackerEvent,
   StepTrackerEventMap,
@@ -332,14 +337,74 @@ export const StepTracker = {
     ) as Promise<HealthConnectStatus>;
   },
 
-  async requestHealthConnectPermissions(): Promise<HealthConnectStatus> {
+  /**
+   * Shows the Health Connect permission sheet and resolves with the status
+   * afterwards. A denial is not a rejection — check `granted` on the result.
+   *
+   * Rejects with `E_HEALTH_CONNECT_NOT_INSTALLED` or
+   * `E_HEALTH_CONNECT_UPDATE_REQUIRED` when there is no usable provider; both
+   * are answered by `installHealthConnect()`.
+   *
+   * Health Connect stops showing the sheet after two refusals, so a call that
+   * resolves with `shouldOpenSettings: true` did nothing visible — route the
+   * user to `openHealthConnectSettings()` from there.
+   */
+  async requestHealthConnectPermissions(
+    options: RequestHealthConnectOptions = {}
+  ): Promise<HealthConnectStatus> {
     return call(() =>
-      getNativeModule().requestHealthConnectPermissions()
+      getNativeModule().requestHealthConnectPermissions(options)
     ) as Promise<HealthConnectStatus>;
+  },
+
+  /**
+   * Runs the whole "turn Health Connect on" flow and reports where it got to.
+   *
+   * Install or update first when the provider is missing, then request, then
+   * fall back to the settings screen once the sheet has stopped appearing.
+   * Callers that want to drive each step themselves can use the individual
+   * methods instead.
+   */
+  async enableHealthConnect(
+    options: RequestHealthConnectOptions = {}
+  ): Promise<HealthConnectStatus> {
+    let status = await StepTracker.getHealthConnectStatus();
+    if (status.availability === 'not_supported') return status;
+
+    if (status.installable) {
+      await StepTracker.installHealthConnect();
+      // The Play Store is a separate task, so the user is gone for an unknown
+      // length of time. Returning here rather than waiting lets the caller
+      // re-run this on next foreground, where `healthConnectStatusChanged`
+      // will already have fired.
+      return status;
+    }
+
+    if (!status.granted) {
+      if (status.shouldOpenSettings) {
+        await StepTracker.openHealthConnectSettings();
+        return status;
+      }
+      status = await StepTracker.requestHealthConnectPermissions(options);
+    }
+    return status;
   },
 
   async openHealthConnectSettings(): Promise<boolean> {
     return call(() => getNativeModule().openHealthConnectSettings());
+  },
+
+  /**
+   * Opens the Play Store listing for Health Connect. The right answer to
+   * `availability: 'not_installed'` or `'update_required'`.
+   */
+  async installHealthConnect(): Promise<boolean> {
+    return call(() => getNativeModule().installHealthConnect());
+  },
+
+  /** Drops every Health Connect grant this app holds. */
+  async revokeHealthConnectPermissions(): Promise<boolean> {
+    return call(() => getNativeModule().revokeHealthConnectPermissions());
   },
 
   /** ISO-8601 instants, e.g. '2026-09-01T00:00:00Z'. */
@@ -359,6 +424,65 @@ export const StepTracker = {
 
   async syncWithHealthConnect(): Promise<SyncEvent> {
     return call(() => getNativeModule().syncWithHealthConnect()) as Promise<SyncEvent>;
+  },
+
+  // ---- step sources ----------------------------------------------------
+
+  /**
+   * Every app that published steps to Health Connect over the range, with what
+   * each one contributed.
+   *
+   * The totals do not add up to the range's step count and are not meant to:
+   * a watch and a phone covering the same walk each report all of it. Use this
+   * to show the user their options, then pin one with
+   * `setPreferredStepSource()`.
+   *
+   * Returns an empty list when Health Connect is unavailable or reads are not
+   * granted.
+   */
+  async getStepSources(
+    startDate: string,
+    endDate: string
+  ): Promise<StepSourceList> {
+    assertRange(startDate, endDate);
+    return call(() =>
+      getNativeModule().getStepSources(startDate, endDate)
+    ) as Promise<StepSourceList>;
+  },
+
+  /**
+   * Which source is answering for today, what this phone counted, and what the
+   * best external source counted.
+   */
+  async getCurrentStepSource(): Promise<CurrentStepSource> {
+    return call(() =>
+      getNativeModule().getCurrentStepSource()
+    ) as Promise<CurrentStepSource>;
+  },
+
+  /**
+   * Pins one Health Connect origin as the source of truth, or clears the pin
+   * with `null`. Stored separately from config, so it survives an
+   * `initialize()` that does not mention it.
+   */
+  async setPreferredStepSource(
+    packageName: string | null
+  ): Promise<ResolvedStepSource> {
+    return call(() =>
+      getNativeModule().setPreferredStepSource(packageName)
+    ) as Promise<ResolvedStepSource>;
+  },
+
+  /**
+   * Wearable companion apps installed on this phone — Galaxy Wearable, Fitbit,
+   * Garmin Connect and so on. Useful during onboarding, before Health Connect
+   * has any data to look at.
+   */
+  async getInstalledCompanionApps(): Promise<CompanionApp[]> {
+    const result = (await call(() =>
+      getNativeModule().getInstalledCompanionApps()
+    )) as { apps: CompanionApp[] };
+    return result.apps;
   },
 
   // ---- sync ------------------------------------------------------------
@@ -400,6 +524,8 @@ export const StepTracker = {
           'trackingStateChanged',
           'dayChanged',
           'syncCompleted',
+          'stepSourceChanged',
+          'healthConnectStatusChanged',
           'error',
         ] as StepTrackerEvent[]
       ).forEach((name) => em.removeAllListeners(`${EVENT_PREFIX}${name}`));

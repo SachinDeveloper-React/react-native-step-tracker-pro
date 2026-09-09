@@ -95,12 +95,28 @@ merged and have to live in your app:
 ### Health Connect rationale screen
 
 Play rejects apps that request Health Connect permissions without a screen
-explaining what the data is used for. Add both the intent filter (Android 13 and
-below) and the alias (Android 14+) to whichever activity shows your privacy
-policy:
+explaining what the data is used for, and Health Connect links to it from its
+own permission sheet.
+
+**The library ships that activity and both of its intent filters** — the
+`androidx.health` action for Android 13 and below, and the
+`VIEW_PERMISSION_USAGE` alias for Android 14+. All you have to do is give it a
+URL to open:
+
+```ts
+await StepTracker.initialize({
+  privacyPolicyUrl: 'https://example.com/privacy',
+});
+```
+
+Without a URL the screen still opens and tells the user (and you, in QA) that
+none is configured, so a missing policy fails loudly rather than silently.
+
+To show your own in-app screen instead, declare it with both filters and remove
+the library's, so exactly one activity answers each:
 
 ```xml
-<activity android:name=".MainActivity" android:exported="true">
+<activity android:name=".PrivacyPolicyActivity" android:exported="true">
     <intent-filter>
         <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
     </intent-filter>
@@ -110,12 +126,38 @@ policy:
     android:name="ViewPermissionUsageActivity"
     android:exported="true"
     android:permission="android.permission.START_VIEW_PERMISSION_USAGE"
-    android:targetActivity=".MainActivity">
+    android:targetActivity=".PrivacyPolicyActivity">
     <intent-filter>
         <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
         <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
     </intent-filter>
 </activity-alias>
+
+<activity
+    android:name="com.steptrackerpro.health.HealthPrivacyPolicyActivity"
+    tools:node="remove" />
+<activity-alias
+    android:name="com.steptrackerpro.health.ViewPermissionUsageActivity"
+    tools:node="remove" />
+```
+
+### Optional Health Connect permissions
+
+Two permissions are declared but never requested unless you opt in, because
+Health Connect shows one sheet for the whole set and asking for something you do
+not need risks the grants you do:
+
+| Permission | Config flag | Needed for |
+|---|---|---|
+| `READ_HEALTH_DATA_IN_BACKGROUND` | `healthConnectBackgroundRead` | the background sync worker seeing a watch's steps while the app is closed — without it every background read returns empty |
+| `READ_HEALTH_DATA_HISTORY` | `healthConnectHistoryRead` | reading further back than 30 days, which yearly stats need |
+
+Remove the ones you will not use, the same way as any other:
+
+```xml
+<uses-permission
+    android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
+    tools:node="remove" />
 ```
 
 ### Trimming permissions you do not use
@@ -183,6 +225,41 @@ useEffect(() => {
   return () => sub.remove();
 }, []);
 ```
+
+## 8. Supporting a watch
+
+If your users wear a watch, the phone's sensor is not the whole story — a phone
+left on a desk counts nothing while a worn watch counts everything. Health
+Connect is how the watch's number reaches you.
+
+```ts
+await StepTracker.initialize({
+  privacyPolicyUrl: 'https://example.com/privacy',
+  stepSource: 'auto',                 // the default: take the higher of the two
+  healthConnectBackgroundRead: true,  // so background syncs see the watch too
+});
+
+// One button: installs the provider, or asks, or opens settings — whichever
+// step the user is actually on.
+const status = await StepTracker.enableHealthConnect();
+
+if (status.canRead) {
+  const { sources, hasWearable } = await StepTracker.getStepSources(
+    '2026-09-01',
+    '2026-09-09'
+  );
+  // Let the user pick, or leave it to the policy.
+  if (hasWearable) console.log(sources.filter((s) => s.isWearable));
+}
+```
+
+The numbers coming back from `getTodaySteps()` and the stats calls are already
+resolved, and carry a `stepSource` saying which app they came from. Nothing here
+sums the phone and the watch — see
+[Step sources](./API.md#step-sources-watches-and-other-apps).
+
+The `useHealthConnect()` hook wraps this whole flow if you would rather not
+drive it by hand.
 
 ## ProGuard / R8
 

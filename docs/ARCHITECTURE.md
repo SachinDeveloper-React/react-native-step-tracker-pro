@@ -193,6 +193,52 @@ waits for connectivity, and nothing else waits on it.
 Today's row is written to Health Connect on every pass but left `synced = 0`,
 because it is still moving. Closed days are marked synced once written.
 
+A day a wearable owns is skipped and marked done rather than written. Skipping
+is the point — Health Connect keeps origins separate, so writing this phone's
+parallel count of the same walk leaves every other reader with two copies of it.
+Marking it done rather than leaving it queued matters too: nothing about that day
+will ever make it writable, so a pending row would be retried for as long as it
+stays in retention.
+
+## Step source resolution
+
+The phone's sensor is one of several things counting the user's steps. A watch
+counts the same walk independently and publishes it to Health Connect under its
+own data origin, so the two overlap almost completely.
+
+**Origins are never summed.** `StepSourceResolver` picks exactly one per day —
+which one depends on the `stepSource` policy — and every read path goes through
+it. Adding a phone's 7,800 to a watch's 8,000 would report 15,800 for a day the
+user walked 8,000.
+
+```
+engine snapshot ─┐
+                 ├─► StepSourceResolver ─► resolved DayTotals ─► JS / notification
+Health Connect ──┘        (picks one)
+origins by day
+```
+
+Classification comes from the `Device` the writing app stamped on its records,
+which is the authoritative signal; `StepSourceCatalog` maps package names to
+names and kinds for the companion apps that stamp nothing. An unrecognised
+package is still a usable source, just typed `unknown`.
+
+Two read paths exist because they have different budgets:
+
+| Path | Used by | Cost |
+|---|---|---|
+| `resolveDay` / `resolvedStats` | promise-returning reads | a real Health Connect query, cached 30 s for today and 10 min for past days |
+| `resolveFromCache` | sensor callback, notification | cache only, no IPC, falls back to device-only |
+
+The sensor callback fires several times a second during a walk and cannot
+suspend, so it cannot query. Serving it the last known origin split is what
+keeps the live `stepsChanged` stream, the notification and `getTodaySteps()`
+reporting the same number instead of disagreeing with each other.
+
+Goals deliberately stay on this device's own count. A wearable's total arrives
+in jumps whenever its companion app syncs and can move backwards between them,
+so firing `goalReached` off it would trigger twice for one day.
+
 ## Threading
 
 - Sensor callbacks arrive on the sensor thread. Engine mutation is

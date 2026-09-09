@@ -32,6 +32,26 @@ data class StepTrackerConfig(
     val persistEveryNSteps: Int = 10,
     val healthConnectEnabled: Boolean = true,
     val healthConnectSyncIntervalMinutes: Int = 30,
+    /**
+     * Mirror this device's counts into Health Connect. Turning it off leaves
+     * reads working, which is the right shape for an app that only wants to
+     * display a watch's numbers without adding a second copy of its own.
+     */
+    val healthConnectWriteEnabled: Boolean = true,
+    /** Ask for `READ_HEALTH_DATA_IN_BACKGROUND` alongside the required set. */
+    val healthConnectBackgroundRead: Boolean = false,
+    /** Ask for `READ_HEALTH_DATA_HISTORY`, needed to read past 30 days. */
+    val healthConnectHistoryRead: Boolean = false,
+    /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
+    val stepSource: String = "auto",
+    /** Pins one Health Connect origin package as the source of truth. */
+    val preferredStepSourcePackage: String? = null,
+    /**
+     * Opened by [com.steptrackerpro.health.HealthPrivacyPolicyActivity] when
+     * Health Connect asks why the app wants health data. Health Connect and
+     * Play both require this link to exist.
+     */
+    val privacyPolicyUrl: String? = null,
     val remoteSyncUrl: String? = null,
     val remoteSyncHeaders: Map<String, String> = emptyMap(),
     val autoStartOnBoot: Boolean = true
@@ -63,7 +83,14 @@ data class StepTrackerConfig(
         notificationThrottleMs = notificationThrottleMs.coerceAtLeast(0L),
         eventThrottleMs = eventThrottleMs.coerceAtLeast(0L),
         persistEveryNSteps = persistEveryNSteps.coerceAtLeast(1),
-        healthConnectSyncIntervalMinutes = healthConnectSyncIntervalMinutes.coerceAtLeast(0)
+        healthConnectSyncIntervalMinutes = healthConnectSyncIntervalMinutes.coerceAtLeast(0),
+        // An unrecognised policy falls back to the default rather than
+        // disabling resolution: config also arrives from persisted JSON written
+        // by an older version, where the key may be absent or spelled
+        // differently, and silently counting nothing would be worse.
+        stepSource = com.steptrackerpro.health.StepSourcePolicy.from(stepSource).jsValue,
+        preferredStepSourcePackage = preferredStepSourcePackage?.takeIf { it.isNotBlank() },
+        privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() }
     )
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -86,6 +113,12 @@ data class StepTrackerConfig(
         put("persistEveryNSteps", persistEveryNSteps)
         put("healthConnectEnabled", healthConnectEnabled)
         put("healthConnectSyncIntervalMinutes", healthConnectSyncIntervalMinutes)
+        put("healthConnectWriteEnabled", healthConnectWriteEnabled)
+        put("healthConnectBackgroundRead", healthConnectBackgroundRead)
+        put("healthConnectHistoryRead", healthConnectHistoryRead)
+        put("stepSource", stepSource)
+        put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
+        put("privacyPolicyUrl", privacyPolicyUrl ?: JSONObject.NULL)
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
         put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
         put("autoStartOnBoot", autoStartOnBoot)
@@ -133,6 +166,19 @@ data class StepTrackerConfig(
                     "healthConnectSyncIntervalMinutes",
                     fallback.healthConnectSyncIntervalMinutes
                 ),
+                healthConnectWriteEnabled = json.optBoolean(
+                    "healthConnectWriteEnabled", fallback.healthConnectWriteEnabled
+                ),
+                healthConnectBackgroundRead = json.optBoolean(
+                    "healthConnectBackgroundRead", fallback.healthConnectBackgroundRead
+                ),
+                healthConnectHistoryRead = json.optBoolean(
+                    "healthConnectHistoryRead", fallback.healthConnectHistoryRead
+                ),
+                stepSource = json.optString("stepSource", fallback.stepSource),
+                preferredStepSourcePackage =
+                    json.optStringOrNull("preferredStepSourcePackage"),
+                privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot)

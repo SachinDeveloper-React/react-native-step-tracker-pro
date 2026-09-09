@@ -1,7 +1,15 @@
 {
   "name": "react-native-step-tracker-pro",
-  "version": "1.1.0",
-  "description": "Production-grade Android step tracking for React Native: hardware step counter, foreground service, Room storage, Health Connect sync, boot recovery and goals.",
+  "version": "1.2.0",
+  "description": "Production-grade Android step tracking for React Native: hardware step counter, foreground service, Room storage, Health Connect permissions and sync, wearable step sources, boot recovery and goals.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SachinDeveloper-React/react-native-step-tracker-pro.git"
+  },
+  "homepage": "https://github.com/SachinDeveloper-React/react-native-step-tracker-pro#readme",
+  "bugs": {
+    "url": "https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/issues"
+  },
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
   "types": "lib/typescript/index.d.ts",
@@ -19,9 +27,11 @@
     "!android/settings.gradle",
     "!android/schemas",
     "!android/src/androidTest",
+    "!android/src/test",
     "!**/__tests__",
     "docs",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
@@ -38,6 +48,8 @@
     "steps",
     "fitness",
     "health-connect",
+    "wear-os",
+    "smartwatch",
     "foreground-service",
     "turbo-module"
   ],

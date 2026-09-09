@@ -319,7 +319,7 @@ class StepTrackerService : Service(), SensorEventListener {
     private fun promoteToForeground(): Boolean {
         val config = core.config()
         notifications.ensureChannel(config)
-        val notification = notifications.build(core.engine.snapshot(), config, core.metrics)
+        val notification = notifications.build(core.displaySnapshot(), config, core.metrics)
         return runCatching {
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(
@@ -351,7 +351,10 @@ class StepTrackerService : Service(), SensorEventListener {
     private fun pushNotification(force: Boolean = false) {
         val config = core.config()
         val now = SystemClock.elapsedRealtime()
-        val snapshot = core.engine.snapshot()
+        // Deduped on the number actually drawn, not on this device's raw count.
+        // While a wearable owns the day the phone's counter keeps moving without
+        // changing anything visible, and redrawing for that is pure wakeups.
+        val snapshot = core.displaySnapshot()
         if (!force) {
             if (snapshot.steps == lastNotifiedSteps) return
             if (now - lastNotificationAt < config.notificationThrottleMs) return

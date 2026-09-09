@@ -2,6 +2,8 @@ package com.steptrackerpro.health
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.aggregate.AggregationResultGroupedByPeriod
@@ -10,9 +12,11 @@ import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
+import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
+import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.health.connect.client.units.Energy
 import androidx.health.connect.client.units.Length
@@ -25,7 +29,7 @@ import java.time.Period
 import java.time.ZoneId
 
 /**
- * Health Connect read/write.
+ * Health Connect read/write, permissions and provider availability.
  *
  * Writes are idempotent: every record carries a stable `clientRecordId` of the
  * form `stp-<type>-<date>`, so re-syncing a day replaces the previous record
@@ -39,7 +43,20 @@ class HealthConnectManager(
     private val state: StepStateStore
 ) {
 
-    enum class Availability { AVAILABLE, UPDATE_REQUIRED, UNAVAILABLE }
+    /**
+     * Why Health Connect cannot be used, at the granularity the UI needs.
+     *
+     * [NOT_INSTALLED] and [UPDATE_REQUIRED] are both fixed by sending the user
+     * to the Play Store, [NOT_SUPPORTED] never is. The previous single
+     * `UNAVAILABLE` value collapsed the first and the third, so an app could
+     * only ever say "unavailable" to a user who was one tap from having it.
+     */
+    enum class Availability(val jsValue: String) {
+        AVAILABLE("available"),
+        UPDATE_REQUIRED("update_required"),
+        NOT_INSTALLED("not_installed"),
+        NOT_SUPPORTED("not_supported");
+    }
 
     @Volatile
     private var cachedClient: HealthConnectClient? = null
@@ -62,28 +79,99 @@ class HealthConnectManager(
     fun availability(): Availability = when (HealthConnectClient.getSdkStatus(context)) {
         HealthConnectClient.SDK_AVAILABLE -> Availability.AVAILABLE
         HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> Availability.UPDATE_REQUIRED
-        else -> Availability.UNAVAILABLE
+        // From Android 14 Health Connect is part of the platform, so there is
+        // nothing to install: an unavailable SDK there means the device does
+        // not support it at all. Below 14 it is an APK the user can install.
+        else -> if (Build.VERSION.SDK_INT >= 34) {
+            Availability.NOT_SUPPORTED
+        } else if (isProviderInstalled()) {
+            Availability.NOT_SUPPORTED
+        } else {
+            Availability.NOT_INSTALLED
+        }
     }
 
+    private fun isProviderInstalled(): Boolean = runCatching {
+        context.packageManager.getPackageInfo(StepSourceCatalog.PROVIDER_PACKAGE, 0)
+        true
+    }.getOrDefault(false)
+
+    // ---- permissions -----------------------------------------------------
+
     suspend fun grantedPermissions(): Set<String> =
-        client()?.permissionController?.getGrantedPermissions() ?: emptySet()
+        runCatching { client()?.permissionController?.getGrantedPermissions() }
+            .getOrNull() ?: emptySet()
 
-    suspend fun hasAllPermissions(): Boolean =
-        grantedPermissions().containsAll(PERMISSIONS)
+    suspend fun hasAllPermissions(): Boolean = grantedPermissions().containsAll(REQUIRED)
 
-    suspend fun status(): Map<String, Any?> {
+    /** Enough to display data, even when writing was refused. */
+    suspend fun canRead(): Boolean = grantedPermissions().containsAll(READ_PERMISSIONS)
+
+    suspend fun canWrite(): Boolean = grantedPermissions().containsAll(WRITE_PERMISSIONS)
+
+    suspend fun revokeAll(): Boolean = runCatching {
+        client()?.permissionController?.revokeAllPermissions()
+        state.healthPermissionDenials = 0
+        true
+    }.getOrDefault(false)
+
+    /**
+     * Resolves the permission set a request should ask for. Optional
+     * permissions are only included when the caller opted into them, because
+     * Health Connect shows one sheet for the whole set and a user who declines
+     * background reads there declines the rest with it.
+     */
+    fun permissionsFor(backgroundRead: Boolean, historyRead: Boolean): Set<String> = buildSet {
+        addAll(REQUIRED)
+        if (backgroundRead) PERMISSION_BACKGROUND_READ?.let { add(it) }
+        if (historyRead) PERMISSION_HISTORY_READ?.let { add(it) }
+    }
+
+    suspend fun status(
+        backgroundRead: Boolean = false,
+        historyRead: Boolean = false
+    ): Map<String, Any?> {
         val availability = availability()
         val granted = if (availability == Availability.AVAILABLE) grantedPermissions() else emptySet()
+        val requested = permissionsFor(backgroundRead, historyRead)
+        val missing = requested - granted
+        val denials = state.healthPermissionDenials
         return mapOf(
             "available" to (availability == Availability.AVAILABLE),
+            "availability" to availability.jsValue,
             "requiresUpdate" to (availability == Availability.UPDATE_REQUIRED),
-            "granted" to granted.containsAll(PERMISSIONS),
-            "grantedPermissions" to granted.toList()
+            "installable" to (availability == Availability.NOT_INSTALLED ||
+                availability == Availability.UPDATE_REQUIRED),
+            "granted" to granted.containsAll(REQUIRED),
+            "canRead" to granted.containsAll(READ_PERMISSIONS),
+            "canWrite" to granted.containsAll(WRITE_PERMISSIONS),
+            "backgroundReadGranted" to
+                (PERMISSION_BACKGROUND_READ != null && granted.contains(PERMISSION_BACKGROUND_READ)),
+            "historyReadGranted" to
+                (PERMISSION_HISTORY_READ != null && granted.contains(PERMISSION_HISTORY_READ)),
+            "grantedPermissions" to granted.toList(),
+            "missingPermissions" to missing.toList(),
+            "denialCount" to denials,
+            // Past the provider's prompt limit the sheet no longer appears, so
+            // the only route left is Health Connect's own settings screen.
+            "shouldOpenSettings" to (denials >= MAX_PROMPTS && missing.isNotEmpty())
         )
     }
 
-    /** Daily step totals from every source Health Connect knows about. */
-    suspend fun readDailySteps(start: Instant, end: Instant): List<DayTotals> {
+    // ---- reads -----------------------------------------------------------
+
+    /**
+     * Daily totals aggregated across Health Connect origins.
+     *
+     * @param origins restricts the aggregate to these packages. Empty means
+     *   every origin, which is only correct for a display that is not also
+     *   showing this device's own count - see [readDailyStepsBySource].
+     */
+    suspend fun readDailySteps(
+        start: Instant,
+        end: Instant,
+        origins: Set<String> = emptySet()
+    ): List<DayTotals> {
         val hc = client() ?: return emptyList()
         val zone = ZoneId.systemDefault()
         val request = AggregateGroupByPeriodRequest(
@@ -96,7 +184,8 @@ class HealthConnectManager(
                 LocalDateTime.ofInstant(start, zone),
                 LocalDateTime.ofInstant(end, zone)
             ),
-            timeRangeSlicer = Period.ofDays(1)
+            timeRangeSlicer = Period.ofDays(1),
+            dataOriginFilter = origins.map { DataOrigin(it) }.toSet()
         )
         return runCatching { hc.aggregateGroupByPeriod(request) }
             .getOrDefault(emptyList<AggregationResultGroupedByPeriod>())
@@ -113,13 +202,154 @@ class HealthConnectManager(
     }
 
     /**
+     * Every origin that published steps in the range, keyed by day, with the
+     * device type each origin stamped on its records.
+     *
+     * This reads raw records rather than aggregating, because the aggregate API
+     * returns totals with the contributing origins attached but no way to split
+     * a total between them, and no device metadata at all - which is exactly
+     * what tells a watch apart from a phone-side pedometer.
+     */
+    suspend fun readDailyStepsBySource(
+        start: Instant,
+        end: Instant
+    ): Map<String, List<StepSource>> {
+        val hc = client() ?: return emptyMap()
+        val self = context.packageName
+
+        // date -> package -> accumulator
+        val buckets = HashMap<String, HashMap<String, Accumulator>>()
+
+        // Bucketed by start time, so a record straddling midnight lands wholly
+        // on the day it began rather than being split across both. Step records
+        // are written in minutes-long slices by every source seen in practice,
+        // so the error is bounded by one such slice per day.
+        readAll(hc, StepsRecord::class.java, start, end) { record ->
+            val date = DateKeys.of(record.startTime.toEpochMilli())
+            val pkg = record.metadata.dataOrigin.packageName
+            val acc = buckets.getOrPut(date) { HashMap() }
+                .getOrPut(pkg) { Accumulator(pkg, self) }
+            acc.steps += record.count.toInt()
+            acc.observe(record.metadata.device?.type, record.endTime.toEpochMilli())
+        }
+        // Distance and calories are optional companions: an origin that wrote
+        // steps but no distance keeps 0.0 here and has it derived from stride
+        // by StepSourceResolver.
+        readAll(hc, DistanceRecord::class.java, start, end) { record ->
+            val date = DateKeys.of(record.startTime.toEpochMilli())
+            val pkg = record.metadata.dataOrigin.packageName
+            buckets[date]?.get(pkg)?.let { it.distance += record.distance.inMeters }
+        }
+        readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
+            val date = DateKeys.of(record.startTime.toEpochMilli())
+            val pkg = record.metadata.dataOrigin.packageName
+            buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
+        }
+
+        return buckets.mapValues { (_, byPackage) ->
+            byPackage.values
+                .map { it.toStepSource(self) }
+                .sortedByDescending { it.steps }
+        }
+    }
+
+    /** Flattened view of [readDailyStepsBySource] over the whole range. */
+    suspend fun listSources(start: Instant, end: Instant): List<StepSource> {
+        val self = context.packageName
+        val merged = HashMap<String, Accumulator>()
+        readDailyStepsBySource(start, end).values.flatten().forEach { source ->
+            val acc = merged.getOrPut(source.packageName) {
+                Accumulator(source.packageName, self)
+            }
+            acc.steps += source.steps
+            acc.distance += source.distance
+            acc.calories += source.calories
+            // A source is wearable-backed for the range if it was on any day in
+            // it. Taking the last day's classification would let one day the
+            // companion app relayed without device metadata mask a watch.
+            if (acc.kindOverride == null || source.kind.isWearable) {
+                acc.kindOverride = source.kind
+            }
+            acc.lastRecordAt = maxOf(acc.lastRecordAt, source.lastRecordAt)
+        }
+        return merged.values.map { it.toStepSource(self) }.sortedByDescending { it.steps }
+    }
+
+    /**
+     * Pages through a record type. Health Connect caps a response at 5000
+     * records and hands back a token; ignoring it silently truncates a busy
+     * day, which for step records is not rare - some watches write one record
+     * per minute.
+     */
+    private suspend fun <T : Record> readAll(
+        hc: HealthConnectClient,
+        type: Class<T>,
+        start: Instant,
+        end: Instant,
+        onRecord: (T) -> Unit
+    ) {
+        var token: String? = null
+        var pages = 0
+        do {
+            val response = runCatching {
+                hc.readRecords(
+                    ReadRecordsRequest(
+                        recordType = type.kotlin,
+                        timeRangeFilter = TimeRangeFilter.between(start, end),
+                        pageSize = PAGE_SIZE,
+                        pageToken = token
+                    )
+                )
+            }.getOrNull() ?: return
+            response.records.forEach(onRecord)
+            token = response.pageToken
+            pages++
+        } while (token != null && pages < MAX_PAGES)
+    }
+
+    private class Accumulator(val packageName: String, self: String) {
+        var steps: Int = 0
+        var distance: Double = 0.0
+        var calories: Double = 0.0
+        var lastRecordAt: Long = 0L
+        var kindOverride: StepSourceKind? = null
+        private var deviceType: Int? = null
+        val isSelf: Boolean = packageName == self
+
+        fun observe(type: Int?, at: Long) {
+            // A wearable type wins over TYPE_UNKNOWN or TYPE_PHONE: companion
+            // apps that relay a watch sometimes write a mix, and the day is
+            // wearable-sourced if any of it was.
+            if (type != null && type != Device.TYPE_UNKNOWN) {
+                val incoming = StepSourceKind.fromDeviceType(type)
+                if (deviceType == null || incoming.isWearable) deviceType = type
+            }
+            if (at > lastRecordAt) lastRecordAt = at
+        }
+
+        fun toStepSource(self: String): StepSource = StepSource(
+            packageName = packageName,
+            appName = StepSourceCatalog.appName(packageName),
+            kind = kindOverride
+                ?: StepSourceCatalog.classify(packageName, deviceType, self),
+            steps = steps,
+            distance = distance,
+            calories = calories,
+            lastRecordAt = lastRecordAt,
+            isSelf = isSelf
+        )
+    }
+
+    // ---- writes ----------------------------------------------------------
+
+    /**
      * Upserts one day. Returns false when the client is missing, permissions
      * were revoked, or the provider rejected the write.
      */
     suspend fun writeDay(totals: DayTotals): Boolean {
         val hc = client() ?: return false
         if (totals.steps <= 0) return true
-        if (!hasAllPermissions()) return false
+        if (!canWrite()) return false
 
         val zone = ZoneId.systemDefault()
         val start = DateKeys.startOfDayInstant(totals.date)
@@ -182,19 +412,114 @@ class HealthConnectManager(
         return runCatching { hc.insertRecords(records); true }.getOrDefault(false)
     }
 
+    // ---- intents ---------------------------------------------------------
+
     fun settingsIntent(): Intent =
         Intent(HealthConnectClient.ACTION_HEALTH_CONNECT_SETTINGS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
+    /**
+     * Play Store deep link that installs or updates the provider. The
+     * `healthConnectOnboarding` referrer is what makes Health Connect run its
+     * setup flow straight after the install rather than dropping the user on a
+     * blank app.
+     */
+    fun installIntent(): Intent {
+        val uri = Uri.parse(
+            "market://details" +
+                "?id=${StepSourceCatalog.PROVIDER_PACKAGE}" +
+                "&url=healthconnect%3A%2F%2Fonboarding"
+        )
+        val market = Intent(Intent.ACTION_VIEW, uri)
+            .setPackage("com.android.vending")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra("overlay", true)
+            .putExtra("callerId", context.packageName)
+        if (market.resolveActivity(context.packageManager) != null) return market
+        return Intent(
+            Intent.ACTION_VIEW,
+            Uri.parse(
+                "https://play.google.com/store/apps/details" +
+                    "?id=${StepSourceCatalog.PROVIDER_PACKAGE}"
+            )
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /**
+     * Companion apps installed on this phone that are known to publish wearable
+     * data. Useful before any Health Connect data exists: it lets an onboarding
+     * screen say "we found Galaxy Wearable" rather than asking blind.
+     */
+    fun installedCompanionApps(): List<Map<String, Any?>> {
+        val pm = context.packageManager
+        return StepSourceCatalog.COMPANION_PACKAGES.mapNotNull { pkg ->
+            val installed = runCatching {
+                pm.getPackageInfo(pkg, 0); true
+            }.getOrDefault(false)
+            if (!installed) return@mapNotNull null
+            mapOf(
+                "packageName" to pkg,
+                "appName" to StepSourceCatalog.appName(pkg),
+                "kind" to StepSourceCatalog.classify(pkg, null, context.packageName).jsValue
+            )
+        }
+    }
+
     companion object {
-        val PERMISSIONS: Set<String> = setOf(
+        /** Health Connect stops showing the sheet after this many refusals. */
+        const val MAX_PROMPTS = 2
+
+        private const val PAGE_SIZE = 1_000
+        private const val MAX_PAGES = 50
+
+        val READ_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),
-            HealthPermission.getWritePermission(StepsRecord::class),
             HealthPermission.getReadPermission(DistanceRecord::class),
+            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class)
+        )
+
+        val WRITE_PERMISSIONS: Set<String> = setOf(
+            HealthPermission.getWritePermission(StepsRecord::class),
             HealthPermission.getWritePermission(DistanceRecord::class),
-            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
             HealthPermission.getWritePermission(TotalCaloriesBurnedRecord::class)
         )
+
+        val REQUIRED: Set<String> = READ_PERMISSIONS + WRITE_PERMISSIONS
+
+        /**
+         * Reading while the app is in the background, added in Health Connect
+         * 1.1. Resolved reflectively so the package still builds and runs
+         * against the 1.0 client a consumer may have pinned through
+         * `ext.healthConnectVersion`.
+         */
+        val PERMISSION_BACKGROUND_READ: String? = constantOrNull(
+            "PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND"
+        )
+
+        /** Reading further back than 30 days. Also 1.1+. */
+        val PERMISSION_HISTORY_READ: String? = constantOrNull(
+            "PERMISSION_READ_HEALTH_DATA_HISTORY"
+        )
+
+        private fun constantOrNull(field: String): String? = runCatching {
+            HealthPermission::class.java.getDeclaredField(field).let {
+                it.isAccessible = true
+                it.get(null) as? String
+            }
+        }.getOrNull()
+
+        /** Everything this package may ever ask for. */
+        val ALL_PERMISSIONS: Set<String> = buildSet {
+            addAll(REQUIRED)
+            PERMISSION_BACKGROUND_READ?.let { add(it) }
+            PERMISSION_HISTORY_READ?.let { add(it) }
+        }
+
+        @Deprecated(
+            "Ambiguous once optional permissions existed.",
+            ReplaceWith("REQUIRED")
+        )
+        val PERMISSIONS: Set<String> get() = REQUIRED
 
         fun permissionContract() =
             PermissionController.createRequestPermissionResultContract()

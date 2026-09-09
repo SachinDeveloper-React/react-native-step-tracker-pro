@@ -46,11 +46,18 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun openManufacturerAutoStartSettings(promise: Promise)
 
     abstract fun getHealthConnectStatus(promise: Promise)
-    abstract fun requestHealthConnectPermissions(promise: Promise)
+    abstract fun requestHealthConnectPermissions(options: ReadableMap, promise: Promise)
     abstract fun openHealthConnectSettings(promise: Promise)
+    abstract fun installHealthConnect(promise: Promise)
+    abstract fun revokeHealthConnectPermissions(promise: Promise)
     abstract fun readHealthConnectSteps(startIso: String, endIso: String, promise: Promise)
     abstract fun writeHealthConnectSteps(date: String, promise: Promise)
     abstract fun syncWithHealthConnect(promise: Promise)
+
+    abstract fun getStepSources(startDate: String, endDate: String, promise: Promise)
+    abstract fun getCurrentStepSource(promise: Promise)
+    abstract fun setPreferredStepSource(packageName: String?, promise: Promise)
+    abstract fun getInstalledCompanionApps(promise: Promise)
 
     abstract fun getPendingSyncCount(promise: Promise)
     abstract fun syncNow(promise: Promise)

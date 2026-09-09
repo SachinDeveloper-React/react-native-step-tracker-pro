@@ -32,7 +32,7 @@ class HealthPermissionActivity : ComponentActivity() {
         // process restart the contract is already in flight and relaunching
         // would stack a second permission screen.
         if (savedInstanceState == null) {
-            runCatching { launcher.launch(HealthConnectManager.PERMISSIONS) }
+            runCatching { launcher.launch(requestedPermissions()) }
                 .onFailure {
                     Callbacks.deliver(emptySet())
                     finish()
@@ -40,12 +40,29 @@ class HealthPermissionActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The caller decides the set, so optional grants (background reads, history
+     * beyond 30 days) are only asked for by apps that opted into them. Health
+     * Connect shows one sheet for the whole set, so padding it with permissions
+     * the app does not need costs the ones it does.
+     */
+    private fun requestedPermissions(): Set<String> =
+        intent?.getStringArrayExtra(EXTRA_PERMISSIONS)
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+            ?: HealthConnectManager.REQUIRED
+
     override fun onDestroy() {
         super.onDestroy()
         // Guard against the activity being torn down before the contract
         // returns (e.g. the provider app was killed). isFinishing is false when
         // the system is only recreating us, where the result is still coming.
         if (isFinishing) Callbacks.deliverIfPending()
+    }
+
+    companion object {
+        /** `String[]` of Health Connect permission strings to request. */
+        const val EXTRA_PERMISSIONS = "com.steptrackerpro.extra.HEALTH_PERMISSIONS"
     }
 
     object Callbacks {

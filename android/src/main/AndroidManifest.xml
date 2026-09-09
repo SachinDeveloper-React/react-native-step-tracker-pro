@@ -32,6 +32,21 @@
     <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
     <uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
 
+    <!--
+      Optional Health Connect grants, only requested when the matching config
+      flag is on (healthConnectBackgroundRead / healthConnectHistoryRead).
+      Declaring one you never request is harmless; requesting one you have not
+      declared is silently dropped by the provider.
+
+      READ_HEALTH_DATA_IN_BACKGROUND lets a WorkManager sync read a watch's
+      steps while the app is closed. Without it every background read returns
+      empty, so a wearable-sourced widget goes stale until the user opens
+      the app.
+    -->
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
+    <!-- Reads older than 30 days. Needed for yearly stats off Health Connect. -->
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
+
     <uses-feature
         android:name="android.hardware.sensor.stepcounter"
         android:required="false" />
@@ -41,6 +56,40 @@
 
     <queries>
         <package android:name="com.google.android.apps.healthdata" />
+        <!-- Resolving the Play Store deep link that installs Health Connect. -->
+        <package android:name="com.android.vending" />
+        <!--
+          Companion apps surfaced by getInstalledCompanionApps(), so onboarding
+          can name the watch app the user already has instead of asking blind.
+          Package visibility is opt-in from Android 11, and an unlisted package
+          reads as not installed rather than failing loudly.
+        -->
+        <package android:name="com.google.android.wearable.app" />
+        <package android:name="com.google.android.apps.wearable.health" />
+        <package android:name="com.sec.android.app.shealth" />
+        <package android:name="com.samsung.android.app.watchmanager" />
+        <package android:name="com.samsung.android.wear.shealth" />
+        <package android:name="com.fitbit.FitbitMobile" />
+        <package android:name="com.garmin.android.apps.connectmobile" />
+        <package android:name="com.huawei.health" />
+        <package android:name="com.hihonor.health" />
+        <package android:name="com.mi.health" />
+        <package android:name="com.xiaomi.wearable" />
+        <package android:name="com.zepp.life" />
+        <package android:name="com.huami.midong" />
+        <package android:name="com.huami.watch.hmwatchmanager" />
+        <package android:name="com.heytap.health" />
+        <package android:name="com.oneplus.health.international" />
+        <package android:name="com.ouraring.oura" />
+        <package android:name="com.whoop.android" />
+        <package android:name="fi.polar.polarflow" />
+        <package android:name="com.stt.android.suunto" />
+        <package android:name="com.withings.wiscale2" />
+        <package android:name="com.yf.smart.coros.dist" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application>
@@ -74,5 +123,41 @@
             android:excludeFromRecents="true"
             android:launchMode="singleTop"
             android:theme="@style/StepTrackerPro.Transparent" />
+
+        <!--
+          Health Connect requires every app that requests health permissions to
+          answer "why do you want this?" with an activity, and Play review
+          rejects health apps that do not have one. It opens the
+          `privacyPolicyUrl` from config.
+
+          The two filters are not alternatives to pick between - a single APK
+          needs both. Android 14 folded Health Connect into the platform and
+          routes through the standard VIEW_PERMISSION_USAGE action, while
+          Android 13 and below go through the provider APK's own
+          androidx.health action.
+
+          To show your own screen instead, point these at your activity in the
+          app manifest with tools:node="replace"; see docs/INSTALLATION.md.
+        -->
+        <activity
+            android:name="com.steptrackerpro.health.HealthPrivacyPolicyActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:theme="@style/StepTrackerPro.Transparent">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity>
+
+        <activity-alias
+            android:name="com.steptrackerpro.health.ViewPermissionUsageActivity"
+            android:targetActivity="com.steptrackerpro.health.HealthPrivacyPolicyActivity"
+            android:exported="true"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
     </application>
 </manifest>

@@ -18,6 +18,10 @@ object StepEventBus {
         const val TRACKING_STATE_CHANGED = "trackingStateChanged"
         const val DAY_CHANGED = "dayChanged"
         const val SYNC_COMPLETED = "syncCompleted"
+        /** The app now counting for the user changed - watch on, watch off. */
+        const val STEP_SOURCE_CHANGED = "stepSourceChanged"
+        /** Health Connect was installed, updated, granted or revoked. */
+        const val HEALTH_CONNECT_STATUS_CHANGED = "healthConnectStatusChanged"
         const val ERROR = "error"
     }
 

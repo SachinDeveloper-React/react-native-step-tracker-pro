@@ -25,7 +25,8 @@ StepTracker.addListener("stepsChanged", (data) => console.log(data.steps));
 | Background     | Kotlin foreground service, `health` type, `START_STICKY`          |
 | Storage        | Room — `step_history` + `daily_summary`, 31–35 day retention      |
 | Reboot         | `BootReceiver` restarts the service and re-anchors the counter    |
-| Health Connect | read, write, historical read, idempotent sync                     |
+| Health Connect | availability, permissions, read, write, idempotent sync            |
+| Watches        | reads a paired watch through Health Connect and never double-counts |
 | Offline        | everything works with no network; remote sync is queued           |
 | Bridge         | Turbo Module with an old-architecture shim, full TypeScript types |
 
@@ -51,6 +52,8 @@ await StepTracker.initialize({
   historyRetentionDays: 31, // how much history to keep on device
   notificationTitle: "{steps} steps today",
   healthConnectEnabled: true,
+  privacyPolicyUrl: "https://example.com/privacy", // required for health permissions
+  stepSource: "auto", // phone sensor vs. a paired watch — see below
   remoteSyncUrl: "https://api.example.com/steps", // optional
 });
 ```
@@ -76,15 +79,20 @@ getStatsForRange(from, to)    getHistory(from, to)
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
 
-getHealthConnectStatus()      requestHealthConnectPermissions()
+getHealthConnectStatus()      enableHealthConnect()     requestHealthConnectPermissions()
+installHealthConnect()        openHealthConnectSettings()   revokeHealthConnectPermissions()
 readHealthConnectSteps(a, b)  writeHealthConnectSteps(date)   syncWithHealthConnect()
+
+getStepSources(from, to)      getCurrentStepSource()
+setPreferredStepSource(pkg)   getInstalledCompanionApps()
 
 syncNow()                     getPendingSyncCount()
 resetToday()                  clearHistory()            pruneHistory(days)
 ```
 
 Events: `stepsChanged`, `goalReached`, `goalProgressChanged`,
-`trackingStateChanged`, `dayChanged`, `syncCompleted`, `error`.
+`trackingStateChanged`, `dayChanged`, `syncCompleted`, `stepSourceChanged`,
+`healthConnectStatusChanged`, `error`.
 
 ```ts
 const sub = StepTracker.addListener("goalReached", ({ type, goal }) => {});
@@ -104,7 +112,46 @@ const { snapshot, state, start, pause, requestPermissions } = useStepTracker({
 });
 
 const { stats } = useStepStats("week");
+
+const { status, sources, enable, selectSource } = useHealthConnect();
 ```
+
+## Watches and Health Connect
+
+If the user walks with a watch, the phone's sensor is not the whole story — a
+phone on a desk counts nothing while a worn watch counts everything. Health
+Connect is how the watch's number gets to you.
+
+```ts
+await StepTracker.initialize({
+  privacyPolicyUrl: "https://example.com/privacy",
+  stepSource: "auto",
+});
+
+// Installs the provider, or asks for permissions, or opens settings —
+// whichever step the user is actually on.
+const status = await StepTracker.enableHealthConnect();
+```
+
+After that, `getTodaySteps()` and the stats calls already report the resolved
+number and carry a `stepSource` saying which app it came from.
+
+**Sources are never summed.** The same walk is recorded by both the watch and
+the phone, so adding them roughly doubles the count. Each policy picks one:
+
+| `stepSource` | Behaviour |
+| ------------ | --------- |
+| `"auto"` *(default)* | whichever of the phone and the best external source counted more that day |
+| `"device"` | phone sensor only — the pre-1.2 behaviour |
+| `"wearable"` | a watch, band or ring wins whenever one has data |
+| `"health_connect"` | the best external source wins, wearable or not |
+
+With no Health Connect grant, `"auto"` is exactly the phone's own sensor —
+resolution only engages once the user allows reads. Let the user choose a source
+explicitly with `getStepSources()` and `setPreferredStepSource()`.
+
+Permission handling, the install and settings fallbacks, and the full source
+API: [docs/API.md](docs/API.md#health-connect).
 
 ## How the count survives things
 
@@ -133,16 +180,25 @@ cd example && npm install && npm run android
 ## Testing
 
 ```sh
-cd android && ./gradlew :react-native-step-tracker-pro:connectedAndroidTest
+cd android
+./gradlew test                                          # JVM, no device needed
+./gradlew :react-native-step-tracker-pro:connectedAndroidTest
 ```
 
-Eleven instrumented tests cover the reboot, midnight, pause and counter-reset
-paths by feeding samples to the engine directly, so they run on an emulator with
-no step hardware. The device-level QA matrix — force-stop recovery, real reboot,
-Doze, Health Connect, OEM battery managers — is in
-[docs/TESTING.md](docs/TESTING.md).
+Fourteen JVM tests cover step-source resolution — chiefly that a phone and a
+watch are never added together. Eleven instrumented tests cover the reboot,
+midnight, pause and counter-reset paths by feeding samples to the engine
+directly, so they run on an emulator with no step hardware.
+
+The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
+Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
+
+## Changelog
+
+[CHANGELOG.md](CHANGELOG.md). Latest release **1.2.0** — Health Connect
+permission lifecycle, provider install/update handling, the Play-required
+privacy-policy screen, and step sources from a paired watch.
 
 ## Licence
 
 MIT
-# react-native-step-tracker-pro

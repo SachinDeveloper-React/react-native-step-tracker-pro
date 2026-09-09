@@ -36,7 +36,14 @@ Requirements:
   transmission off-device. Link it from both the Play listing and in-app.
 - The `ACTION_SHOW_PERMISSIONS_RATIONALE` intent filter and the
   `VIEW_PERMISSION_USAGE` activity alias. Missing these is the most common
-  rejection.
+  rejection. **The library declares both** and points them at a screen that
+  opens your `privacyPolicyUrl` — set that in `initialize()`, or override the
+  activity with your own (see
+  [INSTALLATION.md](INSTALLATION.md#health-connect-rationale-screen)).
+- The two optional permissions (`READ_HEALTH_DATA_IN_BACKGROUND`,
+  `READ_HEALTH_DATA_HISTORY`) are declared in the merged manifest even when the
+  config flags are off, so either justify them on the form or `tools:node="remove"`
+  them. Background reads in particular get extra scrutiny.
 - No advertising, no selling health data, and no sharing it with third parties
   for anything unrelated to the feature the user asked for.
 - Data deletion must be possible from inside your app. `clearHistory()` covers
@@ -46,19 +53,34 @@ Requirements:
 
 From Android 14 with SDK Extension 20 or higher, Health Connect records
 on-device steps by itself once any app holds `READ_STEPS`. If you also write
-steps, users can see the same walk twice in the Health Connect UI. Two sane
+steps, users can see the same walk twice in the Health Connect UI. Three
 options:
 
-- **Read-only** — leave `healthConnectEnabled: true` but never call the write
-  path. Use Health Connect as a source, your Room database as the record.
-- **Write with attribution** — keep writing. Records carry a stable
-  `clientRecordId` so re-syncing does not stack duplicates, but they still sit
+- **Read-only** — set `healthConnectWriteEnabled: false`. Reads keep working, so
+  a watch's data still reaches your UI, but nothing of yours is added to the
+  user's Health Connect record. The cleanest answer if another app already owns
+  step counting for this user.
+- **Write with attribution** — the default. Records carry a stable
+  `clientRecordId` so re-syncing does not stack duplicates, and days a wearable
+  already owns are skipped rather than written, but your records still sit
   alongside the platform's own entries.
+- **Off entirely** — `healthConnectEnabled: false`, and strip the health
+  permissions from your manifest. No declaration form at all.
 
 Pick one deliberately and say which in your privacy policy. Also note that as of
 the June 2026 Health Connect update, on-device steps are attributed to a
 device-specific synthetic package name rather than the generic `android` package,
-which changes how you filter by source.
+which changes how you filter by source — `getStepSources()` reports whatever
+package name the platform used, so a name you do not recognise there is expected
+rather than a bug.
+
+### On reporting a watch's steps as your own
+
+When a wearable owns the day, the number your UI shows was measured by hardware
+you did not write. That is fine and is what users expect, but say so: the
+`stepSource` object on every snapshot names the app the count came from, and
+surfacing that ("8,240 steps · from Fitbit") is both better UX and a cleaner
+story for review than presenting another app's measurement unattributed.
 
 ## 3. Battery optimisation exemption
 

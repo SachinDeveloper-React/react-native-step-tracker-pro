@@ -93,6 +93,36 @@ class StepStateStore(context: Context) {
         return next
     }
 
+    /**
+     * How many times the Health Connect permission sheet has been shown without
+     * the user granting anything.
+     *
+     * Health Connect stops showing the sheet after two refusals for a given
+     * permission set and simply returns the current (empty) grant, so a third
+     * `requestHealthConnectPermissions()` looks identical to an instant denial.
+     * Tracking the count is the only way to tell the two apart and send the
+     * user to Health Connect's own settings instead of re-prompting into a
+     * dialog that will never appear.
+     */
+    var healthPermissionDenials: Int
+        get() = prefs.getInt(KEY_HC_DENIALS, 0)
+        set(value) = prefs.edit().putInt(KEY_HC_DENIALS, value.coerceAtLeast(0)).apply()
+
+    /** Cleared as soon as anything is granted, so a later revoke starts over. */
+    fun recordHealthPermissionResult(granted: Boolean) {
+        healthPermissionDenials = if (granted) 0 else healthPermissionDenials + 1
+    }
+
+    /** Package name of the origin the user pinned as their step source. */
+    var preferredStepSource: String?
+        get() = prefs.getString(KEY_PREFERRED_SOURCE, null)?.takeIf { it.isNotEmpty() }
+        set(value) = prefs.edit().putString(KEY_PREFERRED_SOURCE, value ?: "").apply()
+
+    /** Last resolved source, used to fire `stepSourceChanged` only on a flip. */
+    var lastResolvedSource: String?
+        get() = prefs.getString(KEY_LAST_RESOLVED_SOURCE, null)?.takeIf { it.isNotEmpty() }
+        set(value) = prefs.edit().putString(KEY_LAST_RESOLVED_SOURCE, value ?: "").apply()
+
     /** One atomic write for the hot path, instead of six separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -133,5 +163,8 @@ class StepStateStore(context: Context) {
         private const val KEY_AUTO_START = "should_auto_start"
         private const val KEY_LAST_HC_SYNC = "last_hc_sync_at"
         private const val KEY_HC_VERSION = "hc_record_version"
+        private const val KEY_HC_DENIALS = "hc_permission_denials"
+        private const val KEY_PREFERRED_SOURCE = "preferred_step_source"
+        private const val KEY_LAST_RESOLVED_SOURCE = "last_resolved_step_source"
     }
 }

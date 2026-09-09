@@ -63,12 +63,67 @@ first thing, so the delay is upstream.
 
 ## Health Connect permission sheet never opens
 
-- `getHealthConnectStatus().available` is false → the provider is not installed
-  (Android 13 and below) or needs an update (`requiresUpdate`).
-- The user permanently denied. The sheet will not reappear; use
-  `openHealthConnectSettings()`.
-- Your app manifest is missing the rationale intent filter. Health Connect
-  refuses to show the sheet without it.
+Check `getHealthConnectStatus()` first — it names the cause:
+
+| Field | Meaning | Fix |
+|---|---|---|
+| `availability: 'not_installed'` | no provider (Android 13 and below) | `installHealthConnect()` |
+| `availability: 'update_required'` | provider too old | `installHealthConnect()` |
+| `availability: 'not_supported'` | device cannot run it | nothing to offer; hide the feature |
+| `shouldOpenSettings: true` | refused twice, so the sheet no longer shows | `openHealthConnectSettings()` |
+
+`enableHealthConnect()` picks the right one of these for you.
+
+The two-refusal limit is the one that looks like a bug: the third
+`requestHealthConnectPermissions()` resolves normally, with the same unchanged
+status, and nothing appears on screen. That is the provider, not this package —
+`denialCount` and `shouldOpenSettings` are there to tell it apart from an
+instant denial.
+
+A missing rationale intent filter also stops the sheet. The library declares it
+and points it at your `privacyPolicyUrl`; if you replaced it with your own
+activity, confirm both the `androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE`
+filter and the `VIEW_PERMISSION_USAGE` alias resolve:
+
+```sh
+adb shell dumpsys package <applicationId> | grep -A3 PERMISSIONS_RATIONALE
+```
+
+## Steps are roughly double what the user walked
+
+Something is summing two sources. This package never does — every `stepSource`
+policy picks exactly one origin per day — so the doubling is almost always
+outside it:
+
+- Your own UI adding `getTodaySteps()` to a Health Connect read. Use one or the
+  other; `getTodaySteps()` already includes the watch under `'auto'`.
+- Adding up `getStepSources()` entries. Those are per-origin totals of the *same*
+  walk, not slices of it. `getCurrentStepSource()` gives the number to show.
+
+## The watch's steps never show up
+
+- `getHealthConnectStatus().canRead` must be true. Write-only grants are enough
+  to mirror your steps but not to see anyone else's.
+- `stepSource: 'device'` reads nothing back by design. Use `'auto'` or
+  `'wearable'`.
+- The companion app has to have synced. Garmin, Fitbit and Zepp upload in
+  batches, so a walk finished five minutes ago may not be in Health Connect yet.
+  `getStepSources()` reports `lastRecordAt` per source.
+- Under `'auto'` the watch only wins when it counted more. Check `deviceSteps`
+  vs `externalSteps` on `getCurrentStepSource()`; if the watch is lower and you
+  still want it, use `'wearable'` or pin it with `setPreferredStepSource()`.
+- Background syncs return empty without `healthConnectBackgroundRead: true`.
+
+## A source shows as `kind: 'unknown'`
+
+`kind` is read from the `Device` the writing app stamped on its records, with a
+package-name catalog as a fallback. Apps that stamp nothing and are not in the
+catalog land on `'unknown'` — they still work as sources and can still be pinned,
+they just cannot be told apart from a phone-side app automatically, so `'wearable'`
+will not select them. Pin them explicitly with `setPreferredStepSource()`.
+
+The same applies to on-device steps recorded by the platform itself on Android
+14+, which are attributed to a device-specific synthetic package name.
 
 ## Events fire in dev but not after a JS reload
 

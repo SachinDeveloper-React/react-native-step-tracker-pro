@@ -47,6 +47,10 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var listenerCount = 0
 
+    /** Last Health Connect status seen, so onHostResume only emits on a change. */
+    @Volatile
+    private var lastHealthFingerprint: String? = null
+
     private val subscriber = StepEventBus.Subscriber { name, payload -> emit(name, payload) }
 
     init {
@@ -63,7 +67,34 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         super.invalidate()
     }
 
-    override fun onHostResume() = Unit
+    /**
+     * Health Connect grants can be revoked from outside the app, and the
+     * provider can be installed or updated while the app is backgrounded.
+     * Nothing notifies us, so the status is re-read on every foreground and an
+     * event fires when it moved - which is also how a UI learns that the watch
+     * the user just paired now has data to offer.
+     */
+    override fun onHostResume() {
+        scope.launch {
+            runCatching {
+                val config = core.config()
+                if (!config.healthConnectEnabled) return@runCatching
+                val status = core.healthConnect.status(
+                    backgroundRead = config.healthConnectBackgroundRead,
+                    historyRead = config.healthConnectHistoryRead
+                )
+                val fingerprint = "${status["availability"]}|${status["granted"]}|" +
+                    "${status["canRead"]}|${status["canWrite"]}"
+                if (fingerprint != lastHealthFingerprint) {
+                    lastHealthFingerprint = fingerprint
+                    StepEventBus.emit(
+                        StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED, status
+                    )
+                }
+            }
+        }
+    }
+
     override fun onHostPause() = Unit
     override fun onHostDestroy() = Unit
 
@@ -199,30 +230,40 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     // ---- reads -----------------------------------------------------------
 
+    /**
+     * Reads go through [StepTrackerCore.resolveToday] rather than the engine
+     * directly, so a watch that counted more than this phone is what the user
+     * sees. Under the default `auto` policy with no Health Connect grant this
+     * is exactly the engine snapshot, so nothing changes for an app that never
+     * touches Health Connect.
+     */
     @ReactMethod
     override fun getTodaySteps(promise: Promise) {
-        runSafely(promise) {
+        launchSafely(promise) {
             core.engine.reconcile()
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            val resolution = core.resolveToday()
+            promise.resolve(Bridge.snapshot(core.engine.snapshot(), resolution))
         }
     }
 
     @ReactMethod
     override fun getStepsForDate(date: String, promise: Promise) {
-        launchSafely(promise) { promise.resolve(Bridge.day(core.dayTotals(date))) }
+        launchSafely(promise) {
+            promise.resolve(Bridge.resolvedDay(core.resolveDay(date)))
+        }
     }
 
     @ReactMethod
     override fun getYesterdaySteps(promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(Bridge.day(core.repository.getDay(DateKeys.yesterday())))
+            promise.resolve(Bridge.resolvedDay(core.resolveDay(DateKeys.yesterday())))
         }
     }
 
     @ReactMethod
     override fun getStatsForRange(startDate: String, endDate: String, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(Bridge.stats(core.stats(startDate, endDate, null)))
+            promise.resolve(Bridge.stats(core.resolvedStats(startDate, endDate, null)))
         }
     }
 
@@ -230,7 +271,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun getWeeklyStats(options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
             val (start, end) = window(options, 7) { offset -> DateKeys.calendarWeek(offset) }
-            promise.resolve(Bridge.stats(core.stats(start, end, core.config().weeklyGoal)))
+            promise.resolve(
+                Bridge.stats(core.resolvedStats(start, end, core.config().weeklyGoal))
+            )
         }
     }
 
@@ -238,7 +281,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun getMonthlyStats(options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
             val (start, end) = window(options, 30) { offset -> DateKeys.calendarMonth(offset) }
-            promise.resolve(Bridge.stats(core.stats(start, end, core.config().monthlyGoal)))
+            promise.resolve(
+                Bridge.stats(core.resolvedStats(start, end, core.config().monthlyGoal))
+            )
         }
     }
 
@@ -246,7 +291,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun getYearlyStats(options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
             val (start, end) = window(options, 365) { offset -> DateKeys.calendarYear(offset) }
-            promise.resolve(Bridge.stats(core.stats(start, end, null)))
+            promise.resolve(Bridge.stats(core.resolvedStats(start, end, null)))
         }
     }
 
@@ -375,17 +420,41 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun getHealthConnectStatus(promise: Promise) {
-        launchSafely(promise) { promise.resolve(Bridge.map(core.healthConnect.status())) }
+        launchSafely(promise) {
+            val config = core.config()
+            promise.resolve(
+                Bridge.map(
+                    core.healthConnect.status(
+                        backgroundRead = config.healthConnectBackgroundRead,
+                        historyRead = config.healthConnectHistoryRead
+                    )
+                )
+            )
+        }
     }
 
+    /**
+     * Opens the Health Connect permission sheet.
+     *
+     * Resolves with the post-request status rather than rejecting on a denial:
+     * "the user said no" is a normal outcome an app has to render, not an
+     * error. Only conditions the user cannot act on from here - no provider, no
+     * activity - reject.
+     */
     @ReactMethod
-    override fun requestHealthConnectPermissions(promise: Promise) {
+    override fun requestHealthConnectPermissions(options: ReadableMap, promise: Promise) {
         val availability = core.healthConnect.availability()
         if (availability != HealthConnectManager.Availability.AVAILABLE) {
-            promise.reject(
-                "E_HEALTH_CONNECT_UNAVAILABLE",
-                "Health Connect is not available on this device"
-            )
+            // Distinguishing these lets the caller offer the install button
+            // instead of a dead end. See installHealthConnect().
+            val code = when (availability) {
+                HealthConnectManager.Availability.NOT_INSTALLED ->
+                    "E_HEALTH_CONNECT_NOT_INSTALLED"
+                HealthConnectManager.Availability.UPDATE_REQUIRED ->
+                    "E_HEALTH_CONNECT_UPDATE_REQUIRED"
+                else -> "E_HEALTH_CONNECT_UNAVAILABLE"
+            }
+            promise.reject(code, "Health Connect is ${availability.jsValue} on this device")
             return
         }
         val activity: Activity? = getCurrentActivity()
@@ -393,6 +462,17 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             promise.reject("E_NO_ACTIVITY", "No foreground activity to launch the request from")
             return
         }
+
+        val config = core.config()
+        val permissions = core.healthConnect.permissionsFor(
+            backgroundRead = options.optBoolean(
+                "backgroundRead", config.healthConnectBackgroundRead
+            ),
+            historyRead = options.optBoolean(
+                "historyRead", config.healthConnectHistoryRead
+            )
+        )
+
         // The callback is registered only after the launch succeeds. Registering
         // first left it armed when startActivity threw: the promise was rejected
         // here and then resolved again by the next request's result, which
@@ -402,13 +482,30 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         runCatching {
             activity.startActivity(
                 Intent(activity, HealthPermissionActivity::class.java)
+                    .putExtra(
+                        HealthPermissionActivity.EXTRA_PERMISSIONS,
+                        permissions.toTypedArray()
+                    )
                     .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
             )
         }.onSuccess {
-            HealthPermissionActivity.Callbacks.await { _ ->
+            HealthPermissionActivity.Callbacks.await { granted ->
                 if (settled.compareAndSet(false, true)) {
                     scope.launch {
-                        runCatching { promise.resolve(Bridge.map(core.healthConnect.status())) }
+                        // Counting refusals is what lets a later call tell
+                        // "denied just now" from "the sheet no longer opens",
+                        // which Health Connect reports identically.
+                        core.state.recordHealthPermissionResult(
+                            granted.containsAll(HealthConnectManager.REQUIRED)
+                        )
+                        val status = core.healthConnect.status(
+                            backgroundRead = config.healthConnectBackgroundRead,
+                            historyRead = config.healthConnectHistoryRead
+                        )
+                        StepEventBus.emit(
+                            StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED, status
+                        )
+                        runCatching { promise.resolve(Bridge.map(status)) }
                     }
                 }
             }
@@ -426,6 +523,40 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 reactContext.startActivity(core.healthConnect.settingsIntent())
                 promise.resolve(true)
             }.onFailure { promise.resolve(false) }
+        }
+    }
+
+    /**
+     * Sends the user to the Play Store listing for Health Connect. The right
+     * response to `availability: 'not_installed'` or `'update_required'`.
+     */
+    @ReactMethod
+    override fun installHealthConnect(promise: Promise) {
+        runSafely(promise) {
+            runCatching {
+                (getCurrentActivity() ?: reactContext)
+                    .startActivity(core.healthConnect.installIntent())
+                promise.resolve(true)
+            }.onFailure { promise.resolve(false) }
+        }
+    }
+
+    /**
+     * Drops every grant this app holds. Also clears the refusal counter, so the
+     * next request starts from a clean sheet rather than being told to go to
+     * settings straight away.
+     */
+    @ReactMethod
+    override fun revokeHealthConnectPermissions(promise: Promise) {
+        launchSafely(promise) {
+            val revoked = core.healthConnect.revokeAll()
+            if (revoked) {
+                StepEventBus.emit(
+                    StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED,
+                    core.healthConnect.status()
+                )
+            }
+            promise.resolve(revoked)
         }
     }
 
@@ -466,6 +597,73 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun syncWithHealthConnect(promise: Promise) {
         launchSafely(promise) { promise.resolve(Bridge.map(core.syncHealthConnect())) }
+    }
+
+    // ---- step sources ----------------------------------------------------
+
+    /**
+     * Every app that published steps in the window, with the totals each one
+     * contributed and whether it counted on the body or in a pocket.
+     *
+     * These do not sum to a day's step count - two of them covering the same
+     * walk each report all of it. Use it to let the user pick a source, not to
+     * add up.
+     */
+    @ReactMethod
+    override fun getStepSources(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            val sources = core.listSources(startDate, endDate)
+            promise.resolve(
+                Bridge.map(
+                    mapOf(
+                        "sources" to sources.map { it.toMap() },
+                        "hasWearable" to sources.any { !it.isSelf && it.isWearable }
+                    )
+                )
+            )
+        }
+    }
+
+    /** Which source is answering for today, and what the alternatives counted. */
+    @ReactMethod
+    override fun getCurrentStepSource(promise: Promise) {
+        launchSafely(promise) {
+            val resolution = core.resolveDay(DateKeys.today())
+            promise.resolve(
+                Bridge.map(
+                    resolution.toMap() + mapOf(
+                        "policy" to core.sourcePolicy().jsValue,
+                        "preferredPackage" to core.preferredSourcePackage()
+                    )
+                )
+            )
+        }
+    }
+
+    /**
+     * Pins one origin as the source of truth, or clears the pin with `null`.
+     * Stored outside config so a user's choice survives an `initialize()` that
+     * does not mention it.
+     */
+    @ReactMethod
+    override fun setPreferredStepSource(packageName: String?, promise: Promise) {
+        launchSafely(promise) {
+            core.setPreferredSourcePackage(packageName?.takeIf { it.isNotBlank() })
+            promise.resolve(Bridge.map(core.resolveToday().toMap()))
+        }
+    }
+
+    /**
+     * Wearable companion apps present on this phone, for an onboarding screen
+     * that wants to say "we found Galaxy Wearable" before any data exists.
+     */
+    @ReactMethod
+    override fun getInstalledCompanionApps(promise: Promise) {
+        runSafely(promise) {
+            promise.resolve(
+                Bridge.map(mapOf("apps" to core.healthConnect.installedCompanionApps()))
+            )
+        }
     }
 
     // ---- sync ------------------------------------------------------------
@@ -564,6 +762,20 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectSyncIntervalMinutes = patch.optInt(
                 "healthConnectSyncIntervalMinutes", current.healthConnectSyncIntervalMinutes
             ),
+            healthConnectWriteEnabled = patch.optBoolean(
+                "healthConnectWriteEnabled", current.healthConnectWriteEnabled
+            ),
+            healthConnectBackgroundRead = patch.optBoolean(
+                "healthConnectBackgroundRead", current.healthConnectBackgroundRead
+            ),
+            healthConnectHistoryRead = patch.optBoolean(
+                "healthConnectHistoryRead", current.healthConnectHistoryRead
+            ),
+            stepSource = patch.optString("stepSource", current.stepSource) ?: current.stepSource,
+            preferredStepSourcePackage = patch.optString(
+                "preferredStepSourcePackage", current.preferredStepSourcePackage
+            ),
+            privacyPolicyUrl = patch.optString("privacyPolicyUrl", current.privacyPolicyUrl),
             remoteSyncUrl = patch.optString("remoteSyncUrl", current.remoteSyncUrl),
             remoteSyncHeaders = if (patch.hasKey("remoteSyncHeaders")) {
                 Bridge.stringMap(patch.getMap("remoteSyncHeaders"))
@@ -586,6 +798,12 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "notificationActions" to config.notificationActions,
         "healthConnectEnabled" to config.healthConnectEnabled,
         "healthConnectSyncIntervalMinutes" to config.healthConnectSyncIntervalMinutes,
+        "healthConnectWriteEnabled" to config.healthConnectWriteEnabled,
+        "healthConnectBackgroundRead" to config.healthConnectBackgroundRead,
+        "healthConnectHistoryRead" to config.healthConnectHistoryRead,
+        "stepSource" to config.stepSource,
+        "preferredStepSourcePackage" to config.preferredStepSourcePackage,
+        "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
         "autoStartOnBoot" to config.autoStartOnBoot
     )

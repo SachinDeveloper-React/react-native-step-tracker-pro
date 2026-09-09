@@ -9,6 +9,7 @@ import com.facebook.react.bridge.WritableMap
 import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.RangeStats
 import com.steptrackerpro.core.StepSnapshot
+import com.steptrackerpro.health.StepSourceResolver
 
 /** Conversions between package models and the React Native bridge. */
 object Bridge {
@@ -26,6 +27,44 @@ object Bridge {
         putDouble("timestamp", snapshot.timestamp.toDouble())
     }
 
+    /**
+     * The snapshot as JS sees it once a Health Connect source has been picked.
+     *
+     * `state` and `source` still describe this device's sensor even when the
+     * numbers came from a watch: they answer "is the foreground service
+     * running", which stays a real and separate question. Where the count came
+     * from is in `stepSource`.
+     */
+    fun snapshot(
+        live: StepSnapshot,
+        resolution: StepSourceResolver.Resolution
+    ): WritableMap = snapshot(live).apply {
+        if (!resolution.usedExternal) {
+            putMap("stepSource", map(resolution.toMap()))
+            return@apply
+        }
+        val totals = resolution.totals
+        putInt("steps", totals.steps)
+        putDouble("distance", round(totals.distance, 2))
+        putDouble("calories", round(totals.calories, 2))
+        // Goal progress has to follow the number being displayed, or a user on
+        // 12,000 watch steps sees a half-full ring driven by the phone's 5,000.
+        val goal = live.dailyGoal
+        val progress = if (goal > 0) {
+            (totals.steps.toDouble() / goal).coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        putDouble("goalProgress", round(progress, 4))
+        putBoolean("goalReached", goal > 0 && totals.steps >= goal)
+        putMap("stepSource", map(resolution.toMap()))
+    }
+
+    fun resolvedDay(resolution: StepSourceResolver.Resolution): WritableMap =
+        day(resolution.totals).apply {
+            putMap("stepSource", map(resolution.toMap()))
+        }
+
     fun snapshotMap(snapshot: StepSnapshot): Map<String, Any?> = mapOf(
         "date" to snapshot.date,
         "steps" to snapshot.steps,
@@ -37,6 +76,13 @@ object Bridge {
         "state" to snapshot.state.jsValue,
         "source" to snapshot.source.jsValue,
         "timestamp" to snapshot.timestamp
+    )
+
+    fun snapshotMap(
+        snapshot: StepSnapshot,
+        resolution: StepSourceResolver.Resolution
+    ): Map<String, Any?> = snapshotMap(snapshot) + mapOf(
+        "stepSource" to resolution.toMap()
     )
 
     fun day(totals: DayTotals): WritableMap = Arguments.createMap().apply {
