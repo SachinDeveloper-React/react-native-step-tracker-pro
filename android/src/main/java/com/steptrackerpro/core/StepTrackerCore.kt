@@ -3,13 +3,17 @@ package com.steptrackerpro.core
 import android.content.Context
 import com.steptrackerpro.db.StepRepository
 import com.steptrackerpro.health.HealthConnectManager
+import com.steptrackerpro.health.StepContinuity
 import com.steptrackerpro.health.StepSource
+import com.steptrackerpro.health.StepSourceKind
 import com.steptrackerpro.health.StepSourcePolicy
 import com.steptrackerpro.health.StepSourceResolver
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.StepEventBus
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -27,6 +31,16 @@ class StepTrackerCore private constructor(context: Context) {
     private val appContext: Context = context.applicationContext
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Every write to the day tables goes through one lane, in submission
+     * order. The engine can hand out a rollover and a backfill for the same
+     * day within one sample, and two IO coroutines racing on that row would
+     * let whichever ran second decide the total.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val writeLane: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
+
     val configStore = ConfigStore(appContext)
     val state = StepStateStore(appContext)
     val metrics = MetricsCalculator(configStore.get())
@@ -36,22 +50,92 @@ class StepTrackerCore private constructor(context: Context) {
 
     val engine = StepCounterEngine(state, metrics).apply {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
+        onBackfill = { shares -> handleBackfill(shares) }
+        gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
     }
 
     private val lastEventAt = AtomicLong(0L)
+    private val lastSourceRefreshAt = AtomicLong(0L)
     private val syncMutex = Mutex()
     private val sourceCache = SourceCache()
 
     fun config(): StepTrackerConfig = configStore.get()
 
     fun updateConfig(config: StepTrackerConfig): StepTrackerConfig {
+        val previous = configStore.get()
         val saved = configStore.save(config)
         metrics.config = saved
+        engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
+        // A different policy or pin changes what the baseline means, so it is
+        // taken again from the next read rather than carried across.
+        if (previous.stepSource != saved.stepSource ||
+            previous.preferredStepSourcePackage != saved.preferredStepSourcePackage ||
+            previous.healthConnectEnabled != saved.healthConnectEnabled ||
+            previous.healthConnectReadEnabled != saved.healthConnectReadEnabled
+        ) {
+            state.clearContinuity()
+            sourceCache.invalidate()
+        }
         SyncScheduler.schedule(appContext, saved)
         return saved
     }
 
     fun isInitialized(): Boolean = configStore.isInitialized()
+
+    /** The Health Connect grants this app needs, as configured. */
+    fun permissionScope(
+        backgroundRead: Boolean? = null,
+        historyRead: Boolean? = null
+    ): HealthConnectManager.PermissionScope {
+        val config = config()
+        return HealthConnectManager.PermissionScope(
+            read = config.healthConnectReadEnabled,
+            write = config.healthConnectWriteEnabled,
+            backgroundRead = backgroundRead ?: config.healthConnectBackgroundRead,
+            historyRead = historyRead ?: config.healthConnectHistoryRead
+        )
+    }
+
+    /**
+     * Whether the user has tracking on - started, never stopped, and not
+     * refused by the hardware. A paused tracker counts: its service is meant
+     * to be alive, showing the paused notification with its Resume button.
+     */
+    fun shouldBeRunning(): Boolean =
+        state.shouldAutoStart && state.trackingState != TrackingState.UNSUPPORTED
+
+    /**
+     * Whether the tracker is supposed to be alive right now but has no
+     * service behind it - the shape of an OEM kill. The service, the workers
+     * and the React module all live in one process, so
+     * [com.steptrackerpro.service.StepTrackerService.isAlive] is definitive:
+     * a SIGKILL takes the flag with the process, and nothing else clears it
+     * but `onDestroy`. The heartbeat is reported for diagnostics, not used
+     * to decide this.
+     */
+    fun serviceLooksDead(): Boolean =
+        shouldBeRunning() && !com.steptrackerpro.service.StepTrackerService.isAlive
+
+    /** Everything a "is tracking actually working?" screen needs. */
+    fun trackingHealth(): Map<String, Any?> {
+        val now = System.currentTimeMillis()
+        val beat = state.lastHeartbeatAt
+        return mapOf(
+            "serviceAlive" to com.steptrackerpro.service.StepTrackerService.isAlive,
+            "shouldBeRunning" to shouldBeRunning(),
+            "lastHeartbeatAt" to beat,
+            "heartbeatAgeMs" to (if (beat > 0L) now - beat else -1L),
+            "lastSensorEventAt" to state.lastEventAt,
+            "lastRecoveryAt" to state.lastRecoveryAt,
+            "lastRecoveryReason" to state.lastRecoveryReason,
+            "recoveryCount" to state.recoveryCount,
+            "looksDead" to serviceLooksDead(),
+            "batteryOptimizationEnabled" to
+                com.steptrackerpro.util.BatteryOptimizationHelper.isOptimizationEnabled(appContext),
+            "aggressiveOem" to com.steptrackerpro.util.BatteryOptimizationHelper.isAggressiveOem(),
+            "manufacturer" to android.os.Build.MANUFACTURER
+        )
+    }
 
     // ---- step pipeline ---------------------------------------------------
 
@@ -62,48 +146,50 @@ class StepTrackerCore private constructor(context: Context) {
      */
     fun onStepsChanged(snapshot: StepSnapshot, force: Boolean = false) {
         val config = config()
+        state.lastHeartbeatAt = System.currentTimeMillis()
+
+        val resolution = resolveFromCache(
+            DayTotals(snapshot.date, snapshot.steps, snapshot.distance, snapshot.calories)
+        )
+        val shown = displaySnapshot(snapshot, resolution)
 
         val now = System.currentTimeMillis()
         val previous = lastEventAt.get()
         if (force || now - previous >= config.eventThrottleMs) {
             lastEventAt.set(now)
-            val resolution = resolveFromCache(
-                DayTotals(snapshot.date, snapshot.steps, snapshot.distance, snapshot.calories)
-            )
             StepEventBus.emit(
                 StepEventBus.Events.STEPS_CHANGED,
-                com.steptrackerpro.util.Bridge.snapshotMap(
-                    if (resolution.usedExternal) displaySnapshot(snapshot) else snapshot,
-                    resolution
-                )
+                com.steptrackerpro.util.Bridge.snapshotMap(shown, resolution)
             )
         }
 
-        // Goals stay keyed off this device's own count. A wearable's total
-        // arrives in jumps whenever its companion app syncs, and firing
-        // "goal reached" off a number that can also move backwards between
-        // syncs would let the notification fire twice for one day.
-        val percent = metrics.goalPercent(snapshot.steps, config.dailyGoal)
+        // Goals follow the number on screen. Under `auto` that number is
+        // monotonic for the day (see StepContinuity), and GoalTracker fires
+        // each goal once per period regardless, so a wearable total that
+        // arrives in jumps cannot make a goal fire twice.
+        val percent = metrics.goalPercent(shown.steps, config.dailyGoal)
         if (goals.progressBucketChanged(GoalTracker.TYPE_DAILY, percent)) {
             StepEventBus.emit(
                 StepEventBus.Events.GOAL_PROGRESS_CHANGED,
                 mapOf(
                     "type" to GoalTracker.TYPE_DAILY,
                     "goal" to config.dailyGoal,
-                    "steps" to snapshot.steps,
-                    "progress" to snapshot.goalProgress,
-                    "date" to snapshot.date
+                    "steps" to shown.steps,
+                    "progress" to shown.goalProgress,
+                    "date" to shown.date
                 )
             )
         }
 
-        goals.checkDaily(snapshot.date, snapshot.steps, config.dailyGoal)?.let { reached ->
-            emitGoalReached(reached, snapshot.date)
+        goals.checkDaily(shown.date, shown.steps, config.dailyGoal)?.let { reached ->
+            emitGoalReached(reached, shown.date)
         }
+
+        refreshTodaySourcesIfStale()
 
         if (force || engine.shouldCommit(config.persistEveryNSteps)) {
             val totals = engine.consumeCommit()
-            scope.launch {
+            scope.launch(writeLane) {
                 repository.saveDay(totals)
                 checkPeriodGoals(totals)
             }
@@ -147,9 +233,28 @@ class StepTrackerCore private constructor(context: Context) {
         }
     }
 
+    /**
+     * Steps the engine recovered for days other than the active one - the part
+     * of an overnight gap that fell before midnight. Added on top of whatever
+     * those days already have, then re-queued for sync.
+     */
+    private fun handleBackfill(shares: Map<String, Int>) {
+        val retention = config().historyRetentionDays
+        val cutoff = DateKeys.minusDays(DateKeys.today(), retention)
+        scope.launch(writeLane) {
+            shares.forEach { (date, steps) ->
+                if (date < cutoff || steps <= 0) return@forEach
+                repository.addToDay(date, steps, metrics)
+            }
+            sourceCache.invalidate()
+        }
+    }
+
     /** Persists the closing day, tells JS, and trims history past retention. */
     private fun handleRollover(closing: DayTotals, newDate: String) {
-        scope.launch {
+        state.clearContinuity()
+        sourceCache.invalidate()
+        scope.launch(writeLane) {
             repository.saveDay(closing)
             // The local date can also move backwards - travelling west across
             // the date line - in which case the day being adopted is one that
@@ -174,7 +279,7 @@ class StepTrackerCore private constructor(context: Context) {
     /** Writes whatever is in memory to the database. Called before shutdown. */
     fun flush(): DayTotals {
         val totals = engine.consumeCommit()
-        scope.launch { repository.saveDay(totals) }
+        scope.launch(writeLane) { repository.saveDay(totals) }
         return totals
     }
 
@@ -223,6 +328,7 @@ class StepTrackerCore private constructor(context: Context) {
 
     fun setPreferredSourcePackage(packageName: String?) {
         state.preferredStepSource = packageName
+        state.clearContinuity()
         sourceCache.invalidate()
     }
 
@@ -233,7 +339,7 @@ class StepTrackerCore private constructor(context: Context) {
      */
     private suspend fun shouldConsultHealthConnect(): Boolean {
         val config = config()
-        if (!config.healthConnectEnabled) return false
+        if (!config.healthConnectEnabled || !config.healthConnectReadEnabled) return false
         if (sourcePolicy() == StepSourcePolicy.DEVICE) return false
         if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return false
         return healthConnect.canRead()
@@ -253,13 +359,71 @@ class StepTrackerCore private constructor(context: Context) {
                 StepSourcePolicy.DEVICE, device, emptyList(), null, metrics
             )
         }
-        return StepSourceResolver.resolve(
-            sourcePolicy(),
-            device,
-            sourcesForDay(date),
-            preferredSourcePackage(),
-            metrics
+        val policy = sourcePolicy()
+        val raw = StepSourceResolver.resolve(
+            policy, device, sourcesForDay(date), preferredSourcePackage(), metrics
         )
+        if (policy != StepSourcePolicy.AUTO || date != DateKeys.today()) return raw
+        // Past days are closed: max() is the right answer and nothing is
+        // moving underneath it. Today is where the frozen-number problem
+        // lives, so today is where the baseline is taken and applied.
+        return StepContinuity.apply(raw, observeContinuity(raw, date), metrics)
+    }
+
+    // ---- continuity ------------------------------------------------------
+
+    private fun storedBaseline(): StepContinuity.Baseline? {
+        val date = state.continuityDate ?: return null
+        val offset = state.continuityOffset
+        if (offset <= 0) return null
+        return StepContinuity.Baseline(
+            date = date,
+            offset = offset,
+            packageName = state.continuityPackage,
+            kind = StepSourceKind.from(state.continuityKind),
+            appName = state.continuityAppName ?: "Health Connect",
+            observedAt = state.continuityObservedAt
+        )
+    }
+
+    /** Folds a fresh raw resolution into the stored baseline and returns it. */
+    private fun observeContinuity(
+        raw: StepSourceResolver.Resolution,
+        date: String
+    ): StepContinuity.Baseline? {
+        val current = storedBaseline()
+        val next = StepContinuity.observe(current, raw, date, System.currentTimeMillis())
+        if (next !== current) {
+            if (next == null) {
+                state.clearContinuity()
+            } else {
+                state.writeContinuity(
+                    next.date, next.offset, next.packageName,
+                    next.kind.jsValue, next.appName, next.observedAt
+                )
+            }
+        }
+        return next
+    }
+
+    /**
+     * Today's origin split goes stale thirty seconds after the last read. The
+     * sensor path cannot fetch it, but it can ask for a fetch: a walk with the
+     * app closed then keeps the notification and `stepsChanged` in step with a
+     * watch that syncs mid-walk, instead of waiting for the next screen open.
+     * Throttled well below the cache TTL so it never becomes a poll.
+     */
+    private fun refreshTodaySourcesIfStale() {
+        val config = config()
+        if (!config.healthConnectEnabled || !config.healthConnectReadEnabled) return
+        if (sourcePolicy() == StepSourcePolicy.DEVICE) return
+        val today = DateKeys.today()
+        if (sourceCache.get(today) != null) return
+        val now = System.currentTimeMillis()
+        val last = lastSourceRefreshAt.get()
+        if (now - last < SOURCE_REFRESH_MIN_INTERVAL_MS) return
+        if (!lastSourceRefreshAt.compareAndSet(last, now)) return
+        scope.launch { runCatching { resolveToday() } }
     }
 
     /**
@@ -298,10 +462,17 @@ class StepTrackerCore private constructor(context: Context) {
 
         val policy = sourcePolicy()
         val preferred = preferredSourcePackage()
+        val today = DateKeys.today()
+        val baseline = if (policy == StepSourcePolicy.AUTO) storedBaseline() else null
         val resolved = base.days.map { day ->
-            StepSourceResolver.resolve(
+            val raw = StepSourceResolver.resolve(
                 policy, day, byDate[day.date].orEmpty(), preferred, metrics
-            ).totals
+            )
+            if (day.date == today && baseline != null) {
+                StepContinuity.apply(raw, baseline, metrics).totals
+            } else {
+                raw.totals
+            }
         }
         return recomputeStats(base, resolved, goal)
     }
@@ -348,7 +519,8 @@ class StepTrackerCore private constructor(context: Context) {
 
     /** Every Health Connect origin contributing to a range, this device included. */
     suspend fun listSources(start: String, end: String): List<StepSource> {
-        if (config().healthConnectEnabled &&
+        val config = config()
+        if (config.healthConnectEnabled && config.healthConnectReadEnabled &&
             healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
             healthConnect.canRead()
         ) {
@@ -378,14 +550,24 @@ class StepTrackerCore private constructor(context: Context) {
                 StepSourcePolicy.DEVICE, totals, emptyList(), null, metrics
             )
         }
+        val config = config()
         val policy = sourcePolicy()
-        if (policy == StepSourcePolicy.DEVICE || !config().healthConnectEnabled) {
+        if (policy == StepSourcePolicy.DEVICE || !config.healthConnectEnabled ||
+            !config.healthConnectReadEnabled
+        ) {
             return deviceOnly()
         }
-        val cached = sourceCache.get(totals.date) ?: return deviceOnly()
-        return StepSourceResolver.resolve(
-            policy, totals, cached, preferredSourcePackage(), metrics
-        )
+        val cached = sourceCache.get(totals.date)
+        val raw = if (cached == null) {
+            deviceOnly()
+        } else {
+            StepSourceResolver.resolve(policy, totals, cached, preferredSourcePackage(), metrics)
+        }
+        if (policy != StepSourcePolicy.AUTO) return raw
+        // The baseline outlives the cache on purpose: with the cache expired
+        // and no read in flight, the phone's live count plus the last known
+        // lead is still the best number, and it keeps moving.
+        return StepContinuity.apply(raw, storedBaseline(), metrics)
     }
 
     /**
@@ -393,10 +575,16 @@ class StepTrackerCore private constructor(context: Context) {
      * where one owns the day. `state` and `source` still describe this device's
      * own sensor, which is a separate question from where the count came from.
      */
-    fun displaySnapshot(base: StepSnapshot = engine.snapshot()): StepSnapshot {
-        val resolution = resolveFromCache(
-            DayTotals(base.date, base.steps, base.distance, base.calories)
+    fun displaySnapshot(base: StepSnapshot = engine.snapshot()): StepSnapshot =
+        displaySnapshot(
+            base,
+            resolveFromCache(DayTotals(base.date, base.steps, base.distance, base.calories))
         )
+
+    fun displaySnapshot(
+        base: StepSnapshot,
+        resolution: StepSourceResolver.Resolution
+    ): StepSnapshot {
         if (!resolution.usedExternal) return base
         val totals = resolution.totals
         return base.copy(
@@ -566,6 +754,16 @@ class StepTrackerCore private constructor(context: Context) {
     companion object {
         /** Stands in for "this device" in [StepStateStore.lastResolvedSource]. */
         const val SELF_SOURCE_KEY = "__self__"
+
+        /** Floor between sensor-triggered Health Connect refreshes of today. */
+        private const val SOURCE_REFRESH_MIN_INTERVAL_MS = 60_000L
+
+        /**
+         * The service stamps [StepStateStore.lastHeartbeatAt] this often even
+         * when the user is still, so `heartbeatAgeMs` in `getTrackingHealth()`
+         * says how long ago the service was last known to be alive.
+         */
+        const val HEARTBEAT_INTERVAL_MS = 60_000L
 
         @Volatile
         private var instance: StepTrackerCore? = null

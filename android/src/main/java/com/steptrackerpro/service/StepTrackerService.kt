@@ -1,5 +1,6 @@
 package com.steptrackerpro.service
 
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -11,8 +12,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import com.steptrackerpro.core.AccelerometerStepDetector
 import com.steptrackerpro.core.SensorSource
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
@@ -37,7 +40,21 @@ class StepTrackerService : Service(), SensorEventListener {
     private var sensorManager: SensorManager? = null
     private var counterSensor: Sensor? = null
     private var detectorSensor: Sensor? = null
+    private var accelerometerSensor: Sensor? = null
     private var listening = false
+
+    /**
+     * Only built when the accelerometer is what we ended up on. A phone with
+     * a hardware counter never allocates one.
+     */
+    private var accelerometer: AccelerometerStepDetector? = null
+
+    /**
+     * Held while sampling a non-wake-up accelerometer, so the CPU does not
+     * sleep and take the samples with it. This is the battery cost of the
+     * fallback and the reason it is a fallback.
+     */
+    private var wakeLock: PowerManager.WakeLock? = null
 
     /**
      * Sensor callbacks would otherwise be delivered on the main looper, which is
@@ -55,18 +72,39 @@ class StepTrackerService : Service(), SensorEventListener {
     @Volatile
     private var lastNotifiedSteps = -1
 
+    /** A notification redraw deferred by the throttle, so the last step is never left undrawn. */
+    @Volatile
+    private var trailingNotificationQueued = false
+
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            core.state.lastHeartbeatAt = System.currentTimeMillis()
+            sensorHandler?.postDelayed(this, StepTrackerCore.HEARTBEAT_INTERVAL_MS)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        isAlive = true
         core = StepTrackerCore.get(this)
         notifications = NotificationFactory(this)
         sensorManager = getSystemService(SENSOR_SERVICE) as? SensorManager
         counterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         detectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        // The wake-up variant keeps delivering with the CPU asleep and needs
+        // no wake lock; most budget phones only have the non-wake-up one.
+        accelerometerSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER, true)
+            ?: sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         sensorThread = HandlerThread("stp-sensor").also {
             it.start()
             sensorHandler = Handler(it.looper)
         }
         notifications.ensureChannel(core.config())
+        // The heartbeat is what lets the watchdog and the React module tell
+        // "killed by the OEM" from "the user has not moved": a still user
+        // produces no samples, but a live service still beats.
+        core.state.lastHeartbeatAt = System.currentTimeMillis()
+        sensorHandler?.postDelayed(heartbeat, StepTrackerCore.HEARTBEAT_INTERVAL_MS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -115,9 +153,21 @@ class StepTrackerService : Service(), SensorEventListener {
             else -> {
                 val fromBoot =
                     intent?.getBooleanExtra(ServiceCommands.EXTRA_FROM_BOOT, false) == true
+                val recoveredBy = intent?.getStringExtra(ServiceCommands.EXTRA_RECOVERED_BY)
                 // A restart or a boot must honour what the user last asked for
                 // rather than starting fresh, pause included.
-                startTracking(fromBoot = fromBoot, restore = !explicitStart || fromBoot)
+                val restore = !explicitStart || fromBoot || recoveredBy != null
+                // Anything that is not the user pressing start is a recovery,
+                // and how often those happen is the number an app needs in
+                // order to decide whether to walk the user to the OEM's
+                // battery settings.
+                when {
+                    intent == null -> core.state.recordRecovery("sticky")
+                    fromBoot -> core.state.recordRecovery("boot")
+                    recoveredBy != null -> core.state.recordRecovery(recoveredBy)
+                    else -> core.state.resetRecovery()
+                }
+                startTracking(fromBoot = fromBoot, restore = restore)
             }
         }
 
@@ -170,7 +220,7 @@ class StepTrackerService : Service(), SensorEventListener {
                 StepEventBus.Events.ERROR,
                 mapOf(
                     "code" to "E_NO_SENSOR",
-                    "message" to "This device exposes neither TYPE_STEP_COUNTER nor TYPE_STEP_DETECTOR"
+                    "message" to "This device exposes no step sensor, and no accelerometer to fall back on"
                 )
             )
             core.emitTrackingState("no_sensor")
@@ -181,11 +231,12 @@ class StepTrackerService : Service(), SensorEventListener {
         core.state.trackingState =
             if (paused) TrackingState.PAUSED else TrackingState.RUNNING
         SyncScheduler.schedule(this, core.config())
+        SyncScheduler.scheduleWatchdog(this, core.config())
         pushNotification(force = true)
         core.emitTrackingState(
             when {
                 fromBoot -> "boot"
-                restore -> "restored"
+                restore -> core.state.lastRecoveryReason?.let { "restored_$it" } ?: "restored"
                 else -> "started"
             }
         )
@@ -275,6 +326,31 @@ class StepTrackerService : Service(), SensorEventListener {
             }
         }
 
+        val config = core.config()
+        if (config.accelerometerFallback) {
+            accelerometerSensor?.let { sensor ->
+                // 25 Hz is plenty for gait and a quarter of SENSOR_DELAY_GAME's
+                // load. The report latency lets a sensor hub with a FIFO batch
+                // a second of samples per wake-up; hubs without one ignore it.
+                val ok = manager.registerListener(
+                    this,
+                    sensor,
+                    ACCELEROMETER_PERIOD_US,
+                    ACCELEROMETER_MAX_LATENCY_US,
+                    handler
+                )
+                if (ok) {
+                    listening = true
+                    accelerometer = AccelerometerStepDetector(
+                        threshold = config.accelerometerThreshold.toFloat()
+                    )
+                    core.state.source = SensorSource.ACCELEROMETER
+                    if (!sensor.isWakeUpSensor && config.accelerometerWakeLock) acquireWakeLock()
+                    return true
+                }
+            }
+        }
+
         return false
     }
 
@@ -282,6 +358,8 @@ class StepTrackerService : Service(), SensorEventListener {
         if (!listening) return
         runCatching { sensorManager?.unregisterListener(this) }
         listening = false
+        accelerometer = null
+        releaseWakeLock()
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
@@ -292,11 +370,45 @@ class StepTrackerService : Service(), SensorEventListener {
         val snapshot = when (sensorEvent.sensor.type) {
             Sensor.TYPE_STEP_COUNTER -> core.engine.onCounterSample(values[0], eventTime(sensorEvent))
             Sensor.TYPE_STEP_DETECTOR -> core.engine.onDetectorSample(1, eventTime(sensorEvent))
+            Sensor.TYPE_ACCELEROMETER -> {
+                if (values.size < 3) return
+                // The detector only uses differences between timestamps, so
+                // the sensor's own elapsed-realtime base is the right one: it
+                // is monotonic and unaffected by wall-clock changes, which is
+                // more than eventTime() can promise on every HAL.
+                val steps = accelerometer?.onSample(
+                    values[0], values[1], values[2], sensorEvent.timestamp / 1_000_000L
+                ) ?: 0
+                if (steps > 0) core.engine.onDetectorSample(steps, eventTime(sensorEvent)) else null
+            }
             else -> null
         } ?: return
 
         core.onStepsChanged(snapshot)
         pushNotification()
+    }
+
+    /**
+     * A partial wake lock with no timeout, on purpose: it is held exactly as
+     * long as the accelerometer listener is registered, which is exactly as
+     * long as the user has tracking on, and released in the same places the
+     * listener is.
+     */
+    @SuppressLint("WakelockTimeout")
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val power = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = runCatching {
+            power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).also {
+                it.setReferenceCounted(false)
+                it.acquire()
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        wakeLock = null
     }
 
     /**
@@ -357,7 +469,20 @@ class StepTrackerService : Service(), SensorEventListener {
         val snapshot = core.displaySnapshot()
         if (!force) {
             if (snapshot.steps == lastNotifiedSteps) return
-            if (now - lastNotificationAt < config.notificationThrottleMs) return
+            val wait = config.notificationThrottleMs - (now - lastNotificationAt)
+            if (wait > 0) {
+                // Throttled. Draw once more when the window closes, so the
+                // shade never sits on the count from one step ago after the
+                // user stops walking.
+                if (!trailingNotificationQueued) {
+                    trailingNotificationQueued = true
+                    sensorHandler?.postDelayed({
+                        trailingNotificationQueued = false
+                        if (listening) pushNotification()
+                    }, wait)
+                }
+                return
+            }
         }
         lastNotificationAt = now
         lastNotifiedSteps = snapshot.steps
@@ -386,6 +511,8 @@ class StepTrackerService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
+        isAlive = false
+        sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()
         core.flush()
         sensorThread?.quitSafely()
@@ -400,6 +527,15 @@ class StepTrackerService : Service(), SensorEventListener {
         private const val TAG = "StepTrackerService"
 
         /**
+         * Whether an instance exists in this process. A SIGKILL clears it with
+         * the process, which is the point: it can only be true when the
+         * service is genuinely there.
+         */
+        @Volatile
+        var isAlive: Boolean = false
+            private set
+
+        /**
          * Batch window for the step counter. 0 delivers every sample as it
          * happens, which keeps the notification live; the hardware FIFO makes
          * this cheap because the SoC sensor hub does the counting either way.
@@ -408,5 +544,13 @@ class StepTrackerService : Service(), SensorEventListener {
 
         /** Widest plausible age for a batched sample, used to sanity-check HALs. */
         private const val MAX_EVENT_AGE_MS = 60_000L
+
+        /** 25 Hz. Gait is 1–3 Hz; this is eight samples per step at a run. */
+        private const val ACCELEROMETER_PERIOD_US = 40_000
+
+        /** One second of FIFO batching where the hub supports it. */
+        private const val ACCELEROMETER_MAX_LATENCY_US = 1_000_000
+
+        private const val WAKE_LOCK_TAG = "steptrackerpro:accelerometer"
     }
 }

@@ -104,6 +104,11 @@ class HealthConnectManager(
 
     suspend fun hasAllPermissions(): Boolean = grantedPermissions().containsAll(REQUIRED)
 
+    suspend fun hasPermissions(scope: PermissionScope): Boolean {
+        val required = scope.required
+        return required.isNotEmpty() && grantedPermissions().containsAll(required)
+    }
+
     /** Enough to display data, even when writing was refused. */
     suspend fun canRead(): Boolean = grantedPermissions().containsAll(READ_PERMISSIONS)
 
@@ -116,25 +121,51 @@ class HealthConnectManager(
     }.getOrDefault(false)
 
     /**
+     * Which grants an app actually needs, derived from config. A read-only
+     * display app never asks for `WRITE_*`, a mirror-only app never asks for
+     * `READ_*`: every permission on the sheet is one the user can refuse the
+     * whole sheet over, and every declared permission is one Play asks the
+     * developer to justify.
+     */
+    data class PermissionScope(
+        val read: Boolean = true,
+        val write: Boolean = true,
+        val backgroundRead: Boolean = false,
+        val historyRead: Boolean = false
+    ) {
+        /** The required set: everything the app cannot do its job without. */
+        val required: Set<String>
+            get() = buildSet {
+                if (read) addAll(READ_PERMISSIONS)
+                if (write) addAll(WRITE_PERMISSIONS)
+            }
+
+        /** Required plus whichever optional grants were opted into. */
+        val requested: Set<String>
+            get() = buildSet {
+                addAll(required)
+                if (backgroundRead) PERMISSION_BACKGROUND_READ?.let { add(it) }
+                if (historyRead) PERMISSION_HISTORY_READ?.let { add(it) }
+            }
+    }
+
+    /**
      * Resolves the permission set a request should ask for. Optional
      * permissions are only included when the caller opted into them, because
      * Health Connect shows one sheet for the whole set and a user who declines
      * background reads there declines the rest with it.
      */
-    fun permissionsFor(backgroundRead: Boolean, historyRead: Boolean): Set<String> = buildSet {
-        addAll(REQUIRED)
-        if (backgroundRead) PERMISSION_BACKGROUND_READ?.let { add(it) }
-        if (historyRead) PERMISSION_HISTORY_READ?.let { add(it) }
-    }
+    fun permissionsFor(scope: PermissionScope): Set<String> = scope.requested
 
-    suspend fun status(
-        backgroundRead: Boolean = false,
-        historyRead: Boolean = false
-    ): Map<String, Any?> {
+    @Deprecated("Pass a PermissionScope so read/write follow config.")
+    fun permissionsFor(backgroundRead: Boolean, historyRead: Boolean): Set<String> =
+        permissionsFor(PermissionScope(backgroundRead = backgroundRead, historyRead = historyRead))
+
+    suspend fun status(scope: PermissionScope = PermissionScope()): Map<String, Any?> {
         val availability = availability()
         val granted = if (availability == Availability.AVAILABLE) grantedPermissions() else emptySet()
-        val requested = permissionsFor(backgroundRead, historyRead)
-        val missing = requested - granted
+        val required = scope.required
+        val missing = scope.requested - granted
         val denials = state.healthPermissionDenials
         return mapOf(
             "available" to (availability == Availability.AVAILABLE),
@@ -142,9 +173,13 @@ class HealthConnectManager(
             "requiresUpdate" to (availability == Availability.UPDATE_REQUIRED),
             "installable" to (availability == Availability.NOT_INSTALLED ||
                 availability == Availability.UPDATE_REQUIRED),
-            "granted" to granted.containsAll(REQUIRED),
+            // Everything *this app* needs. With reads off in config a
+            // write-only grant is a full grant, and vice versa.
+            "granted" to (required.isNotEmpty() && granted.containsAll(required)),
             "canRead" to granted.containsAll(READ_PERMISSIONS),
             "canWrite" to granted.containsAll(WRITE_PERMISSIONS),
+            "readRequired" to scope.read,
+            "writeRequired" to scope.write,
             "backgroundReadGranted" to
                 (PERMISSION_BACKGROUND_READ != null && granted.contains(PERMISSION_BACKGROUND_READ)),
             "historyReadGranted" to
@@ -217,6 +252,16 @@ class HealthConnectManager(
         val hc = client() ?: return emptyMap()
         val self = context.packageName
 
+        // A raw read is bounded by MAX_PAGES * PAGE_SIZE records. A watch that
+        // writes one record a minute produces 1,440 a day, so anything past a
+        // few weeks would be silently truncated - and a truncated month looks
+        // like a watch that stopped counting half way through. Long windows
+        // are answered per origin through the aggregate API instead, which
+        // costs one query per origin per window rather than one page per
+        // thousand records.
+        val days = java.time.Duration.between(start, end).toDays()
+        if (days > RAW_READ_MAX_DAYS) return readDailyStepsBySourceAggregated(hc, start, end)
+
         // date -> package -> accumulator
         val buckets = HashMap<String, HashMap<String, Accumulator>>()
 
@@ -251,6 +296,58 @@ class HealthConnectManager(
                 .map { it.toStepSource(self) }
                 .sortedByDescending { it.steps }
         }
+    }
+
+    /**
+     * The long-window form of [readDailyStepsBySource]. Origins and their
+     * device types are discovered from a raw read of the most recent
+     * [RAW_READ_MAX_DAYS] of the window, then each origin's daily totals are
+     * aggregated across the whole window. An origin that only wrote in the
+     * older part of the window is missed, which for a yearly chart is an
+     * acceptable trade against a read that never finishes.
+     */
+    private suspend fun readDailyStepsBySourceAggregated(
+        hc: HealthConnectClient,
+        start: Instant,
+        end: Instant
+    ): Map<String, List<StepSource>> {
+        val self = context.packageName
+        val discoveryStart = maxOf(start, end.minus(java.time.Duration.ofDays(RAW_READ_MAX_DAYS)))
+        val recent = readDailyStepsBySource(discoveryStart, end)
+        val kinds = HashMap<String, StepSourceKind>()
+        val names = HashMap<String, String>()
+        recent.values.flatten().forEach { source ->
+            val known = kinds[source.packageName]
+            if (known == null || source.kind.isWearable) kinds[source.packageName] = source.kind
+            names[source.packageName] = source.appName
+        }
+        if (kinds.isEmpty()) return emptyMap()
+
+        val out = HashMap<String, ArrayList<StepSource>>()
+        for ((pkg, kind) in kinds) {
+            val perDay = readDailySteps(start, end, setOf(pkg))
+            for (day in perDay) {
+                if (day.steps <= 0) continue
+                out.getOrPut(day.date) { ArrayList() }.add(
+                    StepSource(
+                        packageName = pkg,
+                        appName = names[pkg] ?: StepSourceCatalog.appName(pkg),
+                        kind = kind,
+                        steps = day.steps,
+                        distance = day.distance,
+                        calories = day.calories,
+                        lastRecordAt = minOf(
+                            DateKeys.endOfDayMillis(day.date), System.currentTimeMillis()
+                        ),
+                        isSelf = pkg == self
+                    )
+                )
+            }
+        }
+        // The recent window's raw numbers are exact and carry real timestamps;
+        // let them override the aggregate for the days they cover.
+        recent.forEach { (date, sources) -> out[date] = ArrayList(sources) }
+        return out.mapValues { (_, list) -> list.sortedByDescending { it.steps } }
     }
 
     /** Flattened view of [readDailyStepsBySource] over the whole range. */
@@ -471,6 +568,9 @@ class HealthConnectManager(
 
         private const val PAGE_SIZE = 1_000
         private const val MAX_PAGES = 50
+
+        /** Longest window answered from raw records; longer ones aggregate. */
+        private const val RAW_READ_MAX_DAYS = 35L
 
         val READ_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),

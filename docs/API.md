@@ -15,8 +15,11 @@ try {
 
 Codes: `E_UNSUPPORTED_PLATFORM`, `E_NO_SENSOR`, `E_NOT_INITIALIZED`,
 `E_PERMISSION_DENIED`, `E_SERVICE_START_FAILED`, `E_HEALTH_CONNECT_UNAVAILABLE`,
+`E_HEALTH_CONNECT_NOT_INSTALLED`, `E_HEALTH_CONNECT_UPDATE_REQUIRED`,
 `E_HEALTH_CONNECT_DENIED`, `E_DATABASE`, `E_INVALID_CONFIG`, `E_NO_ACTIVITY`,
-`E_UNKNOWN`.
+`E_NOT_TRACKING`, `E_UNKNOWN`.
+
+Which calls you need depends on your [usage mode](USAGE_MODES.md).
 
 ---
 
@@ -29,11 +32,17 @@ date. Idempotent — call it on every app launch, before anything else. Config i
 stored in SharedPreferences, so the foreground service can rebuild it after a
 process restart with no JS running.
 
+Only the keys you pass cross the bridge; everything else keeps the value the
+native side already holds, so `initialize({ dailyGoal })` on a returning user
+does not reset their height.
+
 ### `updateConfig(config: StepTrackerConfig): Promise<StepTrackerConfig>`
 
 Patches config at runtime. Goals and the notification update immediately.
-Changing `height` or `sex` recomputes stride length unless you pass an explicit
-`strideLength`.
+Changing `height` or `sex` switches stride back to being derived from them
+unless you pass an explicit `strideLength`. `getConfig().strideLength` reads
+`0` while derived; `estimateStride(height, sex)` gives the same number the
+native side uses.
 
 ### `startTracking(): Promise<StepSnapshot>`
 
@@ -57,6 +66,33 @@ service, and clears the auto-start-on-boot flag.
 
 ### `isTracking(): Promise<boolean>`
 
+### `getTrackingHealth(): Promise<TrackingHealth>`
+
+Whether tracking is actually working, as opposed to merely marked running.
+
+```ts
+{
+  serviceAlive: false,          // a service instance exists in this process
+  shouldBeRunning: true,        // the user started tracking and never stopped it
+  looksDead: true,              // should be running (paused counts) but no
+                                // service exists → an OEM killed it
+  lastHeartbeatAt: 1757580000000,
+  heartbeatAgeMs: 5400000,
+  lastSensorEventAt: 1757579000000,
+  lastRecoveryAt: 1757570000000,
+  lastRecoveryReason: 'watchdog',   // 'sticky' | 'boot' | 'watchdog' | 'foreground' | 'initialize'
+  recoveryCount: 4,             // since the user last pressed start
+  batteryOptimizationEnabled: true,
+  aggressiveOem: true,
+  manufacturer: 'Xiaomi',
+}
+```
+
+Calling it from the foreground also restarts a dead service — the foreground
+is the one place a background-start restriction cannot apply. `recoveryCount`
+climbing is the cue to show the OEM battery guidance; see
+[OEM_BATTERY.md](OEM_BATTERY.md).
+
 ---
 
 ## Reading steps
@@ -79,7 +115,10 @@ service, and clears the auto-start-on-boot flag.
 ```
 
 Live from the counter, not the database — correct even if the last flush was
-several steps ago.
+several steps ago. Under the `'auto'` policy with Health Connect reads
+granted, `steps` is the resolved number (see
+[Step sources](#step-sources-watches-and-other-apps)) and `stepSource` says
+where it came from.
 
 ### `getYesterdaySteps(): Promise<DayRecord>`
 ### `getStepsForDate(date: string): Promise<DayRecord>`
@@ -169,12 +208,20 @@ notification but does not stop counting.
 ### `getDeviceCapabilities(): Promise<DeviceCapabilities>`
 
 ```ts
-{ hasStepCounter: true, hasStepDetector: true, supported: true,
-  sdkInt: 35, manufacturer: 'samsung', model: 'SM-S928B' }
+{
+  hasStepCounter: true,          // the hardware counter: counts with the process dead
+  hasStepDetector: true,
+  hasAccelerometer: true,
+  hasWakeUpAccelerometer: false, // without one the software pedometer needs a wake lock
+  supported: true,               // honours accelerometerFallback
+  bestSensor: 'step_counter',    // 'step_counter' | 'step_detector' | 'accelerometer' | 'none'
+  sdkInt: 35, manufacturer: 'samsung', model: 'SM-S928B',
+}
 ```
 
-Check this before showing a step UI at all. A handful of low-end devices and
-most emulators have no step hardware.
+Check this before showing a step UI at all. Most emulators have no step
+hardware. On a phone whose `bestSensor` is `'accelerometer'`, warn the user
+that counting costs more battery and stops while the app is force-stopped.
 
 ### `openAppSettings(): Promise<boolean>`
 
@@ -198,8 +245,39 @@ Policy-safe alternative: opens the settings list and lets the user choose.
 
 ### `openManufacturerAutoStartSettings(): Promise<boolean>`
 
-Best-effort deep link into Xiaomi / Oppo / Vivo / Huawei autostart screens,
-falling back to app info. On those skins this matters more than Doze.
+Best-effort deep link into the OEM's autostart / background-launch screen —
+Xiaomi, Redmi, POCO, OPPO, realme, OnePlus, vivo, iQOO, Huawei, Honor, Tecno,
+Infinix, itel, Samsung, ASUS, Meizu, Nokia and others — falling back to app
+info. On those skins this matters more than Doze.
+
+### `getBackgroundRestrictionStatus(): Promise<BackgroundRestrictionStatus>`
+
+```ts
+{
+  manufacturer: 'Xiaomi',
+  brand: 'Redmi',
+  aggressiveOem: true,                  // known to kill foreground services
+  batteryOptimizationEnabled: true,     // Doze still applies
+  autoStartSettingsAvailable: true,     // the deep link will land on an OEM screen
+  autoStartTarget: 'com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity',
+  backgroundStartNeedsExemption: true,  // Android 12+: the watchdog needs the exemption
+}
+```
+
+`autoStartTarget` is what `openManufacturerAutoStartSettings()` will open.
+Known components are tried first; when none resolves on a firmware nobody has
+catalogued, the OEM's manager package is scanned for an exported activity
+named like an autostart or battery screen, so the call still lands somewhere
+useful. Log the value in support tickets.
+
+### `requestBackgroundPermissions(options?): Promise<'none' | 'battery' | 'autostart'>`
+
+The whole "keep tracking alive on this phone" flow behind one call. Opens the
+battery exemption dialog if Doze still applies (or the settings list with
+`{ directPrompt: false }`), otherwise the OEM autostart screen if one exists,
+and returns which so the UI can explain it. One screen per call — call again on
+the next foreground until nothing is left. Guidance text per manufacturer:
+[OEM_BATTERY.md](OEM_BATTERY.md).
 
 ---
 
@@ -213,7 +291,9 @@ falling back to app info. On those skins this matters more than Doze.
   availability: 'available',   // | 'update_required' | 'not_installed' | 'not_supported'
   requiresUpdate: false,
   installable: false,          // installHealthConnect() would lead somewhere
-  granted: false,
+  granted: false,              // everything *this config* needs
+  readRequired: true,          // healthConnectReadEnabled
+  writeRequired: true,         // healthConnectWriteEnabled
   canRead: false,              // enough to display a watch's steps
   canWrite: false,             // enough to mirror this device's steps
   backgroundReadGranted: false,
@@ -253,7 +333,9 @@ type RequestHealthConnectOptions = {
 };
 ```
 
-Both default to the matching config flag. Health Connect shows one sheet for the
+Both default to the matching config flag. The read and write sets follow
+`healthConnectReadEnabled` / `healthConnectWriteEnabled`, so a read-only app
+never puts `WRITE_*` on the sheet. Health Connect shows one sheet for the
 whole set, so asking for an optional permission the app does not need risks the
 ones it does.
 
@@ -314,14 +396,38 @@ below picks exactly one source per day; summing them would report roughly double
 
 | Value | Behaviour |
 |---|---|
-| `'auto'` *(default)* | Whichever of this phone and the best external source counted more that day. A phone on a desk under-counts; a worn watch does not. |
+| `'auto'` *(default)* | Whichever of this phone and the best external source counted more, **merged live**: when the other app is ahead its lead becomes the day's baseline and the phone's own sensor keeps counting on top, so 6,000 from Health Connect becomes 6,001, 6,005, 6,010 as the user walks instead of freezing until the next sync. |
 | `'device'` | Phone sensor only. Health Connect is still written to, never read back. This is the pre-1.2 behaviour. |
-| `'wearable'` | A watch, band or ring wins whenever one has data, even if it counted fewer steps. For users who treat the wearable as the truth. |
-| `'health_connect'` | The best external origin wins, wearable or not. For an app that only presents data another app owns. |
+| `'wearable'` | A watch, band or ring wins whenever one has data, even if it counted fewer steps. The exact external number, jumps included. For users who treat the wearable as the truth. |
+| `'health_connect'` | The best external origin wins, wearable or not. The exact external number. For an app that only presents data another app owns. |
 
 Under `'auto'` with no Health Connect grant, nothing changes: the numbers are
 exactly this device's sensor. Resolution only ever engages once the user has
 allowed reads.
+
+#### How `'auto'` merges
+
+Each Health Connect read compares the best external source with the phone.
+If the other app is ahead by N, N is stored as today's *baseline* and the
+number shown becomes `deviceSteps + N`; every step the phone counts moves it.
+The next read raises the baseline only if the other app has pulled further
+ahead again — the phone on a desk while a watch walked — and leaves it alone
+when both counted the same walk, so nothing is counted twice. The baseline
+never shrinks within a day and is dropped at midnight, so the shown number is
+monotonic and goals key off it. The phone's raw count is what gets written to
+Health Connect, never the merged number.
+
+```ts
+const { steps, stepSource } = await StepTracker.getTodaySteps();
+// steps: 6010
+// stepSource: { kind: 'app', appName: 'Samsung Health', merged: true,
+//               baselineSteps: 6000, deviceSteps: 10, externalSteps: 6000,
+//               usedExternal: true, ... }
+```
+
+Changing `stepSource`, `setPreferredStepSource()`, `resetToday()` and a
+Health Connect revoke all clear the baseline; the next read takes a fresh one.
+Worked examples in [USAGE_MODES.md](USAGE_MODES.md#mode-c-both-recommended).
 
 ### `getStepSources(startDate, endDate): Promise<StepSourceList>`
 
@@ -340,11 +446,18 @@ Every app that published steps over the range, with what each contributed.
       lastRecordAt: 1757400000000,
       isSelf: false,
       isWearable: true,
+      isPlatform: false,    // true for Health Connect's own on-device count
     },
   ],
   hasWearable: true,
 }
 ```
+
+On Android 14 with SDK extension 20+, Health Connect records the phone's own
+steps itself once any app holds `READ_STEPS`. That origin shows up here as
+`kind: 'phone'`, `isPlatform: true`, named "This phone (Android)" — its
+package is `android`, or `com.android.healthconnect.phone.<hash>` after the
+June 2026 provider update, and the hash differs per device and per app.
 
 These totals **do not add up to the range's step count** and are not meant to.
 Use the list to show the user their options, then pin one.
@@ -370,6 +483,8 @@ Which source is answering for today, and what the alternatives counted.
   deviceSteps: 5100,    // what this phone counted, win or lose
   externalSteps: 8240,  // what the best external source counted, win or lose
   usedExternal: true,
+  merged: false,        // true when steps = external baseline + phone delta ('auto')
+  baselineSteps: 0,     // the external lead when the baseline was taken
   policy: 'auto',
   preferredPackage: null,
 }
@@ -405,13 +520,13 @@ because its `synced` / `syncedRemote` flags describe local records.
 
 `state` and `source` on a snapshot keep describing **this device's** sensor even
 when the count came from a watch — whether the foreground service is running is
-a separate question from where the number came from.
+a separate question from where the number came from. `source` is one of
+`'step_counter'`, `'step_detector'`, `'accelerometer'` (the software pedometer
+on phones with no step sensor) or `'none'`.
 
-Goals stay keyed off this device's own count. A wearable's total arrives in
-jumps whenever its companion app syncs and can move backwards between them, so
-driving `goalReached` off it would fire twice for one day.
-
----
+Goals follow the number on screen. Under `'auto'` that number is monotonic for
+the day, and every goal fires at most once per period regardless, so a
+wearable total arriving in jumps cannot fire a goal twice.
 
 ---
 
@@ -444,7 +559,7 @@ StepTracker.removeListener();              // everything
 | `stepsChanged` | `StepSnapshot`. Throttled by `eventThrottleMs` (default 500 ms). |
 | `goalReached` | `{ type: 'daily' \| 'weekly' \| 'monthly', goal, steps, date, timestamp }`. Fires at most once per period. |
 | `goalProgressChanged` | `{ type, goal, steps, progress, date }`. Fires when the whole-percent bucket changes. |
-| `trackingStateChanged` | `{ state, source, reason }`. `reason` is `'boot'`, `'paused'`, `'no_sensor'`, etc. |
+| `trackingStateChanged` | `{ state, source, reason }`. `reason` is `'started'`, `'boot'`, `'restored_sticky'`, `'restored_watchdog'`, `'restored_foreground'`, `'paused'`, `'no_sensor'`, etc. |
 | `stepSourceChanged` | `ResolvedStepSource`. Fires when the app answering for the user's steps flips — a watch coming into range mid-morning, or a pin being changed. |
 | `healthConnectStatusChanged` | `HealthConnectStatus`. Fires after a permission request, a revoke, and on every foreground where the status moved — which is how you notice the user granting or revoking from outside the app. |
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
@@ -479,7 +594,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `persistEveryNSteps` | 10 | database flush cadence |
 | `healthConnectEnabled` | `true` | master switch for both reads and writes |
 | `healthConnectSyncIntervalMinutes` | 30 | clamped to WorkManager's 15-minute floor; 0 disables |
-| `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own |
+| `healthConnectReadEnabled` | `true` | set `false` to mirror your own count without ever reading; `READ_*` is then never requested |
+| `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own; `WRITE_*` is then never requested |
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
@@ -488,6 +604,11 @@ than replaying missed events. `useStepTracker` already does this.
 | `remoteSyncUrl` | — | optional HTTPS endpoint for unsynced days |
 | `remoteSyncHeaders` | `{}` | e.g. auth headers |
 | `autoStartOnBoot` | `true` | |
+| `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery) |
+| `watchdogEnabled` | `true` | 15-minute WorkManager job that restarts a killed service (needs the battery exemption on Android 12+) |
+| `accelerometerFallback` | `true` | count over the accelerometer on phones with neither step sensor — see [ARCHITECTURE.md](ARCHITECTURE.md#the-accelerometer-fallback) |
+| `accelerometerWakeLock` | `true` | hold a partial wake lock while sampling a non-wake-up accelerometer, so counting survives the screen going off |
+| `accelerometerThreshold` | `0.9` | m/s² of linear acceleration that counts as a step; raise for vehicle false positives, lower for missed gentle walks |
 
 ---
 

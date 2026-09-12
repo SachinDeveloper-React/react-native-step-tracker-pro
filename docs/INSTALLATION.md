@@ -8,7 +8,12 @@
 | `minSdkVersion` | 26 — `java.time` and the Health Connect client both need it |
 | `compileSdkVersion` / `targetSdkVersion` | 35 |
 | Java | 17 |
-| Kotlin | 1.9.24 by default; see below for 2.x |
+| Kotlin | 2.0.21 by default (follows the host app's `kotlinVersion`); see below |
+| Health Connect client | `1.1.0-beta01` by default; `1.1.0-alpha10` is the minimum |
+
+Before wiring anything up, pick a [usage mode](USAGE_MODES.md) — native
+sensor only, Health Connect only, or both. It decides which manifest entries
+below you keep.
 
 ## 1. Install
 
@@ -34,11 +39,12 @@ buildscript {
 }
 ```
 
-## 3. Kotlin 2.x (only if your app is already on it)
+## 3. Kotlin and Room versions
 
-The library ships Room via KSP and defaults to Kotlin 1.9.24. KSP versions are
-pinned to an exact Kotlin version, so if your app uses Kotlin 2.x you must say
-so, or the build fails with a KSP/Kotlin mismatch.
+The library follows the Kotlin your app already uses — React Native sets
+`rootProject.ext.kotlinVersion` and the library reads it — and defaults to
+2.0.21 with Room 2.7.2 when nothing is set. Override either in the app's root
+`build.gradle` only if you need to:
 
 ```gradle
 buildscript {
@@ -86,11 +92,16 @@ ext {
 }
 ```
 
-## 4. Manifest entries your app must add
+## 4. Manifest entries
 
 The library manifest already merges in the service, the boot receiver, the
-sensor permissions and the Health Connect permissions. Two things cannot be
-merged and have to live in your app:
+sensor permissions, the Health Connect permissions, the rationale activity and
+the `<queries>` for companion apps and OEM battery managers. Nothing is
+required in your app for the default (both sensor and Health Connect) setup.
+
+What you *remove* depends on the mode — the exact blocks for native-only and
+Health-Connect-only are in [USAGE_MODES.md](USAGE_MODES.md). The rest of this
+section covers the entries you may want to customise:
 
 ### Health Connect rationale screen
 
@@ -226,7 +237,24 @@ useEffect(() => {
 }, []);
 ```
 
-## 8. Supporting a watch
+## 8. Low-end and OEM phones
+
+Xiaomi, Oppo, Vivo, Realme, Tecno and friends kill foreground services. The
+package restarts itself (on next app open, from a 15-minute watchdog, and on
+boot) and recovers every step the hardware counted in between, but only the
+user can stop the killing. Add one onboarding step:
+
+```ts
+const status = await StepTracker.getBackgroundRestrictionStatus();
+if (status.aggressiveOem || status.batteryOptimizationEnabled) {
+  await StepTracker.requestBackgroundPermissions();
+}
+```
+
+and show `getTrackingHealth().recoveryCount` some attention. Everything
+manufacturer-specific is in [OEM_BATTERY.md](OEM_BATTERY.md).
+
+## 9. Supporting a watch
 
 If your users wear a watch, the phone's sensor is not the whole story — a phone
 left on a desk counts nothing while a worn watch counts everything. Health

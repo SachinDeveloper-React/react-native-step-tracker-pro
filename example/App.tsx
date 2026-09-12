@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -16,6 +17,7 @@ import StepTracker, {
   useStepStats,
   useStepTracker,
 } from 'react-native-step-tracker-pro';
+import type { TrackingHealth } from 'react-native-step-tracker-pro';
 
 const palette = {
   surface: '#E9EDF2',
@@ -80,14 +82,39 @@ export default function App() {
 
   const { stats } = useStepStats('week');
   const health = useHealthConnect();
-  const [battery, setBattery] = useState<boolean | null>(null);
   const [pending, setPending] = useState(0);
+  const [tracking, setTracking] = useState<TrackingHealth | null>(null);
+
+  // Re-read on every foreground: getTrackingHealth() is also what restarts a
+  // service the OEM killed while the app was closed, and recoveryCount is
+  // what decides whether to bother the user about it.
+  const refreshHealth = useCallback(() => {
+    if (!isSupported()) return;
+    StepTracker.getTrackingHealth().then(setTracking).catch(() => {});
+    StepTracker.getPendingSyncCount().then(setPending).catch(() => {});
+  }, []);
 
   useEffect(() => {
-    if (!isSupported()) return;
-    StepTracker.isBatteryOptimizationEnabled().then(setBattery).catch(() => {});
-    StepTracker.getPendingSyncCount().then(setPending).catch(() => {});
-  }, [snapshot?.date]);
+    refreshHealth();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshHealth();
+    });
+    return () => sub.remove();
+  }, [refreshHealth, snapshot?.date, state]);
+
+  const onFixBackground = useCallback(async () => {
+    // One screen per call: the battery exemption first, then the OEM's own
+    // autostart screen. Say which one just opened so the user knows what to
+    // tap on it.
+    const shown = await StepTracker.requestBackgroundPermissions();
+    if (shown === 'autostart') {
+      Alert.alert(
+        'Allow background activity',
+        `Turn on autostart / background running for this app on the screen that opened. On ${tracking?.manufacturer ?? 'this phone'} this is what keeps counting alive.`
+      );
+    }
+    refreshHealth();
+  }, [refreshHealth, tracking?.manufacturer]);
 
   const onStart = useCallback(async () => {
     const granted = await requestPermissions();
@@ -266,22 +293,33 @@ export default function App() {
           </View>
         )}
 
-        {battery === true && (
-          <Pressable
-            style={styles.warning}
-            onPress={() => StepTracker.openBatteryOptimizationSettings()}
-          >
-            <Text style={styles.warningText}>
-              Battery optimisation is on for this app. Counting can stop when the
-              screen is off. Tap to change it.
-            </Text>
-          </Pressable>
-        )}
+        {/*
+          Only shown on phones that need it: an aggressive OEM skin, Doze still
+          applying, or evidence (recoveryCount) that the service has actually
+          been killed. Stock Android users never see this card.
+        */}
+        {tracking &&
+          tracking.shouldBeRunning &&
+          (tracking.aggressiveOem ||
+            tracking.batteryOptimizationEnabled ||
+            tracking.recoveryCount > 0) && (
+            <Pressable style={styles.warning} onPress={onFixBackground}>
+              <Text style={styles.warningText}>
+                {tracking.recoveryCount > 0
+                  ? `${tracking.manufacturer} has stopped step counting ${tracking.recoveryCount} ${tracking.recoveryCount === 1 ? 'time' : 'times'}. Your steps were recovered, but the live count and notification were off in between. Tap to keep it running.`
+                  : 'This phone may stop apps in the background to save power. Tap to allow step counting to keep running.'}
+              </Text>
+            </Pressable>
+          )}
 
         {error && <Text style={styles.error}>{error.message}</Text>}
 
         <Text style={styles.footer}>
           Sensor: {snapshot?.source ?? 'none'} · State: {state}
+          {tracking ? ` · Service: ${tracking.serviceAlive ? 'alive' : 'not running'}` : ''}
+          {snapshot?.stepSource?.merged
+            ? ` · ${snapshot.stepSource.appName} +${snapshot.stepSource.baselineSteps.toLocaleString()} baseline`
+            : ''}
         </Text>
       </ScrollView>
     </SafeAreaView>

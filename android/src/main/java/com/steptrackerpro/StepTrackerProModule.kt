@@ -75,14 +75,18 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
      * the user just paired now has data to offer.
      */
     override fun onHostResume() {
+        // The app being in the foreground is the one moment a background
+        // start restriction cannot apply, so this is where a service the OEM
+        // killed while the app was closed gets brought back. The hardware
+        // counter kept counting in the meantime; the first sample after the
+        // restart reconciles everything it saw.
+        recoverServiceIfDead("foreground")
+
         scope.launch {
             runCatching {
                 val config = core.config()
                 if (!config.healthConnectEnabled) return@runCatching
-                val status = core.healthConnect.status(
-                    backgroundRead = config.healthConnectBackgroundRead,
-                    historyRead = config.healthConnectHistoryRead
-                )
+                val status = core.healthConnect.status(core.permissionScope())
                 val fingerprint = "${status["availability"]}|${status["granted"]}|" +
                     "${status["canRead"]}|${status["canWrite"]}"
                 if (fingerprint != lastHealthFingerprint) {
@@ -93,6 +97,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 }
             }
         }
+    }
+
+    private fun recoverServiceIfDead(reason: String) {
+        if (!core.isInitialized()) return
+        if (!core.serviceLooksDead()) return
+        if (!PermissionHelper.canStartTracking(reactContext)) return
+        core.engine.reconcile()
+        ServiceCommands.tryStart(reactContext, recoveredBy = reason)
     }
 
     override fun onHostPause() = Unit
@@ -127,12 +139,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             val merged = mergeConfig(core.config(), config)
             core.updateConfig(merged)
             core.engine.reconcile()
-            if (core.state.trackingState == TrackingState.RUNNING) {
+            if (core.serviceLooksDead() && PermissionHelper.canStartTracking(reactContext)) {
                 // The service may have been killed while JS was gone. This has
                 // to be START: every other command starts the service without
                 // registering a sensor listener, which would leave the tracker
-                // reporting itself as running while counting nothing.
-                ServiceCommands.start(reactContext)
+                // reporting itself as running while counting nothing. Left
+                // alone when it is demonstrably alive, so a JS reload does not
+                // re-run the start path for nothing.
+                ServiceCommands.tryStart(reactContext, recoveredBy = "initialize")
             }
             promise.resolve(Bridge.snapshot(core.engine.snapshot()))
         }
@@ -163,7 +177,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 )
                 return@runSafely
             }
-            val capabilities = PermissionHelper.capabilities(reactContext)
+            val capabilities = PermissionHelper.capabilities(
+                reactContext, allowAccelerometer = core.config().accelerometerFallback
+            )
             if (capabilities["supported"] != true) {
                 promise.reject("E_NO_SENSOR", "No step sensor on this device")
                 return@runSafely
@@ -225,6 +241,22 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun isTracking(promise: Promise) {
         runSafely(promise) {
             promise.resolve(core.state.trackingState == TrackingState.RUNNING)
+        }
+    }
+
+    /**
+     * Whether the tracker is actually working, as opposed to merely marked
+     * running: service liveness, heartbeat age, how often it has had to be
+     * recovered and by what. An app on a Xiaomi shows its "allow autostart"
+     * prompt off `recoveryCount` and `looksDead`, not off a guess.
+     */
+    @ReactMethod
+    override fun getTrackingHealth(promise: Promise) {
+        runSafely(promise) {
+            // Reading health is also the moment to act on it: a dead service
+            // seen from the foreground can be started from the foreground.
+            recoverServiceIfDead("foreground")
+            promise.resolve(Bridge.map(core.trackingHealth()))
         }
     }
 
@@ -318,6 +350,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun resetToday(promise: Promise) {
         launchSafely(promise) {
             core.engine.resetToday()
+            core.state.clearContinuity()
             core.goals.reset()
             // Deliberate write: saveDay() refuses to lower a day, which would
             // leave history and the live counter permanently disagreeing.
@@ -374,7 +407,13 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getDeviceCapabilities(promise: Promise) {
         runSafely(promise) {
-            promise.resolve(Bridge.map(PermissionHelper.capabilities(reactContext)))
+            promise.resolve(
+                Bridge.map(
+                    PermissionHelper.capabilities(
+                        reactContext, allowAccelerometer = core.config().accelerometerFallback
+                    )
+                )
+            )
         }
     }
 
@@ -416,20 +455,20 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Which background restrictions apply here, and which screens exist to lift them. */
+    @ReactMethod
+    override fun getBackgroundRestrictionStatus(promise: Promise) {
+        runSafely(promise) {
+            promise.resolve(Bridge.map(BatteryOptimizationHelper.status(reactContext)))
+        }
+    }
+
     // ---- health connect --------------------------------------------------
 
     @ReactMethod
     override fun getHealthConnectStatus(promise: Promise) {
         launchSafely(promise) {
-            val config = core.config()
-            promise.resolve(
-                Bridge.map(
-                    core.healthConnect.status(
-                        backgroundRead = config.healthConnectBackgroundRead,
-                        historyRead = config.healthConnectHistoryRead
-                    )
-                )
-            )
+            promise.resolve(Bridge.map(core.healthConnect.status(core.permissionScope())))
         }
     }
 
@@ -464,7 +503,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
 
         val config = core.config()
-        val permissions = core.healthConnect.permissionsFor(
+        val permissionScope = core.permissionScope(
             backgroundRead = options.optBoolean(
                 "backgroundRead", config.healthConnectBackgroundRead
             ),
@@ -472,6 +511,15 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 "historyRead", config.healthConnectHistoryRead
             )
         )
+        val permissions = core.healthConnect.permissionsFor(permissionScope)
+        if (permissions.isEmpty()) {
+            // Reads and writes both disabled in config: there is nothing to
+            // ask for, and launching an empty request would show nothing.
+            launchSafely(promise) {
+                promise.resolve(Bridge.map(core.healthConnect.status(permissionScope)))
+            }
+            return
+        }
 
         // The callback is registered only after the launch succeeds. Registering
         // first left it armed when startActivity threw: the promise was rejected
@@ -496,12 +544,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                         // "denied just now" from "the sheet no longer opens",
                         // which Health Connect reports identically.
                         core.state.recordHealthPermissionResult(
-                            granted.containsAll(HealthConnectManager.REQUIRED)
+                            granted.containsAll(permissionScope.required)
                         )
-                        val status = core.healthConnect.status(
-                            backgroundRead = config.healthConnectBackgroundRead,
-                            historyRead = config.healthConnectHistoryRead
-                        )
+                        val status = core.healthConnect.status(permissionScope)
                         StepEventBus.emit(
                             StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED, status
                         )
@@ -551,9 +596,10 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         launchSafely(promise) {
             val revoked = core.healthConnect.revokeAll()
             if (revoked) {
+                core.state.clearContinuity()
                 StepEventBus.emit(
                     StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED,
-                    core.healthConnect.status()
+                    core.healthConnect.status(core.permissionScope())
                 )
             }
             promise.resolve(revoked)
@@ -762,6 +808,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectSyncIntervalMinutes = patch.optInt(
                 "healthConnectSyncIntervalMinutes", current.healthConnectSyncIntervalMinutes
             ),
+            healthConnectReadEnabled = patch.optBoolean(
+                "healthConnectReadEnabled", current.healthConnectReadEnabled
+            ),
             healthConnectWriteEnabled = patch.optBoolean(
                 "healthConnectWriteEnabled", current.healthConnectWriteEnabled
             ),
@@ -782,7 +831,18 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             } else {
                 current.remoteSyncHeaders
             },
-            autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot)
+            autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot),
+            gapRecovery = patch.optString("gapRecovery", current.gapRecovery) ?: current.gapRecovery,
+            watchdogEnabled = patch.optBoolean("watchdogEnabled", current.watchdogEnabled),
+            accelerometerFallback = patch.optBoolean(
+                "accelerometerFallback", current.accelerometerFallback
+            ),
+            accelerometerWakeLock = patch.optBoolean(
+                "accelerometerWakeLock", current.accelerometerWakeLock
+            ),
+            accelerometerThreshold = patch.optDouble(
+                "accelerometerThreshold", current.accelerometerThreshold
+            )
         )
 
     private fun configToMap(config: StepTrackerConfig): Map<String, Any?> = mapOf(
@@ -798,6 +858,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "notificationActions" to config.notificationActions,
         "healthConnectEnabled" to config.healthConnectEnabled,
         "healthConnectSyncIntervalMinutes" to config.healthConnectSyncIntervalMinutes,
+        "healthConnectReadEnabled" to config.healthConnectReadEnabled,
         "healthConnectWriteEnabled" to config.healthConnectWriteEnabled,
         "healthConnectBackgroundRead" to config.healthConnectBackgroundRead,
         "healthConnectHistoryRead" to config.healthConnectHistoryRead,
@@ -805,7 +866,12 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
         "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
-        "autoStartOnBoot" to config.autoStartOnBoot
+        "autoStartOnBoot" to config.autoStartOnBoot,
+        "gapRecovery" to config.gapRecovery,
+        "watchdogEnabled" to config.watchdogEnabled,
+        "accelerometerFallback" to config.accelerometerFallback,
+        "accelerometerWakeLock" to config.accelerometerWakeLock,
+        "accelerometerThreshold" to config.accelerometerThreshold
     )
 
     companion object {

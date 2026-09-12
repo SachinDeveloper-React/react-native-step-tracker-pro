@@ -18,6 +18,7 @@ export interface Spec extends TurboModule {
   stopTracking(): Promise<UnsafeObject>;
   getTrackingState(): Promise<UnsafeObject>;
   isTracking(): Promise<boolean>;
+  getTrackingHealth(): Promise<UnsafeObject>;
 
   // ---- reads -----------------------------------------------------------
   getTodaySteps(): Promise<UnsafeObject>;
@@ -45,6 +46,7 @@ export interface Spec extends TurboModule {
   requestDisableBatteryOptimization(): Promise<boolean>;
   openBatteryOptimizationSettings(): Promise<boolean>;
   openManufacturerAutoStartSettings(): Promise<boolean>;
+  getBackgroundRestrictionStatus(): Promise<UnsafeObject>;
 
   // ---- health connect --------------------------------------------------
   getHealthConnectStatus(): Promise<UnsafeObject>;

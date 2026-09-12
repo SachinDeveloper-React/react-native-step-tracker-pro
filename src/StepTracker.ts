@@ -4,6 +4,7 @@ import type { Spec } from './NativeStepTrackerPro';
 import { DEFAULT_CONFIG, MODULE_NAME, STRIDE_COEFFICIENT } from './constants';
 import { StepTrackerError, toStepTrackerError } from './errors';
 import type {
+  BackgroundRestrictionStatus,
   CompanionApp,
   CurrentStepSource,
   DayRecord,
@@ -21,6 +22,7 @@ import type {
   StepTrackerEvent,
   StepTrackerEventMap,
   SyncEvent,
+  TrackingHealth,
   TrackingState,
 } from './types';
 
@@ -71,10 +73,26 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function resolveStride(config: StepTrackerConfig): number {
-  if (config.strideLength && config.strideLength > 0) return config.strideLength;
-  const height = config.height ?? DEFAULT_CONFIG.height;
-  const sex = config.sex ?? DEFAULT_CONFIG.sex;
+/**
+ * Decides what to send for `strideLength`. The native side derives stride
+ * from its *stored* height and sex whenever the value is 0, so JS never has
+ * to guess at values it does not have: an explicit stride is passed through,
+ * a change to height or sex sends 0 to switch back to derivation, and a
+ * patch touching neither leaves the key alone.
+ */
+function strideForPatch(config: StepTrackerConfig): number | undefined {
+  if (config.strideLength != null) {
+    if (!(config.strideLength > 0)) {
+      throw new StepTrackerError('E_INVALID_CONFIG', 'strideLength must be > 0');
+    }
+    return config.strideLength;
+  }
+  if (config.height != null || config.sex != null) return 0;
+  return undefined;
+}
+
+/** Stride in metres for a given height and sex, the same formula the native side uses. */
+export function estimateStride(height: number, sex: keyof typeof STRIDE_COEFFICIENT = 'unspecified'): number {
   return (height * STRIDE_COEFFICIENT[sex]) / 100;
 }
 
@@ -126,27 +144,28 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
       'historyRetentionDays must be >= 1'
     );
   }
-  const normalised: StepTrackerConfig = {
-    ...DEFAULT_CONFIG,
-    ...config,
-    weeklyGoal: config.weeklyGoal ?? daily * 7,
-    monthlyGoal: config.monthlyGoal ?? daily * 30,
-  };
-
-  // Only derive a stride when the caller actually supplied something it is
-  // derived from. Deriving unconditionally meant that initialize({dailyGoal})
-  // on a returning user recomputed their stride from the default 170 cm and
-  // silently discarded the height they had configured; omitting the key leaves
-  // whatever the native side already has.
   if (
-    config.strideLength != null ||
-    config.height != null ||
-    config.sex != null
+    config.accelerometerThreshold != null &&
+    !(config.accelerometerThreshold >= 0.3 && config.accelerometerThreshold <= 10)
   ) {
-    normalised.strideLength = resolveStride(config);
-  } else {
-    delete normalised.strideLength;
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'accelerometerThreshold must be 0.3–10 m/s²'
+    );
   }
+  // Only the keys the caller supplied cross the bridge. The native side holds
+  // the same defaults and, more importantly, holds whatever the user set last
+  // session: spreading DEFAULT_CONFIG here sent `height: 170` on every
+  // initialize({ dailyGoal }) and silently reset a 190 cm user's stride.
+  const normalised: StepTrackerConfig = { ...config };
+  if (config.dailyGoal != null) {
+    normalised.weeklyGoal = config.weeklyGoal ?? daily * 7;
+    normalised.monthlyGoal = config.monthlyGoal ?? daily * 30;
+  }
+
+  const stride = strideForPatch(config);
+  if (stride === undefined) delete normalised.strideLength;
+  else normalised.strideLength = stride;
   return normalised;
 }
 
@@ -169,18 +188,9 @@ export const StepTracker = {
   /** Patches config at runtime. Notification and goals update immediately. */
   async updateConfig(config: StepTrackerConfig): Promise<StepTrackerConfig> {
     const patch: StepTrackerConfig = { ...config };
-    if (config.height != null || config.sex != null || config.strideLength != null) {
-      // Stride depends on height *and* sex, so a patch carrying only one of
-      // them has to be combined with the stored value of the other. Passing the
-      // bare patch fell back to the package defaults instead, which silently
-      // reset a 190 cm user to 170 cm on updateConfig({ sex }).
-      const current = await StepTracker.getConfig();
-      patch.strideLength = resolveStride({
-        height: config.height ?? current.height,
-        sex: config.sex ?? current.sex,
-        strideLength: config.strideLength,
-      });
-    }
+    const stride = strideForPatch(config);
+    if (stride === undefined) delete patch.strideLength;
+    else patch.strideLength = stride;
     return call(() =>
       getNativeModule().updateConfig(patch)
     ) as Promise<StepTrackerConfig>;
@@ -218,6 +228,16 @@ export const StepTracker = {
 
   async isTracking(): Promise<boolean> {
     return call(() => getNativeModule().isTracking());
+  },
+
+  /**
+   * Whether tracking is actually working, as opposed to merely marked
+   * running. `looksDead` means an OEM killed the service; calling this from
+   * the foreground also restarts it. `recoveryCount` climbing is the cue to
+   * walk the user to `openManufacturerAutoStartSettings()`.
+   */
+  async getTrackingHealth(): Promise<TrackingHealth> {
+    return call(() => getNativeModule().getTrackingHealth()) as Promise<TrackingHealth>;
   },
 
   // ---- reads -----------------------------------------------------------
@@ -324,9 +344,54 @@ export const StepTracker = {
     return call(() => getNativeModule().openBatteryOptimizationSettings());
   },
 
-  /** Best-effort deep link into Xiaomi/Oppo/Vivo/Huawei autostart screens. */
+  /**
+   * Best-effort deep link into the OEM's autostart / background-launch screen
+   * (Xiaomi, Oppo, Realme, OnePlus, Vivo, Huawei, Honor, Tecno, Infinix, itel,
+   * Samsung, Asus and others), falling back to the app-info page.
+   */
   async openManufacturerAutoStartSettings(): Promise<boolean> {
     return call(() => getNativeModule().openManufacturerAutoStartSettings());
+  },
+
+  /**
+   * Which background restrictions apply on this device and which screens
+   * exist to lift them. Drives an onboarding step that only appears on phones
+   * that need it.
+   */
+  async getBackgroundRestrictionStatus(): Promise<BackgroundRestrictionStatus> {
+    return call(() =>
+      getNativeModule().getBackgroundRestrictionStatus()
+    ) as Promise<BackgroundRestrictionStatus>;
+  },
+
+  /**
+   * The whole "keep tracking alive on this phone" flow behind one call, for
+   * an onboarding screen. Returns what was shown so the UI can explain it:
+   *
+   * - `'none'` — stock Android, nothing needed
+   * - `'battery'` — the Doze exemption dialog (or settings list) was opened
+   * - `'autostart'` — an OEM autostart / background screen was opened
+   *
+   * Only one screen opens per call; call again on next foreground until the
+   * status comes back clean. Pass `directPrompt: false` to use the settings
+   * list instead of the `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` dialog.
+   */
+  async requestBackgroundPermissions(
+    options: { directPrompt?: boolean } = {}
+  ): Promise<'none' | 'battery' | 'autostart'> {
+    const status = await StepTracker.getBackgroundRestrictionStatus();
+    if (status.batteryOptimizationEnabled) {
+      const opened =
+        options.directPrompt === false
+          ? await StepTracker.openBatteryOptimizationSettings()
+          : await StepTracker.requestDisableBatteryOptimization();
+      if (opened) return 'battery';
+    }
+    if (status.aggressiveOem && status.autoStartSettingsAvailable) {
+      await StepTracker.openManufacturerAutoStartSettings();
+      return 'autostart';
+    }
+    return 'none';
   },
 
   // ---- health connect --------------------------------------------------

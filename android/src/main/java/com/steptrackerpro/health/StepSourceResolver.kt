@@ -61,7 +61,15 @@ object StepSourceResolver {
         val sourceName: String,
         val deviceSteps: Int,
         val externalSteps: Int,
-        val usedExternal: Boolean
+        val usedExternal: Boolean,
+        /**
+         * True when `totals.steps` is an external baseline plus this device's
+         * live delta on top - the `auto` policy's continuity mode, see
+         * [StepContinuity]. `baselineSteps` is how far ahead the external
+         * source was when the baseline was taken.
+         */
+        val merged: Boolean = false,
+        val baselineSteps: Int = 0
     ) {
         fun toMap(): Map<String, Any?> = mapOf(
             "date" to totals.date,
@@ -71,7 +79,9 @@ object StepSourceResolver {
             "appName" to sourceName,
             "deviceSteps" to deviceSteps,
             "externalSteps" to externalSteps,
-            "usedExternal" to usedExternal
+            "usedExternal" to usedExternal,
+            "merged" to merged,
+            "baselineSteps" to baselineSteps
         )
     }
 

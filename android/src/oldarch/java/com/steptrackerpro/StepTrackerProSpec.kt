@@ -21,6 +21,7 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun stopTracking(promise: Promise)
     abstract fun getTrackingState(promise: Promise)
     abstract fun isTracking(promise: Promise)
+    abstract fun getTrackingHealth(promise: Promise)
 
     abstract fun getTodaySteps(promise: Promise)
     abstract fun getStepsForDate(date: String, promise: Promise)
@@ -44,6 +45,7 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun requestDisableBatteryOptimization(promise: Promise)
     abstract fun openBatteryOptimizationSettings(promise: Promise)
     abstract fun openManufacturerAutoStartSettings(promise: Promise)
+    abstract fun getBackgroundRestrictionStatus(promise: Promise)
 
     abstract fun getHealthConnectStatus(promise: Promise)
     abstract fun requestHealthConnectPermissions(options: ReadableMap, promise: Promise)

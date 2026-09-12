@@ -74,6 +74,9 @@ data class StepSource(
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
+    /** Health Connect's own on-device count - see [StepSourceCatalog.isPlatformOrigin]. */
+    val isPlatform: Boolean get() = StepSourceCatalog.isPlatformOrigin(packageName)
+
     fun toMap(): Map<String, Any?> = mapOf(
         "packageName" to packageName,
         "appName" to appName,
@@ -83,7 +86,8 @@ data class StepSource(
         "calories" to calories,
         "lastRecordAt" to lastRecordAt,
         "isSelf" to isSelf,
-        "isWearable" to isWearable
+        "isWearable" to isWearable,
+        "isPlatform" to isPlatform
     )
 }
 
@@ -100,6 +104,22 @@ object StepSourceCatalog {
 
     /** Health Connect's own provider, which is never a data origin itself. */
     const val PROVIDER_PACKAGE = "com.google.android.apps.healthdata"
+
+    /**
+     * Health Connect's own on-device step counting (Android 14 with SDK
+     * extension 20+, once any app holds READ_STEPS). Recorded from the same
+     * TYPE_STEP_COUNTER this package reads, batched about once a minute.
+     * Attributed to the `android` package before the June 2026 provider
+     * update and to a device- and app-specific synthetic package name of the
+     * form `com.android.healthconnect.phone.<hash>` after it. The hash must
+     * not be hard-coded, so the prefix is what is matched.
+     */
+    const val PLATFORM_PACKAGE = "android"
+    const val PLATFORM_PACKAGE_PREFIX = "com.android.healthconnect.phone."
+    const val PLATFORM_APP_NAME = "This phone (Android)"
+
+    fun isPlatformOrigin(packageName: String): Boolean =
+        packageName == PLATFORM_PACKAGE || packageName.startsWith(PLATFORM_PACKAGE_PREFIX)
 
     private data class Entry(val appName: String, val kind: StepSourceKind)
 
@@ -152,8 +172,10 @@ object StepSourceCatalog {
     val COMPANION_PACKAGES: List<String> =
         KNOWN.filterValues { it.kind.isWearable }.keys.toList()
 
-    fun appName(packageName: String): String =
-        KNOWN[packageName]?.appName ?: packageName
+    fun appName(packageName: String): String = when {
+        isPlatformOrigin(packageName) -> PLATFORM_APP_NAME
+        else -> KNOWN[packageName]?.appName ?: packageName
+    }
 
     /**
      * Classifies an origin. `deviceType` comes from the record metadata and is
@@ -162,6 +184,9 @@ object StepSourceCatalog {
      */
     fun classify(packageName: String, deviceType: Int?, selfPackage: String): StepSourceKind {
         if (packageName == selfPackage) return StepSourceKind.SELF
+        // The platform's own count is this phone's hardware counter under
+        // another name. Never a wearable, whatever the record stamps.
+        if (isPlatformOrigin(packageName)) return StepSourceKind.PHONE
         val fromDevice = StepSourceKind.fromDeviceType(deviceType)
         if (fromDevice != StepSourceKind.UNKNOWN) return fromDevice
         return KNOWN[packageName]?.kind ?: StepSourceKind.UNKNOWN

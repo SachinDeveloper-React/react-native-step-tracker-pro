@@ -179,4 +179,38 @@ class StepSourceResolverTest {
         assertEquals(StepSourcePolicy.AUTO, StepSourcePolicy.from(null))
         assertEquals(StepSourcePolicy.DEVICE, StepSourcePolicy.from("device"))
     }
+
+    @Test
+    fun `health connect's own on-device count is classified as this phone, never a wearable`() {
+        val self = "com.example.app"
+        assertEquals(
+            StepSourceKind.PHONE,
+            StepSourceCatalog.classify("android", null, self)
+        )
+        // Post-June-2026 synthetic package name; the hash is per device and
+        // per app, so only the prefix can be matched.
+        assertEquals(
+            StepSourceKind.PHONE,
+            StepSourceCatalog.classify(
+                "com.android.healthconnect.phone.jd5bdd37e1a8d3667a05d0abebfc4a89e", null, self
+            )
+        )
+        // Even a record stamped TYPE_WATCH does not make the platform a watch.
+        assertEquals(
+            StepSourceKind.PHONE,
+            StepSourceCatalog.classify(
+                "com.android.healthconnect.phone.abc",
+                androidx.health.connect.client.records.metadata.Device.TYPE_WATCH,
+                self
+            )
+        )
+        assertEquals("This phone (Android)", StepSourceCatalog.appName("android"))
+
+        // Under the wearable policy it is therefore ignored, and under auto it
+        // competes on count like any phone-side app.
+        val platform = source("android", 6_000, StepSourceCatalog.classify("android", null, self))
+        assertFalse(resolve(StepSourcePolicy.WEARABLE, device(500), listOf(platform)).usedExternal)
+        assertTrue(resolve(StepSourcePolicy.AUTO, device(500), listOf(platform)).usedExternal)
+        assertTrue(platform.isPlatform)
+    }
 }

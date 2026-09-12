@@ -39,9 +39,13 @@ class StepCounterEngineTest {
 
     /** Uptime is fed in too, so nothing depends on the host device's real uptime. */
     private var fakeElapsed: Long = 0L
-    private val rollovers = mutableListOf<Pair<DayTotals, String>>()
 
-    private fun now() = System.currentTimeMillis()
+    /** Wall clock, so gap splitting across midnight is deterministic. */
+    private var fakeNow: Long = 0L
+    private val rollovers = mutableListOf<Pair<DayTotals, String>>()
+    private val backfills = mutableListOf<Map<String, Int>>()
+
+    private fun now() = fakeNow
 
     private fun bootAt(dateKey: String, hour: Int) =
         DateKeys.startOfDayMillis(dateKey) + hour * 3_600_000L
@@ -55,6 +59,7 @@ class StepCounterEngineTest {
         state = StepStateStore(context)
         fakeBoot = bootAt(DateKeys.today(), 1)
         fakeElapsed = 6 * 3_600_000L
+        fakeNow = bootAt(DateKeys.today(), 12)
 
         // A steady-state device: booted at 01:00 today, anchor already pinned.
         state.activeDate = DateKeys.today()
@@ -64,13 +69,16 @@ class StepCounterEngineTest {
         state.stepsToday = 0
 
         rollovers.clear()
+        backfills.clear()
         engine = StepCounterEngine(
             state,
             MetricsCalculator(StepTrackerConfig()),
             { fakeElapsed },
-            { fakeBoot }
+            { fakeBoot },
+            { fakeNow }
         )
         engine.onDayRollover = { totals, nextDate -> rollovers += totals to nextDate }
+        engine.onBackfill = { shares -> backfills += shares }
     }
 
     @Test
@@ -103,40 +111,104 @@ class StepCounterEngineTest {
     }
 
     @Test
-    fun rebootOnPreviousDayDropsPreServiceSteps() {
+    fun rebootOnPreviousDaySplitsPreServiceStepsAcrossMidnight() {
         engine.onCounterSample(1200f, now())
 
-        // Booted at 23:00 yesterday: the 400 steps since boot straddle
-        // midnight and cannot be attributed, so they are dropped.
+        // Booted at 23:00 yesterday and the first sample arrives at 09:00
+        // today: the 400 steps since boot straddle midnight. One hour of the
+        // ten fell yesterday, so 40 go to yesterday and 360 to today.
         fakeBoot = bootAt(DateKeys.yesterday(), 23)
+        fakeNow = bootAt(DateKeys.today(), 9)
 
-        assertNull(engine.onCounterSample(400f, now()))
-        assertEquals(1200, state.stepsToday)
+        assertEquals(1560, engine.onCounterSample(400f, now())!!.steps)
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 40)), backfills)
 
         // Everything after the re-anchor counts normally.
+        assertEquals(1590, engine.onCounterSample(430f, now())!!.steps)
+    }
+
+    @Test
+    fun rebootOnPreviousDayDropsPreServiceStepsUnderDropPolicy() {
+        engine.gapRecovery = StepCounterEngine.GapRecovery.DROP
+        engine.onCounterSample(1200f, now())
+
+        fakeBoot = bootAt(DateKeys.yesterday(), 23)
+        fakeNow = bootAt(DateKeys.today(), 9)
+
+        // Nothing since boot can be proven to be today's, so all of it goes.
+        assertNull(engine.onCounterSample(400f, now()))
+        assertEquals(1200, state.stepsToday)
+        assertTrue(backfills.isEmpty())
+
         assertEquals(1230, engine.onCounterSample(430f, now())!!.steps)
     }
 
     @Test
-    fun midnightRolloverFinalisesPreviousDay() {
+    fun overnightKillRecoversTheGapOnBothSidesOfMidnight() {
+        // Last sample at 22:00 yesterday, then an OEM task killer. The
+        // hardware counted 1,000 more by the time the app is opened at 08:00.
         state.activeDate = DateKeys.yesterday()
-        state.anchorValue = 5000f
-        state.anchorSteps = 900
-        state.stepsToday = 900
-        fakeBoot = bootAt(DateKeys.yesterday(), 8)
+        state.anchorValue = 0f
+        state.anchorSteps = 0
+        state.lastRawValue = 4000f
+        state.stepsToday = 4000
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 22)
+        fakeBoot = bootAt(DateKeys.yesterday(), 6)
+        fakeNow = bootAt(DateKeys.today(), 8)
 
-        engine.onCounterSample(5010f, now())
+        // Two of the ten hours were yesterday: 200 back to yesterday, 800 today.
+        assertEquals(800, engine.onCounterSample(5000f, now())!!.steps)
+        assertEquals(1, rollovers.size)
+        assertEquals(4000, rollovers[0].first.steps)
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 200)), backfills)
+        assertEquals(DateKeys.today(), state.activeDate)
+
+        assertEquals(850, engine.onCounterSample(5050f, now())!!.steps)
+    }
+
+    @Test
+    fun overnightKillUnderTodayPolicyCreditsEverythingToToday() {
+        engine.gapRecovery = StepCounterEngine.GapRecovery.TODAY
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 0f
+        state.anchorSteps = 0
+        state.lastRawValue = 4000f
+        state.stepsToday = 4000
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 22)
+        fakeBoot = bootAt(DateKeys.yesterday(), 6)
+        fakeNow = bootAt(DateKeys.today(), 8)
+
+        assertEquals(1000, engine.onCounterSample(5000f, now())!!.steps)
+        assertTrue(backfills.isEmpty())
+    }
+
+    @Test
+    fun midnightRolloverFinalisesPreviousDay() {
+        // Steady state late yesterday: 900 steps, last reading 5000 at 23:59:30.
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 4100f
+        state.anchorSteps = 0
+        state.lastRawValue = 5000f
+        state.stepsToday = 900
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 23) + 59 * 60_000L + 30_000L
+        fakeBoot = bootAt(DateKeys.yesterday(), 8)
+        // The next sample lands 30 s after midnight with 10 more steps.
+        fakeNow = bootAt(DateKeys.today(), 0) + 30_000L
+
+        val first = engine.onCounterSample(5010f, now())
 
         assertEquals(1, rollovers.size)
         assertEquals(DateKeys.yesterday(), rollovers[0].first.date)
         assertEquals(900, rollovers[0].first.steps)
         assertEquals(DateKeys.today(), rollovers[0].second)
-
         assertEquals(DateKeys.today(), state.activeDate)
-        assertEquals(0, state.stepsToday)
+
+        // The 10 steps straddled midnight evenly: 5 back to yesterday, 5 today.
+        assertEquals(5, first!!.steps)
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 5)), backfills)
 
         // Yesterday's cumulative reading must not leak into today.
-        assertEquals(30, engine.onCounterSample(5040f, now())!!.steps)
+        assertEquals(35, engine.onCounterSample(5040f, now())!!.steps)
     }
 
     @Test
@@ -188,9 +260,10 @@ class StepCounterEngineTest {
         assertEquals(0, state.stepsToday)
         assertEquals(0, engine.snapshot().steps)
 
-        // Re-anchors against the live reading rather than replaying the 500.
-        assertNull(engine.onCounterSample(510f, now()))
-        assertEquals(20, engine.onCounterSample(530f, now())!!.steps)
+        // Counts on from the last reading rather than replaying the 500: the
+        // 10 steps since the reset are today's, the 500 before it are not.
+        assertEquals(10, engine.onCounterSample(510f, now())!!.steps)
+        assertEquals(30, engine.onCounterSample(530f, now())!!.steps)
     }
 
     @Test
@@ -204,10 +277,10 @@ class StepCounterEngineTest {
         // restarted and its reading still contains every step in stepsToday.
         fakeBoot = bootAt(DateKeys.today(), 4)
 
-        assertNull(engine.onCounterSample(5001f, now()))
-        assertEquals(5000, state.stepsToday)
-
-        assertEquals(5010, engine.onCounterSample(5011f, now())!!.steps)
+        // Not a reboot, so the one step since the last reading is exactly
+        // that - one step - rather than 5,001 steps since boot.
+        assertEquals(5001, engine.onCounterSample(5001f, now())!!.steps)
+        assertEquals(5011, engine.onCounterSample(5011f, now())!!.steps)
     }
 
     @Test
@@ -223,7 +296,8 @@ class StepCounterEngineTest {
             state,
             MetricsCalculator(StepTrackerConfig()),
             { fakeElapsed },
-            { fakeBoot }
+            { fakeBoot },
+            { fakeNow }
         )
         restarted.setPaused(false)
         restarted.reconcile()
@@ -267,12 +341,10 @@ class StepCounterEngineTest {
         engine.seedActiveDay(DateKeys.today(), 9000)
         assertEquals(9000, state.stepsToday)
 
-        // Seeding clears the anchor, so the next sample re-pins against the live
-        // reading and contributes nothing - it cannot know how much of that
-        // reading belongs to the adopted day. Counting resumes from the one
-        // after, exactly as at every other re-anchor point.
-        assertNull(engine.onCounterSample(3130f, now()))
-        assertEquals(9030, engine.onCounterSample(3160f, now())!!.steps)
+        // Seeding clears the anchor; the next sample claims exactly the delta
+        // since the last reading on top of the seeded total.
+        assertEquals(9030, engine.onCounterSample(3130f, now())!!.steps)
+        assertEquals(9060, engine.onCounterSample(3160f, now())!!.steps)
     }
 
     @Test
@@ -288,6 +360,33 @@ class StepCounterEngineTest {
         fakeElapsed = 30_000L
 
         assertEquals(2200, engine.onCounterSample(2000f, now())!!.steps)
+    }
+
+    @Test
+    fun freshInstallOnAnOldBootDoesNotInventHistory() {
+        // Never seen a reading, device up since yesterday morning with
+        // 20,000 steps on the counter. None of that is this app's to claim.
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.yesterday(), 7)
+
+        assertNull(engine.onCounterSample(20_000f, now()))
+        assertEquals(0, state.stepsToday)
+        assertTrue(backfills.isEmpty())
+
+        assertEquals(25, engine.onCounterSample(20_025f, now())!!.steps)
+    }
+
+    @Test
+    fun freshInstallOnTodaysBootClaimsStepsSinceBoot() {
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.today(), 7)
+
+        assertEquals(3000, engine.onCounterSample(3000f, now())!!.steps)
+        assertTrue(backfills.isEmpty())
     }
 
     @Test

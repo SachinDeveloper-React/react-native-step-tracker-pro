@@ -33,9 +33,16 @@ data class StepTrackerConfig(
     val healthConnectEnabled: Boolean = true,
     val healthConnectSyncIntervalMinutes: Int = 30,
     /**
+     * Read other apps' steps back out of Health Connect. Off means the
+     * `READ_*` permissions are never requested and every policy behaves like
+     * `device` - the shape of an app that only mirrors its own count out.
+     */
+    val healthConnectReadEnabled: Boolean = true,
+    /**
      * Mirror this device's counts into Health Connect. Turning it off leaves
      * reads working, which is the right shape for an app that only wants to
-     * display a watch's numbers without adding a second copy of its own.
+     * display a watch's numbers without adding a second copy of its own. Off
+     * also means the `WRITE_*` permissions are never requested.
      */
     val healthConnectWriteEnabled: Boolean = true,
     /** Ask for `READ_HEALTH_DATA_IN_BACKGROUND` alongside the required set. */
@@ -54,7 +61,33 @@ data class StepTrackerConfig(
     val privacyPolicyUrl: String? = null,
     val remoteSyncUrl: String? = null,
     val remoteSyncHeaders: Map<String, String> = emptyMap(),
-    val autoStartOnBoot: Boolean = true
+    val autoStartOnBoot: Boolean = true,
+    /**
+     * What to do with steps the hardware counted while the service was dead
+     * and the gap crossed midnight. One of `split` (default), `today`, `drop`.
+     * See [StepCounterEngine.GapRecovery].
+     */
+    val gapRecovery: String = "split",
+    /**
+     * Re-launch the service from a periodic WorkManager job when it is found
+     * dead while tracking is supposed to be on. Needed on OEM skins that kill
+     * foreground services and ignore START_STICKY.
+     */
+    val watchdogEnabled: Boolean = true,
+    /**
+     * Count with a software pedometer over the accelerometer when the device
+     * has neither step sensor. Costs battery - the CPU has to stay awake to
+     * sample - so it is only ever a last resort, never a preference.
+     */
+    val accelerometerFallback: Boolean = true,
+    /**
+     * Hold a partial wake lock while sampling the accelerometer, so counting
+     * continues with the screen off on devices whose accelerometer is not a
+     * wake-up sensor. Off means steps stop with the screen on those devices.
+     */
+    val accelerometerWakeLock: Boolean = true,
+    /** Peak linear acceleration, m/s², that counts as a step. */
+    val accelerometerThreshold: Double = AccelerometerStepDetector.DEFAULT_THRESHOLD.toDouble()
 ) {
 
     /**
@@ -90,7 +123,13 @@ data class StepTrackerConfig(
         // differently, and silently counting nothing would be worse.
         stepSource = com.steptrackerpro.health.StepSourcePolicy.from(stepSource).jsValue,
         preferredStepSourcePackage = preferredStepSourcePackage?.takeIf { it.isNotBlank() },
-        privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() }
+        privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
+        gapRecovery = StepCounterEngine.GapRecovery.from(gapRecovery).jsValue,
+        accelerometerThreshold = if (accelerometerThreshold.isFinite()) {
+            accelerometerThreshold.coerceIn(0.3, 10.0)
+        } else {
+            AccelerometerStepDetector.DEFAULT_THRESHOLD.toDouble()
+        }
     )
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -113,6 +152,7 @@ data class StepTrackerConfig(
         put("persistEveryNSteps", persistEveryNSteps)
         put("healthConnectEnabled", healthConnectEnabled)
         put("healthConnectSyncIntervalMinutes", healthConnectSyncIntervalMinutes)
+        put("healthConnectReadEnabled", healthConnectReadEnabled)
         put("healthConnectWriteEnabled", healthConnectWriteEnabled)
         put("healthConnectBackgroundRead", healthConnectBackgroundRead)
         put("healthConnectHistoryRead", healthConnectHistoryRead)
@@ -122,6 +162,11 @@ data class StepTrackerConfig(
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
         put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
         put("autoStartOnBoot", autoStartOnBoot)
+        put("gapRecovery", gapRecovery)
+        put("watchdogEnabled", watchdogEnabled)
+        put("accelerometerFallback", accelerometerFallback)
+        put("accelerometerWakeLock", accelerometerWakeLock)
+        put("accelerometerThreshold", accelerometerThreshold)
     }
 
     companion object {
@@ -166,6 +211,9 @@ data class StepTrackerConfig(
                     "healthConnectSyncIntervalMinutes",
                     fallback.healthConnectSyncIntervalMinutes
                 ),
+                healthConnectReadEnabled = json.optBoolean(
+                    "healthConnectReadEnabled", fallback.healthConnectReadEnabled
+                ),
                 healthConnectWriteEnabled = json.optBoolean(
                     "healthConnectWriteEnabled", fallback.healthConnectWriteEnabled
                 ),
@@ -181,7 +229,18 @@ data class StepTrackerConfig(
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,
-                autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot)
+                autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot),
+                gapRecovery = json.optString("gapRecovery", fallback.gapRecovery),
+                watchdogEnabled = json.optBoolean("watchdogEnabled", fallback.watchdogEnabled),
+                accelerometerFallback = json.optBoolean(
+                    "accelerometerFallback", fallback.accelerometerFallback
+                ),
+                accelerometerWakeLock = json.optBoolean(
+                    "accelerometerWakeLock", fallback.accelerometerWakeLock
+                ),
+                accelerometerThreshold = json.optDouble(
+                    "accelerometerThreshold", fallback.accelerometerThreshold
+                )
             )
         }
 

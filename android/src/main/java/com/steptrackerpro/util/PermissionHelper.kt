@@ -67,14 +67,32 @@ object PermissionHelper {
         "allGranted" to canStartTracking(context)
     )
 
-    fun capabilities(context: Context): Map<String, Any?> {
+    /**
+     * @param allowAccelerometer whether the software pedometer counts as
+     *   support, i.e. the `accelerometerFallback` config flag.
+     */
+    fun capabilities(context: Context, allowAccelerometer: Boolean = true): Map<String, Any?> {
         val sensors = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
         val counter = sensors?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER) != null
         val detector = sensors?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR) != null
+        val accelerometer = sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) != null
+        // A wake-up accelerometer keeps delivering with the CPU asleep; without
+        // one the service has to hold a wake lock, which is the battery cost
+        // the docs warn about.
+        val wakeUpAccelerometer = sensors?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER, true) != null
+        val best = when {
+            counter -> "step_counter"
+            detector -> "step_detector"
+            accelerometer && allowAccelerometer -> "accelerometer"
+            else -> "none"
+        }
         return mapOf(
             "hasStepCounter" to counter,
             "hasStepDetector" to detector,
-            "supported" to (counter || detector),
+            "hasAccelerometer" to accelerometer,
+            "hasWakeUpAccelerometer" to wakeUpAccelerometer,
+            "supported" to (best != "none"),
+            "bestSensor" to best,
             "sdkInt" to Build.VERSION.SDK_INT,
             "manufacturer" to Build.MANUFACTURER,
             "model" to Build.MODEL

@@ -49,15 +49,18 @@ cd android
 ./gradlew :react-native-step-tracker-pro:connectedAndroidTest
 ```
 
-Runs fine on an emulator — the tests never touch the sensor. Eleven cases
-covering:
+Runs fine on an emulator — the tests never touch the sensor. Twenty-two cases,
+among them:
 
 | Test | What breaks if it fails |
 |---|---|
 | `accumulatesCounterDeltas` | basic counting |
 | `sensorResetWithoutRebootDoesNotDoubleCount` | OEM HAL restarts inflate the total |
 | `rebootOnSameDayClaimsStepsTakenSinceBoot` | steps between boot and service start are lost |
-| `rebootOnPreviousDayDropsPreServiceSteps` | yesterday's steps land in today |
+| `rebootOnPreviousDaySplitsPreServiceStepsAcrossMidnight` | steps since a pre-midnight boot are dropped or all land in one day |
+| `overnightKillRecoversTheGapOnBothSidesOfMidnight` | steps counted while an OEM had the process dead overnight are lost |
+| `freshInstallOnAnOldBootDoesNotInventHistory` | a new install credits itself with days of steps it never saw |
+| `wallClockJumpIsNotMistakenForAReboot` | an NTP correction doubles the day |
 | `midnightRolloverFinalisesPreviousDay` | day totals never close, or leak forward |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |
@@ -194,12 +197,36 @@ adb shell dumpsys deviceidle unforce && adb shell dumpsys battery reset
 
 ### OEM battery management
 
-Test on a Xiaomi, Oppo, Vivo or Realme device if you have one. They kill
-foreground services that survive fine on a Pixel.
+Test on a Xiaomi, Oppo, Vivo, Realme or Tecno device if you have one. They
+kill foreground services that survive fine on a Pixel.
 
-- [ ] with autostart off: counting stops (expected)
-- [ ] `openManufacturerAutoStartSettings()` lands on the right screen
-- [ ] with autostart on: counting survives an hour with the screen off
+- [ ] with autostart off: the notification disappears within an hour of the screen going off (expected)
+- [ ] walk 200 steps with it gone, open the app: the steps are there and `getTrackingHealth().recoveryCount` moved
+- [ ] `getBackgroundRestrictionStatus().aggressiveOem` is true
+- [ ] `openManufacturerAutoStartSettings()` lands on the OEM screen, not app info
+- [ ] with autostart on and the battery exemption granted: counting survives an hour with the screen off, and if it is still killed the watchdog brings it back within 15 minutes (`lastRecoveryReason: 'watchdog'`)
+
+### Accelerometer fallback
+
+Needs a phone with no step sensor, or a debug build with the two hardware
+paths stubbed out. `getDeviceCapabilities().bestSensor` must read
+`'accelerometer'`.
+
+- [ ] walk 100 steps with the phone in a pocket: count within ±5
+- [ ] same with the phone in a bag: count within ±10
+- [ ] pick the phone up, put it down, repeat five times: count unchanged
+- [ ] ten minutes as a car passenger on a normal road: fewer than 20 steps
+- [ ] screen off for ten minutes while walking: steps present when it comes back on (wake lock held — `adb shell dumpsys power | grep steptrackerpro`)
+- [ ] `adb shell am force-stop`, walk, reopen: those steps are **not** there — expected, and documented
+
+### Health Connect continuity (`auto`)
+
+Needs a second source — Samsung Health, Google Fit, or a watch.
+
+- [ ] with the other app ahead, `getTodaySteps().stepSource.merged` is true
+- [ ] walk 20 steps: the number rises by ~20 immediately, without waiting for the other app to sync
+- [ ] when the other app syncs, the number does not jump by the same 20 again
+- [ ] leave the phone on a desk and walk with the watch: the number catches up on the next read
 
 ### Health Connect
 

@@ -5,8 +5,12 @@
 /** Biological sex is only used to pick a stride-length coefficient. */
 export type Sex = 'male' | 'female' | 'unspecified';
 
-/** Which hardware sensor the service ended up using. */
-export type SensorSource = 'step_counter' | 'step_detector' | 'none';
+/**
+ * Which sensor the service ended up using. `'accelerometer'` is the software
+ * pedometer used on phones with neither step sensor; it costs battery and
+ * loses steps taken while the process is dead.
+ */
+export type SensorSource = 'step_counter' | 'step_detector' | 'accelerometer' | 'none';
 
 export type TrackingState =
   | 'idle'
@@ -56,11 +60,19 @@ export interface StepTrackerConfig {
   /** Auto-write today's totals to Health Connect every N minutes. Default 30. 0 disables. */
   healthConnectSyncIntervalMinutes?: number;
   /**
+   * Read other apps' steps back out of Health Connect. Default true.
+   *
+   * Set false for an app that only mirrors its own count out: the `READ_*`
+   * permissions are then never requested, and every `stepSource` policy
+   * behaves like `'device'`.
+   */
+  healthConnectReadEnabled?: boolean;
+  /**
    * Write this device's counts into Health Connect. Default true.
    *
    * Set false for an app that only displays another source's data — it keeps
    * reads working while making sure nothing extra is added to the user's
-   * Health Connect record.
+   * Health Connect record, and the `WRITE_*` permissions are never requested.
    */
   healthConnectWriteEnabled?: boolean;
   /**
@@ -97,7 +109,58 @@ export interface StepTrackerConfig {
   remoteSyncHeaders?: Record<string, string>;
   /** Restart tracking automatically after device reboot. Default true. */
   autoStartOnBoot?: boolean;
+  /**
+   * What to do with steps the hardware counted while the service was dead
+   * and the gap crossed midnight. Default `'split'`. See {@link GapRecovery}.
+   */
+  gapRecovery?: GapRecovery;
+  /**
+   * Re-launch the service from a 15-minute WorkManager job when an OEM task
+   * killer has removed it. Default true. Needs the battery-optimisation
+   * exemption on Android 12+ to actually succeed from the background; the
+   * foreground restart on next app open works regardless.
+   */
+  watchdogEnabled?: boolean;
+  /**
+   * On a phone with neither `TYPE_STEP_COUNTER` nor `TYPE_STEP_DETECTOR`,
+   * count with a software pedometer over the accelerometer instead of
+   * refusing to start. Default true. Never used when a step sensor exists.
+   *
+   * The cost: the CPU has to stay awake to sample, which is several percent
+   * of battery a day, and steps taken while the process is dead are lost —
+   * there is no hardware counter to reconcile from.
+   */
+  accelerometerFallback?: boolean;
+  /**
+   * Hold a partial wake lock while the accelerometer is sampled, so counting
+   * continues with the screen off on phones whose accelerometer is not a
+   * wake-up sensor (most budget phones). Default true. Off trades battery
+   * for steps only counted while the screen is on.
+   */
+  accelerometerWakeLock?: boolean;
+  /**
+   * Peak linear acceleration in m/s² that counts as a step for the software
+   * pedometer. Default 0.9. Raise it if a user reports steps in a vehicle,
+   * lower it if a gentle walk with the phone in a bag is missed.
+   */
+  accelerometerThreshold?: number;
 }
+
+/**
+ * The hardware counter keeps counting while the process is dead, so the first
+ * sample after an OEM kill carries every step since the last one seen. Inside
+ * one day they all belong to today. When the gap crossed midnight there is no
+ * per-step timestamp to place them with:
+ *
+ * - `'split'` (default) spreads them across the days in the gap in proportion
+ *   to time. A service killed at 23:00 and revived at 09:00 gives one tenth
+ *   to yesterday and the rest to today.
+ * - `'today'` credits all of them to the current day.
+ * - `'drop'` discards whatever cannot be placed on the current day. The
+ *   choice for an app where step counts have monetary value and an
+ *   over-credit is worse than a loss.
+ */
+export type GapRecovery = 'split' | 'today' | 'drop';
 
 export interface StepSnapshot {
   /** yyyy-MM-dd in the device timezone. */
@@ -194,8 +257,15 @@ export interface HealthConnectStatus {
   requiresUpdate: boolean;
   /** `installHealthConnect()` would lead somewhere useful. */
   installable: boolean;
-  /** Every required read and write permission is granted. */
+  /**
+   * Everything *this app* needs is granted — the read set when
+   * `healthConnectReadEnabled`, the write set when `healthConnectWriteEnabled`.
+   */
   granted: boolean;
+  /** Reads are part of what this app asks for (`healthConnectReadEnabled`). */
+  readRequired: boolean;
+  /** Writes are part of what this app asks for (`healthConnectWriteEnabled`). */
+  writeRequired: boolean;
   /** Reads are permitted. Enough to display a watch's steps. */
   canRead: boolean;
   /** Writes are permitted. Enough to mirror this device's steps. */
@@ -273,6 +343,13 @@ export interface StepSource {
   isSelf: boolean;
   /** Counted on the body rather than in a pocket. */
   isWearable: boolean;
+  /**
+   * Health Connect's own on-device step count (Android 14, SDK extension
+   * 20+), attributed to `android` or to `com.android.healthconnect.phone.<hash>`.
+   * It comes from the same hardware counter this package reads, so it is
+   * classified `'phone'`, never a wearable.
+   */
+  isPlatform: boolean;
 }
 
 /** The outcome of picking a source for one day. */
@@ -290,6 +367,15 @@ export interface ResolvedStepSource {
   externalSteps: number;
   /** True when `steps` came from Health Connect rather than this device. */
   usedExternal: boolean;
+  /**
+   * True when `steps` is an external baseline plus this phone's live delta
+   * on top — the `'auto'` policy's continuity mode. The other app reported
+   * `deviceSteps + baselineSteps` at its last sync, and every step the phone
+   * has counted since is added so the number keeps moving between syncs.
+   */
+  merged: boolean;
+  /** How far ahead the external source was when the baseline was taken. */
+  baselineSteps: number;
 }
 
 export interface CurrentStepSource extends ResolvedStepSource {
@@ -311,12 +397,79 @@ export interface CompanionApp {
 }
 
 export interface DeviceCapabilities {
+  /** The hardware cumulative counter. The best case: counts with the process dead. */
   hasStepCounter: boolean;
+  /** The hardware per-step event. Loses steps while the process is dead. */
   hasStepDetector: boolean;
+  hasAccelerometer: boolean;
+  /**
+   * The accelerometer keeps delivering with the CPU asleep. Without it the
+   * software pedometer needs a wake lock, which is what costs battery.
+   */
+  hasWakeUpAccelerometer: boolean;
+  /** `startTracking()` will work. Honours `accelerometerFallback`. */
   supported: boolean;
+  /** The sensor the service will use, in order of preference. */
+  bestSensor: SensorSource;
   sdkInt: number;
   manufacturer: string;
   model: string;
+}
+
+/**
+ * Whether tracking is actually working, as opposed to merely marked running.
+ * `looksDead` is the signal to act on: the user has tracking on, but no
+ * service instance exists in the process — an OEM task killer removed it.
+ */
+export interface TrackingHealth {
+  /** A service instance exists in this process right now. */
+  serviceAlive: boolean;
+  /** The user started tracking and never stopped it (paused counts). */
+  shouldBeRunning: boolean;
+  /** Epoch ms of the last heartbeat; 0 when the service has never run. */
+  lastHeartbeatAt: number;
+  /** Milliseconds since the last heartbeat; -1 when there is none. */
+  heartbeatAgeMs: number;
+  /** Epoch ms of the last sensor sample. */
+  lastSensorEventAt: number;
+  /** Epoch ms of the last time the service was brought back by something other than the user. */
+  lastRecoveryAt: number;
+  /** `'sticky' | 'boot' | 'watchdog' | 'foreground' | 'initialize'`, or null. */
+  lastRecoveryReason: string | null;
+  /** Recoveries since the user last pressed start. High means an OEM is killing the service. */
+  recoveryCount: number;
+  /** Should be running (started, never stopped — paused counts) but no service exists. */
+  looksDead: boolean;
+  batteryOptimizationEnabled: boolean;
+  /** The manufacturer's skin is known to kill foreground services. */
+  aggressiveOem: boolean;
+  manufacturer: string;
+}
+
+/** Which background restrictions apply on this device, and which screens lift them. */
+export interface BackgroundRestrictionStatus {
+  manufacturer: string;
+  brand: string;
+  /** Xiaomi, Oppo, Vivo, Realme, Huawei, Tecno/Infinix/itel, Samsung and others known to kill services. */
+  aggressiveOem: boolean;
+  /** Doze restrictions still apply; `openBatteryOptimizationSettings()` or `requestDisableBatteryOptimization()`. */
+  batteryOptimizationEnabled: boolean;
+  /** `openManufacturerAutoStartSettings()` will land on an OEM screen rather than app info. */
+  autoStartSettingsAvailable: boolean;
+  /**
+   * The OEM screen it will open, as `package/class`, or null when it will
+   * fall back to app info. Known components are tried first; when none
+   * resolves, the OEM's manager package is scanned for an exported activity
+   * named like an autostart or battery screen, so unlisted firmware still
+   * lands somewhere useful. Log it in support tickets.
+   */
+  autoStartTarget: string | null;
+  /**
+   * Android 12+: a foreground service cannot be started from the background
+   * without an exemption, so the watchdog can only revive a killed service
+   * once the battery exemption is granted.
+   */
+  backgroundStartNeedsExemption: boolean;
 }
 
 export interface StepsChangedEvent extends StepSnapshot {}

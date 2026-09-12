@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.withTransaction
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.MetricsCalculator
 import com.steptrackerpro.core.RangeStats
 import com.steptrackerpro.core.SyncTarget
 
@@ -34,6 +35,24 @@ class StepRepository(context: Context) {
     suspend fun overwriteDay(totals: DayTotals) = db.withTransaction {
         history.replace(totals.toEntity())
         summaries.upsert(totals.toSummary())
+    }
+
+    /**
+     * Adds steps on top of a stored day - the backfill path for steps the
+     * hardware counted while the process was dead and the gap crossed
+     * midnight. Distance and calories are re-derived from the new total so
+     * the three stay consistent, and the row is re-queued for both syncs by
+     * [StepHistoryDao.update].
+     */
+    suspend fun addToDay(date: String, steps: Int, metrics: MetricsCalculator) {
+        if (steps <= 0) return
+        db.withTransaction {
+            val existing = history.findByDate(date)
+            val total = (existing?.steps ?: 0) + steps
+            val totals = metrics.totals(date, total)
+            history.replace(totals.toEntity())
+            summaries.upsert(totals.toSummary())
+        }
     }
 
     suspend fun getDay(date: String): DayTotals =

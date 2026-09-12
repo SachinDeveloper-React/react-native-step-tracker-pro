@@ -18,14 +18,21 @@ import java.util.concurrent.TimeUnit
  * The two syncs use UPDATE rather than KEEP so a config change takes effect on
  * the next run; UPDATE preserves the existing work's `lastEnqueueTime` and
  * `periodCount`, so calling this on every app launch does not push the next run
- * out and starve the job the way REPLACE would.
+ * out and starve the job the way REPLACE would. Retention and the watchdog use
+ * KEEP: their parameters never change, and re-enqueueing them would only
+ * reset their period.
  */
 object SyncScheduler {
 
     fun schedule(context: Context, config: StepTrackerConfig) {
         val work = WorkManager.getInstance(context)
 
-        if (config.healthConnectEnabled && config.healthConnectSyncIntervalMinutes > 0) {
+        // The sync worker only ever writes, so an app that reads without
+        // mirroring (healthConnectWriteEnabled = false) has nothing for it to
+        // do and does not get a job that wakes up every half hour to say so.
+        if (config.healthConnectEnabled && config.healthConnectWriteEnabled &&
+            config.healthConnectSyncIntervalMinutes > 0
+        ) {
             val interval = config.healthConnectSyncIntervalMinutes.toLong()
                 .coerceAtLeast(15L) // WorkManager's minimum period
             work.enqueueUniquePeriodicWork(
@@ -60,6 +67,26 @@ object SyncScheduler {
             RetentionWorker.NAME,
             ExistingPeriodicWorkPolicy.KEEP,
             PeriodicWorkRequestBuilder<RetentionWorker>(1, TimeUnit.DAYS).build()
+        )
+
+        if (!config.watchdogEnabled) work.cancelUniqueWork(WatchdogWorker.NAME)
+    }
+
+    /**
+     * Enqueued by the service when tracking starts, not on every config
+     * write: an app in Health-Connect-only mode never runs the service and
+     * has nothing for a watchdog to watch.
+     */
+    fun scheduleWatchdog(context: Context, config: StepTrackerConfig) {
+        val work = WorkManager.getInstance(context)
+        if (!config.watchdogEnabled) {
+            work.cancelUniqueWork(WatchdogWorker.NAME)
+            return
+        }
+        work.enqueueUniquePeriodicWork(
+            WatchdogWorker.NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            PeriodicWorkRequestBuilder<WatchdogWorker>(15, TimeUnit.MINUTES).build()
         )
     }
 
@@ -98,5 +125,6 @@ object SyncScheduler {
         work.cancelUniqueWork(HealthConnectSyncWorker.NAME)
         work.cancelUniqueWork(RemoteSyncWorker.NAME)
         work.cancelUniqueWork(RetentionWorker.NAME)
+        work.cancelUniqueWork(WatchdogWorker.NAME)
     }
 }

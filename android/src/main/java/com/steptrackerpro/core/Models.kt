@@ -17,6 +17,8 @@ enum class TrackingState(val jsValue: String) {
 enum class SensorSource(val jsValue: String) {
     STEP_COUNTER("step_counter"),
     STEP_DETECTOR("step_detector"),
+    /** Software pedometer over TYPE_ACCELEROMETER; see [AccelerometerStepDetector]. */
+    ACCELEROMETER("accelerometer"),
     NONE("none");
 
     companion object {

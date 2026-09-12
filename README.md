@@ -1,7 +1,8 @@
 # react-native-step-tracker-pro
 
 Android step tracking for React Native that keeps counting when the app is
-closed, the screen is locked, the process is killed, or the phone reboots.
+closed, the screen is locked, the process is killed, or the phone reboots —
+and keeps the number moving when a watch or another app is also counting.
 Hardware sensor → foreground service → Room → Health Connect.
 
 Android only. iOS has CMPedometer and a completely different permission model;
@@ -17,16 +18,30 @@ await StepTracker.startTracking();
 StepTracker.addListener("stepsChanged", (data) => console.log(data.steps));
 ```
 
+## Three ways to use it
+
+| Mode | What counts | Guide |
+|---|---|---|
+| **Native sensor only** | the phone's hardware step counter, in a foreground service; no Health Connect, no health permissions | [USAGE_MODES.md § A](docs/USAGE_MODES.md#mode-a-native-sensor-only) |
+| **Health Connect only** | whatever Samsung Health, Google Fit or a watch wrote; nothing runs in the background | [USAGE_MODES.md § B](docs/USAGE_MODES.md#mode-b-health-connect-only) |
+| **Both** *(default)* | the phone counts, and a source that saw more of the day supplies the number — merged live, never summed | [USAGE_MODES.md § C](docs/USAGE_MODES.md#mode-c-both-recommended) |
+
+Each mode has its own manifest trims, permission flow and Play Console forms;
+the guide has all three side by side. Permissions in one place:
+[docs/PERMISSIONS.md](docs/PERMISSIONS.md).
+
 ## What it does
 
 |                |                                                                   |
 | -------------- | ----------------------------------------------------------------- |
-| Sensor         | `TYPE_STEP_COUNTER`, falling back to `TYPE_STEP_DETECTOR`         |
+| Sensor         | `TYPE_STEP_COUNTER` → `TYPE_STEP_DETECTOR` → a software pedometer over the accelerometer on phones with neither |
 | Background     | Kotlin foreground service, `health` type, `START_STICKY`          |
+| OEM killers    | foreground restart, 15-minute watchdog, boot receiver; every step counted while dead is recovered from the hardware counter, including across midnight |
 | Storage        | Room — `step_history` + `daily_summary`, 31–35 day retention      |
 | Reboot         | `BootReceiver` restarts the service and re-anchors the counter    |
-| Health Connect | availability, permissions, read, write, idempotent sync            |
+| Health Connect | availability, permissions scoped to config, read, write, idempotent sync |
 | Watches        | reads a paired watch through Health Connect and never double-counts |
+| Continuity     | Health Connect says 6,000 → the phone keeps it moving: 6,001, 6,005, 6,010 |
 | Offline        | everything works with no network; remote sync is queued           |
 | Bridge         | Turbo Module with an old-architecture shim, full TypeScript types |
 
@@ -54,6 +69,9 @@ await StepTracker.initialize({
   healthConnectEnabled: true,
   privacyPolicyUrl: "https://example.com/privacy", // required for health permissions
   stepSource: "auto", // phone sensor vs. a paired watch — see below
+  healthConnectReadEnabled: true, // false → mirror-only, READ_* never requested
+  healthConnectWriteEnabled: true, // false → display-only, WRITE_* never requested
+  gapRecovery: "split", // where steps counted while dead across midnight go
   remoteSyncUrl: "https://api.example.com/steps", // optional
 });
 ```
@@ -71,6 +89,7 @@ publishes its model.
 initialize(config)            updateConfig(config)      getConfig()
 startTracking()               pauseTracking()           resumeTracking()
 stopTracking()                getTrackingState()        isTracking()
+getTrackingHealth()
 
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
@@ -78,6 +97,8 @@ getStatsForRange(from, to)    getHistory(from, to)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
+openBatteryOptimizationSettings()                       openManufacturerAutoStartSettings()
+getBackgroundRestrictionStatus()                        requestBackgroundPermissions()
 
 getHealthConnectStatus()      enableHealthConnect()     requestHealthConnectPermissions()
 installHealthConnect()        openHealthConnectSettings()   revokeHealthConnectPermissions()
@@ -141,14 +162,21 @@ the phone, so adding them roughly doubles the count. Each policy picks one:
 
 | `stepSource` | Behaviour |
 | ------------ | --------- |
-| `"auto"` *(default)* | whichever of the phone and the best external source counted more that day |
+| `"auto"` *(default)* | whichever of the phone and the best external source counted more, **merged live**: the other app's lead becomes a baseline and the phone's sensor keeps counting on top |
 | `"device"` | phone sensor only — the pre-1.2 behaviour |
-| `"wearable"` | a watch, band or ring wins whenever one has data |
-| `"health_connect"` | the best external source wins, wearable or not |
+| `"wearable"` | a watch, band or ring wins whenever one has data; its exact number |
+| `"health_connect"` | the best external source wins, wearable or not; its exact number |
 
 With no Health Connect grant, `"auto"` is exactly the phone's own sensor —
 resolution only engages once the user allows reads. Let the user choose a source
 explicitly with `getStepSources()` and `setPreferredStepSource()`.
+
+**Why `auto` merges.** A watch publishes in batches. Take its number and the
+display freezes at 6,000 for the whole walk, then jumps. Instead `auto`
+remembers how far ahead it was (its *lead*), shows `phoneSteps + lead`, and
+only raises the lead when the other app has genuinely seen more than the
+phone — so the user sees 6,001, 6,005, 6,010 as they walk and nothing is ever
+counted twice. `stepSource.merged` and `stepSource.baselineSteps` report it.
 
 Permission handling, the install and settings fallbacks, and the full source
 API: [docs/API.md](docs/API.md#health-connect).
@@ -160,9 +188,33 @@ API: [docs/API.md](docs/API.md#health-connect).
 an OEM counter reset, and at midnight. Counter state lives in SharedPreferences
 and is written on every sensor batch, so a process kill costs nothing — the
 hardware kept counting while you were dead, and the next sample reconciles.
+When the dead period crossed midnight the steps are split between the days by
+time (`gapRecovery`), rather than dropped.
 
-Details, including why steps between a reboot and the service restarting are
-sometimes dropped on purpose: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Low-end and OEM phones
+
+Xiaomi, Oppo, Vivo, Realme, Tecno, Samsung and others kill foreground services
+and ignore `START_STICKY`. The package brings itself back — on the next app
+open, from a 15-minute watchdog, and on boot — and recovers every step the
+hardware counted in between. Stopping the killing is up to the user, and there
+is no API for it:
+
+```ts
+const health = await StepTracker.getTrackingHealth();   // looksDead, recoveryCount…
+if (health.aggressiveOem || health.batteryOptimizationEnabled) {
+  await StepTracker.requestBackgroundPermissions();     // battery exemption, then OEM autostart
+}
+```
+
+Per-manufacturer instructions to show the user: [docs/OEM_BATTERY.md](docs/OEM_BATTERY.md).
+
+Phones with no step sensor at all — some entry-level Tecno, itel, Lava and
+Redmi A-series — count over the accelerometer instead of refusing to start
+(`accelerometerFallback`). It costs a few percent of battery a day and loses
+steps while the process is dead; `getDeviceCapabilities().bestSensor` tells
+you when a user is on it.
 
 ## Before you ship
 
@@ -185,19 +237,23 @@ cd android
 ./gradlew :react-native-step-tracker-pro:connectedAndroidTest
 ```
 
-Fourteen JVM tests cover step-source resolution — chiefly that a phone and a
-watch are never added together. Eleven instrumented tests cover the reboot,
-midnight, pause and counter-reset paths by feeding samples to the engine
-directly, so they run on an emulator with no step hardware.
+Forty-seven JVM tests cover step-source resolution, the `auto` merge, gap
+splitting and the accelerometer pedometer against synthetic gait — chiefly
+that a phone and a watch are never added together, and that a car is not a
+walk.
+Twenty-two instrumented tests cover the reboot, midnight, overnight-kill,
+pause and counter-reset paths by feeding samples to the engine directly, so
+they run on an emulator with no step hardware.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **1.2.0** — Health Connect
-permission lifecycle, provider install/update handling, the Play-required
-privacy-policy screen, and step sources from a paired watch.
+[CHANGELOG.md](CHANGELOG.md). Latest release **1.3.0** — live continuity
+between Health Connect and the phone's sensor, gap recovery for steps counted
+while the service was dead, OEM watchdog and background-restriction helpers,
+config-scoped Health Connect permissions, and the usage-mode guides.
 
 ## Licence
 

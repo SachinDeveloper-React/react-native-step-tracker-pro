@@ -47,14 +47,27 @@ export interface UseHealthConnectResult {
   refresh: () => Promise<void>;
 }
 
+/**
+ * Local-date key. `toISOString()` is UTC, which at 02:00 IST is still
+ * yesterday - the native side keys everything on the device's local date, so
+ * a UTC key here silently dropped today from the window for anyone east of
+ * Greenwich in the early morning.
+ */
+function localDateKey(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 function daysAgo(days: number): string {
   const date = new Date();
   date.setDate(date.getDate() - days);
-  return date.toISOString().slice(0, 10);
+  return localDateKey(date);
 }
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return localDateKey(new Date());
 }
 
 /**

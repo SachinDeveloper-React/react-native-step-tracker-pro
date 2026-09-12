@@ -1,4 +1,9 @@
-export { StepTracker, StepTracker as default, isSupported } from './StepTracker';
+export {
+  StepTracker,
+  StepTracker as default,
+  estimateStride,
+  isSupported,
+} from './StepTracker';
 export { StepTrackerError } from './errors';
 export type { StepTrackerErrorCode } from './errors';
 export {
@@ -9,12 +14,14 @@ export {
 } from './constants';
 export * from './hooks';
 export type {
+  BackgroundRestrictionStatus,
   CompanionApp,
   CurrentStepSource,
   DayChangedEvent,
   DayRecord,
   DeviceCapabilities,
   EventSubscription,
+  GapRecovery,
   GoalProgressEvent,
   GoalReachedEvent,
   HealthConnectAvailability,
@@ -38,6 +45,7 @@ export type {
   StepTrackerEventMap,
   StepsChangedEvent,
   SyncEvent,
+  TrackingHealth,
   TrackingState,
   TrackingStateEvent,
 } from './types';

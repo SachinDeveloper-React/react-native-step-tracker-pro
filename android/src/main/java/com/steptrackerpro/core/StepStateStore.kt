@@ -123,6 +123,106 @@ class StepStateStore(context: Context) {
         get() = prefs.getString(KEY_LAST_RESOLVED_SOURCE, null)?.takeIf { it.isNotEmpty() }
         set(value) = prefs.edit().putString(KEY_LAST_RESOLVED_SOURCE, value ?: "").apply()
 
+    // ---- Health Connect continuity ---------------------------------------
+
+    /**
+     * The external lead over this device's own count for [continuityDate], as
+     * last observed. Under the `auto` policy the number shown is
+     * `deviceSteps + continuityOffset`, which is what lets a day that Health
+     * Connect reported at 6,000 keep moving to 6,001, 6,005, 6,010 as the
+     * phone's own sensor ticks, instead of freezing at 6,000 until the other
+     * app next syncs. See [StepContinuity].
+     */
+    val continuityOffset: Int
+        get() = prefs.getInt(KEY_CONTINUITY_OFFSET, 0)
+
+    val continuityDate: String?
+        get() = prefs.getString(KEY_CONTINUITY_DATE, null)?.takeIf { it.isNotEmpty() }
+
+    val continuityPackage: String?
+        get() = prefs.getString(KEY_CONTINUITY_PACKAGE, null)?.takeIf { it.isNotEmpty() }
+
+    val continuityKind: String?
+        get() = prefs.getString(KEY_CONTINUITY_KIND, null)?.takeIf { it.isNotEmpty() }
+
+    val continuityAppName: String?
+        get() = prefs.getString(KEY_CONTINUITY_APP_NAME, null)?.takeIf { it.isNotEmpty() }
+
+    /** Epoch millis of the read that last raised the offset. */
+    val continuityObservedAt: Long
+        get() = prefs.getLong(KEY_CONTINUITY_AT, 0L)
+
+    fun writeContinuity(
+        date: String,
+        offset: Int,
+        packageName: String?,
+        kind: String?,
+        appName: String?,
+        observedAt: Long
+    ) {
+        prefs.edit()
+            .putString(KEY_CONTINUITY_DATE, date)
+            .putInt(KEY_CONTINUITY_OFFSET, offset.coerceAtLeast(0))
+            .putString(KEY_CONTINUITY_PACKAGE, packageName ?: "")
+            .putString(KEY_CONTINUITY_KIND, kind ?: "")
+            .putString(KEY_CONTINUITY_APP_NAME, appName ?: "")
+            .putLong(KEY_CONTINUITY_AT, observedAt)
+            .apply()
+    }
+
+    fun clearContinuity() {
+        prefs.edit()
+            .remove(KEY_CONTINUITY_DATE)
+            .remove(KEY_CONTINUITY_OFFSET)
+            .remove(KEY_CONTINUITY_PACKAGE)
+            .remove(KEY_CONTINUITY_KIND)
+            .remove(KEY_CONTINUITY_APP_NAME)
+            .remove(KEY_CONTINUITY_AT)
+            .apply()
+    }
+
+    // ---- service liveness ------------------------------------------------
+
+    /**
+     * Written by the service every sensor sample and on a timer while it is
+     * alive. The watchdog and the React module compare it against the wall
+     * clock to tell "the OEM killed us" from "the user has not moved".
+     */
+    var lastHeartbeatAt: Long
+        get() = prefs.getLong(KEY_HEARTBEAT, 0L)
+        set(value) = prefs.edit().putLong(KEY_HEARTBEAT, value).apply()
+
+    /** Epoch millis of the last time something other than the user restarted the service. */
+    var lastRecoveryAt: Long
+        get() = prefs.getLong(KEY_LAST_RECOVERY_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_RECOVERY_AT, value).apply()
+
+    /** How many times the service has had to be brought back since the last explicit start. */
+    var recoveryCount: Int
+        get() = prefs.getInt(KEY_RECOVERY_COUNT, 0)
+        set(value) = prefs.edit().putInt(KEY_RECOVERY_COUNT, value.coerceAtLeast(0)).apply()
+
+    /** Who brought it back last: `sticky`, `boot`, `watchdog`, `foreground`, `initialize`. */
+    var lastRecoveryReason: String?
+        get() = prefs.getString(KEY_LAST_RECOVERY_REASON, null)?.takeIf { it.isNotEmpty() }
+        set(value) = prefs.edit().putString(KEY_LAST_RECOVERY_REASON, value ?: "").apply()
+
+    fun recordRecovery(reason: String, at: Long = System.currentTimeMillis()) {
+        prefs.edit()
+            .putLong(KEY_LAST_RECOVERY_AT, at)
+            .putInt(KEY_RECOVERY_COUNT, recoveryCount + 1)
+            .putString(KEY_LAST_RECOVERY_REASON, reason)
+            .apply()
+    }
+
+    fun resetRecovery() {
+        prefs.edit()
+            .remove(KEY_LAST_RECOVERY_AT)
+            .remove(KEY_RECOVERY_COUNT)
+            .remove(KEY_LAST_RECOVERY_REASON)
+            .apply()
+    }
+
     /** One atomic write for the hot path, instead of six separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -166,5 +266,15 @@ class StepStateStore(context: Context) {
         private const val KEY_HC_DENIALS = "hc_permission_denials"
         private const val KEY_PREFERRED_SOURCE = "preferred_step_source"
         private const val KEY_LAST_RESOLVED_SOURCE = "last_resolved_step_source"
+        private const val KEY_CONTINUITY_DATE = "continuity_date"
+        private const val KEY_CONTINUITY_OFFSET = "continuity_offset"
+        private const val KEY_CONTINUITY_PACKAGE = "continuity_package"
+        private const val KEY_CONTINUITY_KIND = "continuity_kind"
+        private const val KEY_CONTINUITY_APP_NAME = "continuity_app_name"
+        private const val KEY_CONTINUITY_AT = "continuity_observed_at"
+        private const val KEY_HEARTBEAT = "service_heartbeat_at"
+        private const val KEY_LAST_RECOVERY_AT = "last_recovery_at"
+        private const val KEY_RECOVERY_COUNT = "recovery_count"
+        private const val KEY_LAST_RECOVERY_REASON = "last_recovery_reason"
     }
 }

@@ -17,11 +17,17 @@ export const DEFAULT_CONFIG: Required<
     | 'persistEveryNSteps'
     | 'healthConnectEnabled'
     | 'healthConnectSyncIntervalMinutes'
+    | 'healthConnectReadEnabled'
     | 'healthConnectWriteEnabled'
     | 'healthConnectBackgroundRead'
     | 'healthConnectHistoryRead'
     | 'stepSource'
     | 'autoStartOnBoot'
+    | 'gapRecovery'
+    | 'watchdogEnabled'
+    | 'accelerometerFallback'
+    | 'accelerometerWakeLock'
+    | 'accelerometerThreshold'
   >
 > = {
   height: 170,
@@ -36,11 +42,17 @@ export const DEFAULT_CONFIG: Required<
   persistEveryNSteps: 10,
   healthConnectEnabled: true,
   healthConnectSyncIntervalMinutes: 30,
+  healthConnectReadEnabled: true,
   healthConnectWriteEnabled: true,
   healthConnectBackgroundRead: false,
   healthConnectHistoryRead: false,
   stepSource: 'auto',
   autoStartOnBoot: true,
+  gapRecovery: 'split',
+  watchdogEnabled: true,
+  accelerometerFallback: true,
+  accelerometerWakeLock: true,
+  accelerometerThreshold: 0.9,
 };
 
 /** Stride length = height(cm) * coefficient / 100. */

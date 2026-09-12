@@ -3,27 +3,83 @@
 ## Steps stay at zero
 
 1. `getDeviceCapabilities()` — if `supported` is false the device has no step
-   hardware. Most emulators do not.
+   hardware and no accelerometer (or `accelerometerFallback` is off). Most
+   emulators have neither step sensor; the emulator's virtual accelerometer
+   does not produce gait, so the fallback counts nothing there either.
 2. `checkPermissions()` — `ACTIVITY_RECOGNITION` must be granted.
 3. `getTrackingState()` — `idle` or `stopped` means the service was never
    started or was stopped.
 4. Some sensor hubs need 5–10 actual steps before the first event fires.
-   Shaking the phone does nothing; walk.
+   Shaking the phone does nothing; walk. The accelerometer fallback also
+   holds back the first four steps of every walk until it is sure it is one.
+
+## Battery drain on a budget phone
+
+`getDeviceCapabilities().bestSensor` is `'accelerometer'`: the phone has no
+step sensor, so the service samples the accelerometer at 25 Hz and, unless
+`hasWakeUpAccelerometer` is true, holds a wake lock to keep the CPU awake for
+it. That is a few percent of battery a day and is the price of counting at
+all on that hardware. Options, in order of how much they give up:
+
+- `accelerometerWakeLock: false` — no wake lock; counts only while the screen
+  is on.
+- `accelerometerFallback: false` — no counting on that phone; Health Connect
+  reads still work if another app supplies steps.
+
+## Steps counted in a car or on a bus
+
+Only the accelerometer fallback is affected; the hardware counter has its own
+vehicle rejection. The detector ignores vibration above 3 Hz and rocking
+below 0.8 Hz, but a rough road at walking cadence looks like walking. Raise
+`accelerometerThreshold` (default 0.9 m/s²) toward 1.5 if users report it;
+gentle walks with the phone in a bag start being missed above that.
 
 ## Counting stops when the screen goes off
 
-Almost always OEM battery management, not Doze.
+Almost always OEM battery management, not Doze. Check first:
 
 ```ts
-if (await StepTracker.isBatteryOptimizationEnabled()) {
-  await StepTracker.openBatteryOptimizationSettings();
-}
-await StepTracker.openManufacturerAutoStartSettings(); // Xiaomi, Oppo, Vivo, Huawei
+const health = await StepTracker.getTrackingHealth();
+// looksDead: true, recoveryCount: 3 → the OEM is killing the service
+```
+
+Calling that from the foreground restarts the service on its own; the steps
+taken while it was dead come back with the first sample. What stops it
+happening again is the user:
+
+```ts
+await StepTracker.requestBackgroundPermissions();   // battery exemption, then OEM autostart
 ```
 
 On Xiaomi, "Autostart" and "No restrictions" under battery saver both have to be
-set. On Samsung, remove the app from "Sleeping apps". There is no API for either;
-you have to walk the user there.
+set, and the app locked in recents. On Samsung, remove the app from "Sleeping
+apps". There is no API for any of it; the per-manufacturer instructions to
+show are in [OEM_BATTERY.md](OEM_BATTERY.md).
+
+## Steps counted while the app was dead did not show up
+
+They should, on any device with `TYPE_STEP_COUNTER`: the first sample after a
+restart carries everything since the last reading. If they are missing:
+
+- `getDeviceCapabilities().hasStepCounter` false → the device is on the
+  detector or the accelerometer, neither of which can recover steps taken
+  while nothing was listening.
+- The gap crossed midnight and `gapRecovery` is `'drop'` — that is the policy
+  doing what it was told.
+- The restart was a real reboot on a previous day: since-boot steps are split
+  by time from the boot instant, so a phone rebooted at 23:00 and opened at
+  09:00 credits 10% of them to yesterday. See
+  [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery).
+
+## The number is stuck at what Health Connect said
+
+Under `'wearable'` and `'health_connect'` that is by design: they show the
+other app's exact number and it moves when that app syncs. Use `'auto'` for a
+number that keeps moving with the phone's own sensor between syncs
+(`stepSource.merged: true`).
+
+Under `'auto'`, a stuck number means the phone's own sensor is not counting —
+check `getTrackingHealth()` and `checkPermissions()`.
 
 ## Notification does not appear
 
@@ -43,12 +99,12 @@ before midnight. See [ARCHITECTURE.md](ARCHITECTURE.md#reboot).
 SharedPreferences and the Room database are cleared on uninstall. If you need
 history to survive reinstalls, sync to Health Connect or set `remoteSyncUrl`.
 
-## Build fails: KSP version mismatch
+## Build fails: Kotlin / Room version mismatch
 
 React Native sets `rootProject.ext.kotlinVersion` and the library follows it, so
-this should not happen on a stock app. If it does, set `kotlinVersion` in the
-app's root `build.gradle` — see
-[INSTALLATION.md](INSTALLATION.md#3-kotlin-2x-only-if-your-app-is-already-on-it).
+this should not happen on a stock app. If it does, set `kotlinVersion` and
+`roomVersion` in the app's root `build.gradle` — see
+[INSTALLATION.md](INSTALLATION.md#3-kotlin-and-room-versions).
 
 ## Build fails: `minSdkVersion 24 cannot be smaller than 26`
 
@@ -92,8 +148,9 @@ adb shell dumpsys package <applicationId> | grep -A3 PERMISSIONS_RATIONALE
 ## Steps are roughly double what the user walked
 
 Something is summing two sources. This package never does — every `stepSource`
-policy picks exactly one origin per day — so the doubling is almost always
-outside it:
+policy picks exactly one origin per day, and `'auto'`'s merge adds the phone's
+*delta since the last read* to an external baseline, never two totals — so the
+doubling is almost always outside it:
 
 - Your own UI adding `getTodaySteps()` to a Health Connect read. Use one or the
   other; `getTodaySteps()` already includes the watch under `'auto'`.
@@ -122,8 +179,9 @@ catalog land on `'unknown'` — they still work as sources and can still be pinn
 they just cannot be told apart from a phone-side app automatically, so `'wearable'`
 will not select them. Pin them explicitly with `setPreferredStepSource()`.
 
-The same applies to on-device steps recorded by the platform itself on Android
-14+, which are attributed to a device-specific synthetic package name.
+Health Connect's own on-device count on Android 14 (SDK extension 20+) is
+*not* `'unknown'`: its `android` / `com.android.healthconnect.phone.<hash>`
+origin is recognised, classified `'phone'` and flagged `isPlatform: true`.
 
 ## Events fire in dev but not after a JS reload
 
