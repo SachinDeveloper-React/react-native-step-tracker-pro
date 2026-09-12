@@ -287,6 +287,21 @@ class StepSourceResolverTest {
     }
 
     @Test
+    fun `on a detector or accelerometer phone a phone-side app is trusted for its whole margin`() {
+        // Steps taken while the process was dead are gone on those sensors;
+        // Samsung Health kept counting, so its margin is real.
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_400, StepSourceKind.APP, stepsBeforeCoverage = 0
+        )
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(samsung), null, metrics,
+            deviceCoverageReliable = false
+        )
+        assertEquals(8_400, result.totals.steps)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
     fun `wearable and health_connect policies are exact and ignore coverage`() {
         val samsung = source(
             "com.sec.android.app.shealth", 4_000, StepSourceKind.APP, stepsBeforeCoverage = 0

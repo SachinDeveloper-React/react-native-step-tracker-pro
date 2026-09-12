@@ -396,7 +396,11 @@ reaches back through any dead time to midnight — and
 `HealthConnectManager.readDailyStepsBySource` splits each origin's records
 around it into `StepSource.stepsBeforeCoverage`. On a past day, where
 coverage is unknown, a phone-side origin is used only when this device has
-nothing stored for it. This is what stops an aggregator that sums two origins
+nothing stored for it. On a device counting with the detector or the
+accelerometer the rule is relaxed and a phone-side origin is trusted for its
+whole margin: steps taken while the process was dead are gone on those
+sensors, and Samsung Health, which runs as a system app and is not killed,
+has genuinely seen more. This is what stops an aggregator that sums two origins
 from doubling the display, and a phone-side algorithm that counts 5% high
 from creeping the total up sync after sync.
 

@@ -41,12 +41,17 @@ class StepTrackerService : Service(), SensorEventListener {
     private var counterSensor: Sensor? = null
     private var detectorSensor: Sensor? = null
     private var accelerometerSensor: Sensor? = null
+
+    /** Written on the main thread, read on the sensor thread. */
+    @Volatile
     private var listening = false
 
     /**
      * Only built when the accelerometer is what we ended up on. A phone with
-     * a hardware counter never allocates one.
+     * a hardware counter never allocates one. Replaced on the main thread
+     * (config change, pause) and used on the sensor thread.
      */
+    @Volatile
     private var accelerometer: AccelerometerStepDetector? = null
 
     /**
@@ -161,6 +166,14 @@ class StepTrackerService : Service(), SensorEventListener {
             ServiceCommands.ACTION_RESUME -> resume()
             ServiceCommands.ACTION_CONFIG_CHANGED -> {
                 notifications.ensureChannel(core.config())
+                // A new threshold applies to the next step, not the next
+                // service start. The filter state is a few hundred
+                // milliseconds of history and is not worth preserving.
+                accelerometer?.let {
+                    accelerometer = AccelerometerStepDetector(
+                        threshold = core.config().accelerometerThreshold.toFloat()
+                    )
+                }
                 pushNotification(force = true)
             }
             ServiceCommands.ACTION_REFRESH -> pushNotification(force = true)
@@ -299,6 +312,12 @@ class StepTrackerService : Service(), SensorEventListener {
         core.engine.setPaused(true)
         core.state.trackingState = TrackingState.PAUSED
         core.flush()
+        // The hardware counter costs nothing to keep listening to, and its
+        // cumulative reading is what lets resume re-pin cleanly. The
+        // accelerometer is the opposite: 25 Hz of samples and a wake lock for
+        // steps that are going to be discarded. Let it go; resume() registers
+        // again.
+        if (core.state.source == SensorSource.ACCELEROMETER) unregisterSensors()
         pushNotification(force = true)
         core.emitTrackingState("paused")
     }

@@ -380,6 +380,31 @@ class StepCounterEngineTest {
     }
 
     @Test
+    fun firstEverSampleMarksWhereCoverageBegins() {
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.yesterday(), 7)
+        assertEquals(0L, state.coverageStartAt)
+
+        // Counter path: an install at noon covers the day from noon.
+        engine.onCounterSample(20_000f, now())
+        assertEquals(fakeNow, state.coverageStartAt)
+
+        // Detector path, same rule.
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        engine.onDetectorSample(1, now())
+        assertEquals(fakeNow, state.coverageStartAt)
+
+        // Midnight clears it: the new day is covered from its start.
+        state.activeDate = DateKeys.yesterday()
+        engine.reconcile()
+        assertEquals(0L, state.coverageStartAt)
+    }
+
+    @Test
     fun freshInstallOnAnOldBootDoesNotInventHistory() {
         // Never seen a reading, device up since yesterday morning with
         // 20,000 steps on the counter. None of that is this app's to claim.

@@ -46,12 +46,12 @@ npx react-native run-android
 
 ```sh
 npm test                 # Jest, JS layer (39 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer (55 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer (56 tests, no device)
 npm run test:android:device   # instrumented engine tests
 ```
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Twenty-three cases, among them:
+sensor. Twenty-four cases, among them:
 
 | Test | What breaks if it fails |
 |---|---|

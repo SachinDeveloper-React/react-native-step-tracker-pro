@@ -106,6 +106,12 @@ export function useStepTracker(
     const daySub = StepTracker.addListener('dayChanged', () => {
       void refresh();
     });
+    // The app answering for the user's steps flipped - a watch came into
+    // range, a pin changed. The number and its attribution may have moved
+    // without a sensor sample to carry them, so re-read.
+    const sourceSub = StepTracker.addListener('stepSourceChanged', () => {
+      void refresh();
+    });
 
     return () => {
       cancelled = true;
@@ -113,6 +119,7 @@ export function useStepTracker(
       stateSub.remove();
       goalSub.remove();
       daySub.remove();
+      sourceSub.remove();
     };
   }, [autoStart, refresh]);
 

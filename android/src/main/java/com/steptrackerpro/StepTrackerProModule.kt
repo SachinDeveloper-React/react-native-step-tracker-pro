@@ -11,6 +11,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import com.steptrackerpro.core.DateKeys
+import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
@@ -148,7 +149,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 // re-run the start path for nothing.
                 ServiceCommands.tryStart(reactContext, recoveredBy = "initialize")
             }
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -185,7 +186,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@runSafely
             }
             ServiceCommands.start(reactContext)
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -197,7 +198,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@runSafely
             }
             ServiceCommands.send(reactContext, ServiceCommands.ACTION_PAUSE)
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -209,7 +210,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@runSafely
             }
             ServiceCommands.send(reactContext, ServiceCommands.ACTION_RESUME)
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -218,7 +219,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         runSafely(promise) {
             ServiceCommands.send(reactContext, ServiceCommands.ACTION_STOP)
             SyncScheduler.cancelAll(reactContext)
-            promise.resolve(Bridge.snapshot(core.engine.snapshot()))
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -746,6 +747,20 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
      */
     private fun sendIfTracking(action: String) {
         if (core.state.shouldAutoStart) ServiceCommands.send(reactContext, action)
+    }
+
+    /**
+     * The live snapshot with `stepSource` attached from the source cache and
+     * the day's continuity baseline - no Health Connect call, so it is safe
+     * on the native modules thread. Every snapshot that reaches JS carries
+     * `stepSource`; a lifecycle call must not hand back a shape the reads
+     * would not.
+     */
+    private fun cachedSnapshot() = core.engine.snapshot().let { live ->
+        Bridge.snapshot(
+            live,
+            core.resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+        )
     }
 
     private inline fun runSafely(promise: Promise, block: () -> Unit) {

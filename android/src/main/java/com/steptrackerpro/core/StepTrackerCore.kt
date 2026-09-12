@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,7 +45,7 @@ class StepTrackerCore private constructor(context: Context) {
     private val writeLane: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1)
 
     val configStore = ConfigStore(appContext)
-    val state = StepStateStore(appContext)
+    val state = StepStateStore(appContext).also { it.migrate() }
     val metrics = MetricsCalculator(configStore.get())
     val repository = StepRepository(appContext)
     val goals = GoalTracker(appContext)
@@ -57,6 +58,7 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     private val lastEventAt = AtomicLong(0L)
+    private val trailingEventQueued = java.util.concurrent.atomic.AtomicBoolean(false)
     private val lastSourceRefreshAt = AtomicLong(0L)
     private val syncMutex = Mutex()
     private val sourceCache = SourceCache()
@@ -163,6 +165,22 @@ class StepTrackerCore private constructor(context: Context) {
                 StepEventBus.Events.STEPS_CHANGED,
                 com.steptrackerpro.util.Bridge.snapshotMap(shown, resolution)
             )
+        } else if (trailingEventQueued.compareAndSet(false, true)) {
+            // Throttled. Emit once more when the window closes, so JS never
+            // sits on the count from one step ago after the user stops.
+            scope.launch {
+                delay(config.eventThrottleMs - (now - previous))
+                trailingEventQueued.set(false)
+                val live = engine.snapshot()
+                val res = resolveFromCache(
+                    DayTotals(live.date, live.steps, live.distance, live.calories)
+                )
+                lastEventAt.set(System.currentTimeMillis())
+                StepEventBus.emit(
+                    StepEventBus.Events.STEPS_CHANGED,
+                    com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, res), res)
+                )
+            }
         }
 
         // Goals follow the number on screen. Under `auto` that number is
@@ -375,21 +393,44 @@ class StepTrackerCore private constructor(context: Context) {
      */
     suspend fun resolveDay(date: String): StepSourceResolver.Resolution {
         val device = dayTotals(date)
+        val policy = sourcePolicy()
+        val today = date == DateKeys.today()
         if (!shouldConsultHealthConnect()) {
-            return StepSourceResolver.resolve(
+            val raw = StepSourceResolver.resolve(
                 StepSourcePolicy.DEVICE, device, emptyList(), null, metrics
             )
+            // A baseline taken earlier today still stands when Health Connect
+            // can no longer be read - the grant was revoked from its settings,
+            // the provider is mid-update. Those steps happened; and the sensor
+            // path keeps applying the baseline, so this path must too, or the
+            // screen and the notification disagree. An explicit revoke through
+            // this package clears it.
+            return if (policy == StepSourcePolicy.AUTO && today) {
+                StepContinuity.apply(raw, storedBaseline(), metrics)
+            } else {
+                raw
+            }
         }
-        val policy = sourcePolicy()
         val raw = StepSourceResolver.resolve(
-            policy, device, sourcesForDay(date), preferredSourcePackage(), metrics
+            policy, device, sourcesForDay(date), preferredSourcePackage(), metrics,
+            deviceCoverageReliable = coverageReliable()
         )
-        if (policy != StepSourcePolicy.AUTO || date != DateKeys.today()) return raw
+        if (policy != StepSourcePolicy.AUTO || !today) return raw
         // Past days are closed: max() is the right answer and nothing is
         // moving underneath it. Today is where the frozen-number problem
         // lives, so today is where the baseline is taken and applied.
         return StepContinuity.apply(raw, observeContinuity(raw, date), metrics)
     }
+
+    /**
+     * Whether this device's count can vouch for the whole of the day it has
+     * covered. With a hardware counter it can: gap recovery reaches back
+     * through any dead time. With the detector or the accelerometer, steps
+     * taken while the process was dead are gone, so a phone-side app that
+     * kept counting - Samsung Health runs as a system app and is not killed -
+     * has genuinely seen more, and is trusted for its whole margin.
+     */
+    private fun coverageReliable(): Boolean = state.source == SensorSource.STEP_COUNTER
 
     // ---- continuity ------------------------------------------------------
 
@@ -471,7 +512,20 @@ class StepTrackerCore private constructor(context: Context) {
      */
     suspend fun resolvedStats(start: String, end: String, goal: Int?): RangeStats {
         val base = stats(start, end, goal)
-        if (!shouldConsultHealthConnect()) return base
+        if (!shouldConsultHealthConnect()) {
+            // Same rule as resolveDay(): today's baseline still applies.
+            val baseline = if (sourcePolicy() == StepSourcePolicy.AUTO) storedBaseline() else null
+            if (baseline == null) return base
+            val today = DateKeys.today()
+            val days = base.days.map { day ->
+                if (day.date != today) return@map day
+                val raw = StepSourceResolver.resolve(
+                    StepSourcePolicy.DEVICE, day, emptyList(), null, metrics
+                )
+                StepContinuity.apply(raw, baseline, metrics).totals
+            }
+            return recomputeStats(base, days, goal)
+        }
 
         val byDate = runCatching {
             withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
@@ -482,15 +536,16 @@ class StepTrackerCore private constructor(context: Context) {
                 )
             }
         }.getOrNull() ?: emptyMap()
-        if (byDate.isEmpty()) return base
 
         val policy = sourcePolicy()
         val preferred = preferredSourcePackage()
         val today = DateKeys.today()
         val baseline = if (policy == StepSourcePolicy.AUTO) storedBaseline() else null
+        val reliable = coverageReliable()
         val resolved = base.days.map { day ->
             val raw = StepSourceResolver.resolve(
-                policy, day, byDate[day.date].orEmpty(), preferred, metrics
+                policy, day, byDate[day.date].orEmpty(), preferred, metrics,
+                deviceCoverageReliable = reliable
             )
             if (day.date == today && baseline != null) {
                 StepContinuity.apply(raw, baseline, metrics).totals
@@ -587,7 +642,10 @@ class StepTrackerCore private constructor(context: Context) {
         val raw = if (cached == null) {
             deviceOnly()
         } else {
-            StepSourceResolver.resolve(policy, totals, cached, preferredSourcePackage(), metrics)
+            StepSourceResolver.resolve(
+                policy, totals, cached, preferredSourcePackage(), metrics,
+                deviceCoverageReliable = coverageReliable()
+            )
         }
         if (policy != StepSourcePolicy.AUTO) return raw
         // The baseline outlives the cache on purpose: with the cache expired

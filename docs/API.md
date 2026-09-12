@@ -118,7 +118,10 @@ Live from the counter, not the database — correct even if the last flush was
 several steps ago. Under the `'auto'` policy with Health Connect reads
 granted, `steps` is the resolved number (see
 [Step sources](#step-sources-watches-and-other-apps)) and `stepSource` says
-where it came from.
+where it came from. Every snapshot the package hands out — from
+`initialize()`, the lifecycle calls, the reads and `stepsChanged` — carries
+`stepSource`; the lifecycle calls fill it from the source cache without a
+Health Connect round trip.
 
 ### `getYesterdaySteps(): Promise<DayRecord>`
 ### `getStepsForDate(date: string): Promise<DayRecord>`
@@ -416,6 +419,7 @@ shown becomes `deviceSteps + lead`; every step the phone counts moves it.
 | a wearable, or a pinned source | its whole margin over the phone, growing whenever it pulls further ahead | a watch on the wrist sees a walk the phone on the desk did not |
 | a phone-side app (Samsung Health, Google Fit, the platform's own count, an aggregator) | only its steps from **before this device started covering the day** — an install at 15:00 takes the morning; nothing after | it reads the same phone, so for the hours both were counting it cannot have seen more; anything beyond that is inflation |
 | a phone-side app, on a past day | the whole day, only if this device has nothing for it | |
+| a phone-side app, on a phone counting with the detector or accelerometer | its whole margin | those sensors lose steps while the process is dead; a system app that kept counting has genuinely seen more |
 
 The baseline never shrinks within a day and is dropped at midnight, so the
 shown number is monotonic and goals key off it. The phone's raw count is what

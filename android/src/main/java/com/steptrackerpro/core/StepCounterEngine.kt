@@ -294,6 +294,13 @@ class StepCounterEngine(
     fun onDetectorSample(steps: Int, eventAtMillis: Long): StepSnapshot? {
         if (steps <= 0) return null
         rollDateIfNeeded()
+        // A first-ever sample on a detector-only or accelerometer device is
+        // where this device's coverage of the day begins, exactly as it is on
+        // the counter path; without it a phone-side Health Connect source
+        // could never fill the hours before an afternoon install.
+        if (state.lastEventAt == 0L && state.lastRawValue < 0f) {
+            state.coverageStartAt = eventAtMillis
+        }
         if (paused) return null
 
         val total = state.stepsToday + steps

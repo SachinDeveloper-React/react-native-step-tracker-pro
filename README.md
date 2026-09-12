@@ -242,12 +242,12 @@ npm run test:android:device # instrumented engine tests on an emulator
 ```
 
 Thirty-nine Jest tests cover config validation and the flows in the JS
-layer. Fifty-five JVM tests cover step-source resolution, the `auto` merge and
+layer. Fifty-six JVM tests cover step-source resolution, the `auto` merge and
 its coverage rule, gap splitting and the accelerometer pedometer against
 synthetic gait — chiefly that a phone and a watch are never added together,
 that a phone-side app cannot inflate a covered day, and that a car is not a
 walk.
-Twenty-three instrumented tests cover the reboot, midnight, overnight-kill,
+Twenty-four instrumented tests cover the reboot, midnight, overnight-kill,
 sensor-jitter, pause and counter-reset paths by feeding samples to the engine
 directly, so they run on an emulator with no step hardware. CI runs all of it
 on every push.

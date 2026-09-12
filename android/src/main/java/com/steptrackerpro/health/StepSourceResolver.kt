@@ -98,7 +98,14 @@ object StepSourceResolver {
         device: DayTotals,
         sources: List<StepSource>,
         preferredPackage: String?,
-        metrics: MetricsCalculator
+        metrics: MetricsCalculator,
+        /**
+         * Whether this device's count vouches for the whole of the day it
+         * covered - true on a hardware counter, false on the detector or the
+         * accelerometer, where a dead process loses steps and a phone-side
+         * app that kept counting has genuinely seen more.
+         */
+        deviceCoverageReliable: Boolean = true
     ): Resolution {
         val deviceResolution = Resolution(
             totals = device,
@@ -150,7 +157,7 @@ object StepSourceResolver {
         // platform's count and ours would double the display, and a
         // phone-side algorithm that counts 5% high would creep the total up
         // sync after sync.
-        val trusted = pinned != null || candidate.isWearable
+        val trusted = pinned != null || candidate.isWearable || !deviceCoverageReliable
         val lead = when {
             trusted -> externalSteps - device.steps
             candidate.stepsBeforeCoverage >= 0 -> candidate.stepsBeforeCoverage

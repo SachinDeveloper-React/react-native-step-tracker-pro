@@ -235,6 +235,20 @@ class StepStateStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Brings state written by an earlier version in line with the current
+     * rules. Version 2 changed what a continuity baseline may contain (a
+     * phone-side source is now bound by coverage), so a baseline from before
+     * it is dropped rather than carried until midnight; the next read takes
+     * a fresh one. Cheap and idempotent; called once per process.
+     */
+    fun migrate() {
+        val stored = prefs.getInt(KEY_STATE_VERSION, 0)
+        if (stored >= STATE_VERSION) return
+        if (stored < 2) clearContinuity()
+        prefs.edit().putInt(KEY_STATE_VERSION, STATE_VERSION).apply()
+    }
+
     /** One atomic write for the hot path, instead of six separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -261,6 +275,8 @@ class StepStateStore(context: Context) {
     companion object {
         const val PREFS_NAME = "StepTrackerProState"
         const val BOOT_DRIFT_TOLERANCE_MS = 60_000L
+        const val STATE_VERSION = 2
+        private const val KEY_STATE_VERSION = "state_version"
 
         private const val KEY_BOOT_ID = "boot_id"
         private const val KEY_ANCHOR_VALUE = "anchor_value"

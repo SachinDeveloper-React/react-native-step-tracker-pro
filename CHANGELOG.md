@@ -150,6 +150,26 @@ ignore `START_STICKY`.
 - `resetToday()`, `clearHistory()` and `pruneHistory()` run on the serialised
   write lane, so a commit queued just before a reset cannot land after it and
   resurrect the old total.
+- Every snapshot handed to JS carries `stepSource`. `initialize()`,
+  `startTracking()`, `pauseTracking()`, `resumeTracking()` and
+  `stopTracking()` returned one without it, so `snapshot.stepSource.…`
+  threw until the first read.
+- A continuity baseline taken earlier in the day still applies when Health
+  Connect can no longer be read — a grant revoked from Health Connect's own
+  settings, a provider mid-update — so `getTodaySteps()` and the notification
+  keep agreeing. An explicit revoke through the package still clears it.
+- The `eventThrottleMs` window no longer drops the last `stepsChanged` of a
+  burst: a trailing emit fires when the window closes.
+- Detector-only and accelerometer devices record where the day's coverage
+  began on their first sample too, so an afternoon install on such a phone
+  takes the morning from a phone-side source; and on those sensors a
+  phone-side source is trusted for its whole margin, since steps taken while
+  the process was dead are gone.
+- Pausing releases the accelerometer and its wake lock; a changed
+  `accelerometerThreshold` applies at the next step, not the next start.
+- Persisted state carries a version; a continuity baseline written before
+  the coverage rule is dropped on upgrade instead of surviving until
+  midnight.
 
 #### Security
 
@@ -245,10 +265,10 @@ ignore `START_STICKY`.
   double count", "phone on a desk raises the baseline" and "never sums" —
   `AccelerometerStepDetectorTest` (18), and platform-origin classification
   in `StepSourceResolverTest`.
-- Instrumented engine tests grown from 11 to 23, now deterministic in wall
+- Instrumented engine tests grown from 11 to 24, now deterministic in wall
   clock; new cases for the overnight kill, the `drop` and `today` policies,
   fresh installs on an old boot, and sensor jitter.
-- JVM tests: 55 in total, including the coverage rule for phone-side sources
+- JVM tests: 56 in total, including the coverage rule for phone-side sources
   and the platform origin.
 
 ## [1.2.0] - 2026-09-09
