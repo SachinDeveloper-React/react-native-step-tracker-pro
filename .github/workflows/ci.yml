@@ -41,7 +41,7 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v6
       - name: Compile, test, lint
         working-directory: android
         run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug compileDebugAndroidTestKotlin
