@@ -152,17 +152,14 @@ export function useHealthConnect(
     return () => sub.remove();
   }, [refresh, refreshOnForeground]);
 
-  const guard = useCallback(
-    async <T,>(fn: () => Promise<T>): Promise<T | null> => {
-      try {
-        return await fn();
-      } catch (e) {
-        setError(e as Error);
-        return null;
-      }
-    },
-    []
-  );
+  const guard = useCallback(async <T>(fn: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await fn();
+    } catch (e) {
+      setError(e as Error);
+      return null;
+    }
+  }, []);
 
   const enable = useCallback(async () => {
     const next = await guard(() =>

@@ -18,6 +18,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 
@@ -276,6 +278,25 @@ class StepTrackerCore private constructor(context: Context) {
         }
     }
 
+    /**
+     * Zeroes today. Runs on the write lane so a commit already queued for the
+     * old total cannot land after the overwrite and resurrect it.
+     */
+    suspend fun resetToday() = withContext(writeLane) {
+        engine.resetToday()
+        state.clearContinuity()
+        goals.reset()
+        sourceCache.invalidate()
+        // Deliberate write: saveDay() refuses to lower a day, which would
+        // leave history and the live counter permanently disagreeing.
+        repository.overwriteDay(liveToday())
+    }
+
+    suspend fun clearHistory() = withContext(writeLane) { repository.clear() }
+
+    suspend fun pruneHistory(retentionDays: Int): Int =
+        withContext(writeLane) { repository.prune(retentionDays) }
+
     /** Writes whatever is in memory to the database. Called before shutdown. */
     fun flush(): DayTotals {
         val totals = engine.consumeCommit()
@@ -453,11 +474,14 @@ class StepTrackerCore private constructor(context: Context) {
         if (!shouldConsultHealthConnect()) return base
 
         val byDate = runCatching {
-            healthConnect.readDailyStepsBySource(
-                DateKeys.startOfDayInstant(start),
-                minOf(DateKeys.endOfDayInstant(end), Instant.now())
-            )
-        }.getOrDefault(emptyMap())
+            withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
+                healthConnect.readDailyStepsBySource(
+                    DateKeys.startOfDayInstant(start),
+                    minOf(DateKeys.endOfDayInstant(end), Instant.now()),
+                    coverageStartForToday()
+                )
+            }
+        }.getOrNull() ?: emptyMap()
         if (byDate.isEmpty()) return base
 
         val policy = sourcePolicy()
@@ -525,11 +549,13 @@ class StepTrackerCore private constructor(context: Context) {
             healthConnect.canRead()
         ) {
             return runCatching {
-                healthConnect.listSources(
-                    DateKeys.startOfDayInstant(start),
-                    minOf(DateKeys.endOfDayInstant(end), Instant.now())
-                )
-            }.getOrDefault(emptyList())
+                withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
+                    healthConnect.listSources(
+                        DateKeys.startOfDayInstant(start),
+                        minOf(DateKeys.endOfDayInstant(end), Instant.now())
+                    )
+                }
+            }.getOrNull() ?: emptyList()
         }
         return emptyList()
     }
@@ -596,14 +622,29 @@ class StepTrackerCore private constructor(context: Context) {
         )
     }
 
+    /**
+     * Epoch millis from which this device has been counting today, for the
+     * coverage split on Health Connect reads. Start of day unless a first-ever
+     * reading (an install) said otherwise.
+     */
+    private fun coverageStartForToday(): Long {
+        val today = DateKeys.today()
+        val stored = state.coverageStartAt
+        val startOfDay = DateKeys.startOfDayMillis(today)
+        return if (stored > startOfDay && state.activeDate == today) stored else startOfDay
+    }
+
     private suspend fun sourcesForDay(date: String): List<StepSource> {
         sourceCache.get(date)?.let { return it }
         val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
         val start = DateKeys.startOfDayInstant(date)
         if (!end.isAfter(start)) return emptyList()
+        val coverage = if (date == DateKeys.today()) coverageStartForToday() else 0L
         val sources = runCatching {
-            healthConnect.readDailyStepsBySource(start, end)[date].orEmpty()
-        }.getOrDefault(emptyList())
+            withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
+                healthConnect.readDailyStepsBySource(start, end, coverage)[date].orEmpty()
+            }
+        }.getOrNull() ?: return emptyList() // a timeout is not cached: try again next read
         sourceCache.put(date, sources)
         return sources
     }
@@ -757,6 +798,13 @@ class StepTrackerCore private constructor(context: Context) {
 
         /** Floor between sensor-triggered Health Connect refreshes of today. */
         private const val SOURCE_REFRESH_MIN_INTERVAL_MS = 60_000L
+
+        /**
+         * Health Connect reads are cross-process; a provider that is busy
+         * migrating or being updated can block for a long time. Past this the
+         * phone's own count is the answer, and the read is retried next time.
+         */
+        const val HC_READ_TIMEOUT_MS = 4_000L
 
         /**
          * The service stamps [StepStateStore.lastHeartbeatAt] this often even

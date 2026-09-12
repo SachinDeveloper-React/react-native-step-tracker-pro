@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.steptrackerpro.R
 import com.steptrackerpro.core.MetricsCalculator
@@ -27,7 +26,6 @@ class NotificationFactory(private val context: Context) {
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     fun ensureChannel(config: StepTrackerConfig) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val name = config.notificationChannelName
             ?: context.getString(R.string.stp_channel_name)
         val channel = NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_LOW)

@@ -79,9 +79,23 @@ class StepTrackerService : Service(), SensorEventListener {
     private val heartbeat = object : Runnable {
         override fun run() {
             core.state.lastHeartbeatAt = System.currentTimeMillis()
+            // A listener that could not be registered earlier - the sensor
+            // service was not ready, a HAL hiccup - is retried here for as
+            // long as the tracker is meant to be running, so a transient
+            // failure never becomes a permanently idle service.
+            if (!listening && core.shouldBeRunning() && !core.engine.paused) {
+                if (registerSensors()) {
+                    core.state.trackingState = TrackingState.RUNNING
+                    core.emitTrackingState("sensor_recovered")
+                    pushNotification(force = true)
+                }
+            }
             sensorHandler?.postDelayed(this, StepTrackerCore.HEARTBEAT_INTERVAL_MS)
         }
     }
+
+    /** Short retries after a failed registration, before the heartbeat takes over. */
+    private var registerRetries = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -204,6 +218,7 @@ class StepTrackerService : Service(), SensorEventListener {
         }
 
         core.state.shouldAutoStart = true
+        registerRetries = 0
 
         // `paused` lives in memory only, so a restart has to read it back off
         // the persisted tracking state. setPaused() ignores a no-op transition,
@@ -214,18 +229,41 @@ class StepTrackerService : Service(), SensorEventListener {
         core.engine.reconcile()
 
         if (!registerSensors()) {
-            core.state.trackingState = TrackingState.UNSUPPORTED
-            core.state.source = SensorSource.NONE
+            val capabilities = PermissionHelper.capabilities(
+                this, allowAccelerometer = core.config().accelerometerFallback
+            )
+            if (capabilities["supported"] != true) {
+                // Genuinely nothing to listen to. This is the only path that
+                // marks the tracker unsupported, and the only one the
+                // recovery paths will not retry.
+                core.state.trackingState = TrackingState.UNSUPPORTED
+                core.state.source = SensorSource.NONE
+                StepEventBus.emit(
+                    StepEventBus.Events.ERROR,
+                    mapOf(
+                        "code" to "E_NO_SENSOR",
+                        "message" to "This device exposes no step sensor, and no accelerometer to fall back on"
+                    )
+                )
+                core.emitTrackingState("no_sensor")
+                stopSelf()
+                return
+            }
+            // The sensor exists but registration failed - on several OEMs the
+            // sensor service is not ready for a few seconds after boot, and
+            // some HALs refuse a listener while another one is being torn
+            // down. Stay up, keep the state the user asked for, and retry:
+            // quickly a few times, then once a minute from the heartbeat.
+            // Marking this unsupported is what used to leave the tracker idle
+            // until the user pressed start again.
             StepEventBus.emit(
                 StepEventBus.Events.ERROR,
                 mapOf(
-                    "code" to "E_NO_SENSOR",
-                    "message" to "This device exposes no step sensor, and no accelerometer to fall back on"
+                    "code" to "E_SENSOR_UNAVAILABLE",
+                    "message" to "Step sensor registration failed; retrying"
                 )
             )
-            core.emitTrackingState("no_sensor")
-            stopSelf()
-            return
+            scheduleRegisterRetry()
         }
 
         core.state.trackingState =
@@ -240,6 +278,21 @@ class StepTrackerService : Service(), SensorEventListener {
                 else -> "started"
             }
         )
+    }
+
+    private fun scheduleRegisterRetry() {
+        if (registerRetries >= REGISTER_RETRY_DELAYS_MS.size) return
+        val delay = REGISTER_RETRY_DELAYS_MS[registerRetries++]
+        sensorHandler?.postDelayed({
+            if (listening || !core.shouldBeRunning()) return@postDelayed
+            if (registerSensors()) {
+                registerRetries = 0
+                core.emitTrackingState("sensor_recovered")
+                pushNotification(force = true)
+            } else {
+                scheduleRegisterRetry()
+            }
+        }, delay)
     }
 
     private fun pause() {
@@ -490,12 +543,7 @@ class StepTrackerService : Service(), SensorEventListener {
     }
 
     private fun stopForegroundCompat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     // ---- teardown --------------------------------------------------------
@@ -552,5 +600,8 @@ class StepTrackerService : Service(), SensorEventListener {
         private const val ACCELEROMETER_MAX_LATENCY_US = 1_000_000
 
         private const val WAKE_LOCK_TAG = "steptrackerpro:accelerometer"
+
+        /** Quick retries after a failed sensor registration; the heartbeat continues after. */
+        private val REGISTER_RETRY_DELAYS_MS = longArrayOf(2_000L, 5_000L, 15_000L, 30_000L)
     }
 }

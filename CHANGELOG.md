@@ -123,6 +123,60 @@ ignore `START_STICKY`.
   area instead of app info. `getBackgroundRestrictionStatus().autoStartTarget`
   reports the `package/class` it will open.
 
+#### Runaway and stuck counts
+
+- **Sensor jitter.** A reading a step or two below the previous one, with no
+  restart behind it, was treated as a restart: the anchor moved down and the
+  next sample added the dip back, so a day of HAL wobble crept the total
+  upward. Backwards moves of up to three steps are now ignored.
+- **Phone-side sources under `auto` are bound by coverage.** A wearable (or
+  a pinned source) is trusted for its whole margin; a phone-side origin —
+  Samsung Health, the platform's own count, an aggregator — may only supply
+  the steps from before this device started counting today, and on a past
+  day only fills a day this device has nothing for. An aggregator that sums
+  two origins can no longer double the display, and an algorithm that counts
+  5% high can no longer creep the total up sync after sync. New
+  `StepSource.stepsBeforeCoverage` and `StepStateStore.coverageStartAt`.
+- **Transient sensor failures are retried.** A registration that failed while
+  the sensor service was not ready marked the tracker `unsupported`, which no
+  recovery path would touch until the user pressed start again. The service
+  now stays up and retries at 2, 5, 15 and 30 s, then every minute, emitting
+  `E_SENSOR_UNAVAILABLE` meanwhile; only a device with no sensor at all is
+  marked unsupported.
+- **Health Connect reads are bounded** at four seconds, so a busy provider
+  cannot hang `getTodaySteps()`; the phone's count answers and the read is
+  retried next time. Granted permissions are cached for five seconds between
+  explicit status checks.
+- `resetToday()`, `clearHistory()` and `pruneHistory()` run on the serialised
+  write lane, so a commit queued just before a reset cannot land after it and
+  resurrect the old total.
+
+#### Security
+
+- `remoteSyncUrl` must be `https://`: rejected at `initialize()` with
+  `E_INVALID_CONFIG` and refused by the upload worker. `remoteSyncAllowHttp`
+  opts a development server in.
+- `HealthPrivacyPolicyActivity` — exported, reachable from the Health Connect
+  UI — opens only `http(s)` URLs.
+- [SECURITY.md](SECURITY.md): threat model, what is and is not encrypted,
+  exported components and their guards, and what a rewards app must verify
+  server-side.
+
+#### Project hygiene
+
+- Jest suite for the JS layer (39 tests) against a scripted native module:
+  config validation, the `enableHealthConnect()` and
+  `requestBackgroundPermissions()` ladders, events, error normalisation.
+- ESLint (typescript-eslint, zero warnings), Prettier, `.editorconfig`.
+- GitHub Actions: typecheck, lint, format, Jest, build and a pack-content
+  check; Kotlin compile, JVM tests and Android lint (must be error-free);
+  instrumented engine tests on an emulator on push. Dependabot for npm,
+  Gradle and Actions.
+- [CONTRIBUTING.md](CONTRIBUTING.md) with the invariants that are not
+  negotiable.
+- `package.json`: `engines`, `sideEffects: false`, `lint` / `test` /
+  `format` scripts; tests and mocks excluded from the published package.
+
 #### Health Connect permissions scoped to config
 
 - `healthConnectReadEnabled` config (default true). With it off the `READ_*`
@@ -186,14 +240,16 @@ ignore `START_STICKY`.
 
 ### Tests
 
-- 33 new JVM tests: `StepGapSplitterTest` (6), `StepContinuityTest` (8) —
+- 41 new JVM tests: `StepGapSplitterTest` (6), `StepContinuityTest` (8) —
   covering the 6,000 → 6,001 → 6,005 → 6,010 scenario, "next sync agrees, no
   double count", "phone on a desk raises the baseline" and "never sums" —
   `AccelerometerStepDetectorTest` (18), and platform-origin classification
   in `StepSourceResolverTest`.
-- Instrumented engine tests grown from 11 to 22, now deterministic in wall
+- Instrumented engine tests grown from 11 to 23, now deterministic in wall
   clock; new cases for the overnight kill, the `drop` and `today` policies,
-  and fresh installs on an old boot.
+  fresh installs on an old boot, and sensor jitter.
+- JVM tests: 55 in total, including the coverage rule for phone-side sources
+  and the platform origin.
 
 ## [1.2.0] - 2026-09-09
 

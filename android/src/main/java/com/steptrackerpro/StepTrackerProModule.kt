@@ -349,12 +349,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun resetToday(promise: Promise) {
         launchSafely(promise) {
-            core.engine.resetToday()
-            core.state.clearContinuity()
-            core.goals.reset()
-            // Deliberate write: saveDay() refuses to lower a day, which would
-            // leave history and the live counter permanently disagreeing.
-            core.repository.overwriteDay(core.liveToday())
+            core.resetToday()
             sendIfTracking(ServiceCommands.ACTION_REFRESH)
             promise.resolve(true)
         }
@@ -363,7 +358,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun clearHistory(promise: Promise) {
         launchSafely(promise) {
-            core.repository.clear()
+            core.clearHistory()
             promise.resolve(true)
         }
     }
@@ -371,7 +366,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun pruneHistory(retentionDays: Double, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(core.repository.prune(retentionDays.toInt()))
+            promise.resolve(core.pruneHistory(retentionDays.toInt()))
         }
     }
 
@@ -831,6 +826,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             } else {
                 current.remoteSyncHeaders
             },
+            remoteSyncAllowHttp = patch.optBoolean("remoteSyncAllowHttp", current.remoteSyncAllowHttp),
             autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot),
             gapRecovery = patch.optString("gapRecovery", current.gapRecovery) ?: current.gapRecovery,
             watchdogEnabled = patch.optBoolean("watchdogEnabled", current.watchdogEnabled),
@@ -866,6 +862,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
         "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
+        "remoteSyncAllowHttp" to config.remoteSyncAllowHttp,
         "autoStartOnBoot" to config.autoStartOnBoot,
         "gapRecovery" to config.gapRecovery,
         "watchdogEnabled" to config.watchdogEnabled,

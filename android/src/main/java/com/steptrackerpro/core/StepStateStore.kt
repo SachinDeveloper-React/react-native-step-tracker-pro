@@ -52,6 +52,18 @@ class StepStateStore(context: Context) {
         get() = prefs.getString(KEY_ACTIVE_DATE, null) ?: DateKeys.today()
         set(value) = prefs.edit().putString(KEY_ACTIVE_DATE, value).apply()
 
+    /**
+     * Epoch millis from which this device has been counting the active day.
+     * 0 means "from the start of the day" - the normal case, since with a
+     * hardware counter gap recovery reaches back through any dead time to
+     * midnight. Set only by a first-ever reading, i.e. an install: a
+     * phone-side Health Connect source may then supply the steps taken before
+     * that instant, and nothing after it. See StepSourceResolver.
+     */
+    var coverageStartAt: Long
+        get() = prefs.getLong(KEY_COVERAGE_START, 0L)
+        set(value) = prefs.edit().putLong(KEY_COVERAGE_START, value.coerceAtLeast(0L)).apply()
+
     /** Cached total so `getTodaySteps()` is instant even with the service dead. */
     var stepsToday: Int
         get() = prefs.getInt(KEY_STEPS_TODAY, 0)
@@ -257,6 +269,7 @@ class StepStateStore(context: Context) {
         private const val KEY_LAST_ELAPSED = "last_elapsed_realtime"
         private const val KEY_ACTIVE_DATE = "active_date"
         private const val KEY_STEPS_TODAY = "steps_today"
+        private const val KEY_COVERAGE_START = "coverage_start_at"
         private const val KEY_STATE = "tracking_state"
         private const val KEY_SOURCE = "sensor_source"
         private const val KEY_LAST_EVENT_AT = "last_event_at"

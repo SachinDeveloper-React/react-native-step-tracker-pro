@@ -3,7 +3,4 @@ export type { UseStepTrackerOptions, UseStepTrackerResult } from './useStepTrack
 export { useStepStats } from './useStepStats';
 export type { StatsPeriod, UseStepStatsResult } from './useStepStats';
 export { useHealthConnect } from './useHealthConnect';
-export type {
-  UseHealthConnectOptions,
-  UseHealthConnectResult,
-} from './useHealthConnect';
+export type { UseHealthConnectOptions, UseHealthConnectResult } from './useHealthConnect';

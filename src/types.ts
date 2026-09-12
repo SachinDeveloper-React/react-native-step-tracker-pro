@@ -12,12 +12,7 @@ export type Sex = 'male' | 'female' | 'unspecified';
  */
 export type SensorSource = 'step_counter' | 'step_detector' | 'accelerometer' | 'none';
 
-export type TrackingState =
-  | 'idle'
-  | 'running'
-  | 'paused'
-  | 'stopped'
-  | 'unsupported';
+export type TrackingState = 'idle' | 'running' | 'paused' | 'stopped' | 'unsupported';
 
 export interface StepTrackerConfig {
   /** Height in centimetres. Used for stride length. Default 170. */
@@ -106,7 +101,18 @@ export interface StepTrackerConfig {
   privacyPolicyUrl?: string;
   /** Optional HTTPS endpoint that unsynced day records get POSTed to. */
   remoteSyncUrl?: string;
+  /**
+   * Sent with every upload. Stored in the app's private SharedPreferences in
+   * the clear, like the rest of config — use short-lived tokens, not
+   * long-lived secrets. Never returned by `getConfig()`.
+   */
   remoteSyncHeaders?: Record<string, string>;
+  /**
+   * Allow a plain `http://` `remoteSyncUrl`. Default false: the worker refuses
+   * to send step data in the clear, and `initialize()` rejects such a URL
+   * with `E_INVALID_CONFIG`. For a local development server only.
+   */
+  remoteSyncAllowHttp?: boolean;
   /** Restart tracking automatically after device reboot. Default true. */
   autoStartOnBoot?: boolean;
   /**
@@ -472,7 +478,7 @@ export interface BackgroundRestrictionStatus {
   backgroundStartNeedsExemption: boolean;
 }
 
-export interface StepsChangedEvent extends StepSnapshot {}
+export type StepsChangedEvent = StepSnapshot;
 
 export interface GoalReachedEvent {
   type: 'daily' | 'weekly' | 'monthly';
@@ -513,10 +519,10 @@ export interface SyncEvent {
 }
 
 /** Fired when the app answering for the user's steps changes. */
-export interface StepSourceChangedEvent extends ResolvedStepSource {}
+export type StepSourceChangedEvent = ResolvedStepSource;
 
 /** Fired when Health Connect is installed, updated, granted or revoked. */
-export interface HealthConnectStatusEvent extends HealthConnectStatus {}
+export type HealthConnectStatusEvent = HealthConnectStatus;
 
 export interface DayChangedEvent {
   previousDate: string;

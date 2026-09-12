@@ -1,6 +1,8 @@
 export type StepTrackerErrorCode =
   | 'E_UNSUPPORTED_PLATFORM'
   | 'E_NO_SENSOR'
+  /** Emitted on the `error` event: the sensor exists but registration failed; the service is retrying. */
+  | 'E_SENSOR_UNAVAILABLE'
   | 'E_NOT_INITIALIZED'
   | 'E_PERMISSION_DENIED'
   | 'E_SERVICE_START_FAILED'

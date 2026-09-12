@@ -2,7 +2,6 @@ package com.steptrackerpro.service
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 
 /** Every entry point into [StepTrackerService] goes through here. */
 object ServiceCommands {
@@ -32,11 +31,8 @@ object ServiceCommands {
         val intent = intent(context, ACTION_START)
             .putExtra(EXTRA_FROM_BOOT, fromBoot)
             .apply { if (recoveredBy != null) putExtra(EXTRA_RECOVERED_BY, recoveredBy) }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
+        // minSdk is 26, so this is always the foreground form.
+        context.startForegroundService(intent)
     }
 
     /** [start] that reports failure instead of throwing. */
@@ -45,12 +41,6 @@ object ServiceCommands {
 
     fun send(context: Context, action: String) {
         val intent = intent(context, action)
-        runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
+        runCatching { context.startForegroundService(intent) }
     }
 }

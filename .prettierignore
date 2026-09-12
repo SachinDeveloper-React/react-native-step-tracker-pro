@@ -1,0 +1,6 @@
+lib/
+node_modules/
+android/
+example/android/
+package-lock.json
+CHANGELOG.md

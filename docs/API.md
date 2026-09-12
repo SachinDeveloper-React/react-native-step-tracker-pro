@@ -407,15 +407,21 @@ allowed reads.
 
 #### How `'auto'` merges
 
-Each Health Connect read compares the best external source with the phone.
-If the other app is ahead by N, N is stored as today's *baseline* and the
-number shown becomes `deviceSteps + N`; every step the phone counts moves it.
-The next read raises the baseline only if the other app has pulled further
-ahead again — the phone on a desk while a watch walked — and leaves it alone
-when both counted the same walk, so nothing is counted twice. The baseline
-never shrinks within a day and is dropped at midnight, so the shown number is
-monotonic and goals key off it. The phone's raw count is what gets written to
-Health Connect, never the merged number.
+Each Health Connect read works out how far ahead the best external source is
+*allowed* to be — its lead — stores it as today's baseline, and the number
+shown becomes `deviceSteps + lead`; every step the phone counts moves it.
+
+| Source | Allowed lead | Why |
+|---|---|---|
+| a wearable, or a pinned source | its whole margin over the phone, growing whenever it pulls further ahead | a watch on the wrist sees a walk the phone on the desk did not |
+| a phone-side app (Samsung Health, Google Fit, the platform's own count, an aggregator) | only its steps from **before this device started covering the day** — an install at 15:00 takes the morning; nothing after | it reads the same phone, so for the hours both were counting it cannot have seen more; anything beyond that is inflation |
+| a phone-side app, on a past day | the whole day, only if this device has nothing for it | |
+
+The baseline never shrinks within a day and is dropped at midnight, so the
+shown number is monotonic and goals key off it. The phone's raw count is what
+gets written to Health Connect, never the merged number. An aggregator that
+sums two origins cannot double the display, and a phone-side algorithm that
+counts 5% high cannot creep it upward sync after sync.
 
 ```ts
 const { steps, stepSource } = await StepTracker.getTodaySteps();
@@ -564,7 +570,7 @@ StepTracker.removeListener();              // everything
 | `healthConnectStatusChanged` | `HealthConnectStatus`. Fires after a permission request, a revoke, and on every foreground where the status moved — which is how you notice the user granting or revoking from outside the app. |
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
-| `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. |
+| `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
 
 Events fire only while a React instance is alive. The service keeps counting and
 writing to the database regardless — on resume, call `getTodaySteps()` rather
@@ -601,8 +607,9 @@ than replaying missed events. `useStepTracker` already does this.
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |
 | `privacyPolicyUrl` | — | **required before shipping health permissions**; Health Connect links to it and Play review checks for it |
-| `remoteSyncUrl` | — | optional HTTPS endpoint for unsynced days |
-| `remoteSyncHeaders` | `{}` | e.g. auth headers |
+| `remoteSyncUrl` | — | optional endpoint for unsynced days; must be `https://` |
+| `remoteSyncHeaders` | `{}` | e.g. auth headers; stored in the clear, use short-lived tokens |
+| `remoteSyncAllowHttp` | `false` | permit a plain `http://` endpoint, for a development server |
 | `autoStartOnBoot` | `true` | |
 | `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery) |
 | `watchdogEnabled` | `true` | 15-minute WorkManager job that restarts a killed service (needs the battery exemption on Android 12+) |

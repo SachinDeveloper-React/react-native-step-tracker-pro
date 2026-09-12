@@ -61,7 +61,10 @@ object StepContinuity {
         // any, still stands: the other app has not disappeared, it has merely
         // not been read.
         if (raw.externalSteps <= 0) return stored
-        val lead = raw.externalSteps - raw.deviceSteps
+        // The resolver has already decided how far ahead the winner may be -
+        // its whole margin for a watch, only the pre-coverage part of the day
+        // for a phone-side app - so the lead is read off its answer.
+        val lead = if (raw.usedExternal) raw.totals.steps - raw.deviceSteps else 0
         if (lead <= (stored?.offset ?: 0)) return stored
         // The external source is further ahead than the number currently
         // shown, so what it saw and the phone did not has grown. Adopt the

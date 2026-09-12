@@ -42,15 +42,16 @@ npx react-native run-android
 
 ---
 
-## 2. Run the engine tests
+## 2. Run the automated tests
 
 ```sh
-cd android
-./gradlew :react-native-step-tracker-pro:connectedAndroidTest
+npm test                 # Jest, JS layer (39 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer (55 tests, no device)
+npm run test:android:device   # instrumented engine tests
 ```
 
-Runs fine on an emulator — the tests never touch the sensor. Twenty-two cases,
-among them:
+The instrumented tests run fine on an emulator — they never touch the
+sensor. Twenty-three cases, among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -61,6 +62,7 @@ among them:
 | `overnightKillRecoversTheGapOnBothSidesOfMidnight` | steps counted while an OEM had the process dead overnight are lost |
 | `freshInstallOnAnOldBootDoesNotInventHistory` | a new install credits itself with days of steps it never saw |
 | `wallClockJumpIsNotMistakenForAReboot` | an NTP correction doubles the day |
+| `smallBackwardsJitterIsIgnoredNotReanchored` | a HAL that wobbles a step backwards creeps the total upward |
 | `midnightRolloverFinalisesPreviousDay` | day totals never close, or leak forward |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |

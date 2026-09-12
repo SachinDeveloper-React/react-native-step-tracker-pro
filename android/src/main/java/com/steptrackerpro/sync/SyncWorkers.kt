@@ -65,6 +65,22 @@ class RemoteSyncWorker(
         val core = StepTrackerCore.get(applicationContext)
         val config = core.config()
         val url = config.remoteSyncUrl ?: return Result.success()
+        if (!config.remoteSyncAllowHttp && !url.startsWith("https://", ignoreCase = true)) {
+            // Health data in the clear is a policy violation and a real leak.
+            // Not retryable: the URL will not fix itself.
+            StepEventBus.emit(
+                StepEventBus.Events.SYNC_COMPLETED,
+                mapOf(
+                    "target" to "remote",
+                    "syncedRecords" to 0,
+                    "failedRecords" to 0,
+                    "success" to false,
+                    "error" to "remoteSyncUrl must use https (set remoteSyncAllowHttp to override)",
+                    "retryable" to false
+                )
+            )
+            return Result.success()
+        }
 
         val pending = core.repository.unsynced(SyncTarget.REMOTE, limit = 200)
         if (pending.isEmpty()) return Result.success()

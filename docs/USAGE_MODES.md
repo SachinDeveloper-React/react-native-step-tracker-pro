@@ -229,27 +229,40 @@ or refused → the numbers are the phone's own, and everything else works.
 The one rule: **origins are never summed.** A user walking with a watch and a
 phone has the same steps recorded twice; adding them shows double.
 
-Under `'auto'`, each Health Connect read compares the best external source
-with the phone. If the other app is ahead — it reported 6,000 and the phone
-has 5,500 — the 500-step *lead* is remembered as today's baseline, and from
-then on the number shown is `phoneSteps + 500`. The phone's sensor keeps
-ticking, so the user sees **6,001, 6,005, 6,010…** during a walk instead of
-6,000 frozen until the watch next syncs. On the next read the baseline only
-grows if the other app has pulled further ahead again (the phone was on a
-desk while the watch was walking); when both counted the same walk the
-external total lands on the number already being shown and nothing is
-counted twice.
+Under `'auto'`, each Health Connect read works out how far ahead the best
+external source is allowed to be, and that *lead* becomes today's baseline:
+the number shown is `phoneSteps + lead`, the phone's sensor keeps ticking, and
+the user sees **6,001, 6,005, 6,010…** during a walk instead of 6,000 frozen
+until the other app next syncs. What the lead may be depends on what the
+source is:
+
+- **A wearable** (or any source the user pinned) is trusted outright: a watch
+  on the wrist sees a walk the phone on the desk did not. Its lead is its
+  whole margin over the phone, and it grows whenever the watch pulls further
+  ahead.
+- **A phone-side origin** — Samsung Health, Google Fit, Health Connect's own
+  on-device count, an aggregator — reads the *same phone*. For the hours this
+  device was counting it cannot legitimately have seen more, so all it may add
+  is the part of the day **before this device's coverage began**: an install
+  at 15:00 takes the morning's 6,000 from Samsung Health, and nothing after.
+  An aggregator that sums the platform's count and this package's own cannot
+  double the display, and a phone-side algorithm that counts 5% high cannot
+  creep the total up sync after sync. On a past day a phone-side source is
+  used only when this device has nothing for it at all.
+
+When both counted the same walk the external total lands on the number
+already being shown and nothing is counted twice.
 
 Concretely, a fresh install at 15:00 on a phone whose Samsung Health already
-holds 6,000 steps for today:
+holds 6,000 steps for today, and a watch paired later that afternoon:
 
 | Event | phone count | Health Connect | shown |
 |---|---|---|---|
-| install, first read | 0 | 6,000 | 6,000 |
+| install, first read | 0 | Samsung 6,000 (all before 15:00) | 6,000 |
 | user walks 10 steps | 10 | 6,000 (not synced yet) | 6,010 |
-| Samsung Health syncs | 10 | 6,010 | 6,010 |
-| phone left on desk, watch walks 1,000 | 10 | 7,010 | 7,010 |
-| user walks 40 with both | 50 | 7,010 (not synced) | 7,050 |
+| Samsung Health syncs 6,012 (counts a touch high) | 10 | 6,012 | 6,010 — the 2 extra never enter |
+| phone left on desk, watch walks 1,000 | 10 | watch 1,010 for the day | 7,010 — watch lead 1,000 + Samsung 6,000 |
+| user walks 40 with both | 50 | (not synced) | 7,050 |
 
 The shown number is monotonic for the day, so `goalReached` fires off it.
 `stepSource.merged` is true and `stepSource.baselineSteps` says how far ahead

@@ -176,7 +176,11 @@ display freezes at 6,000 for the whole walk, then jumps. Instead `auto`
 remembers how far ahead it was (its *lead*), shows `phoneSteps + lead`, and
 only raises the lead when the other app has genuinely seen more than the
 phone — so the user sees 6,001, 6,005, 6,010 as they walk and nothing is ever
-counted twice. `stepSource.merged` and `stepSource.baselineSteps` report it.
+counted twice. A wearable is trusted for its whole margin; a phone-side app
+(Samsung Health, an aggregator) may only supply the part of the day before
+this device started counting, so it can fill in the morning after an
+afternoon install but can never inflate a day the phone covered.
+`stepSource.merged` and `stepSource.baselineSteps` report it.
 
 Permission handling, the install and settings fallbacks, and the full source
 API: [docs/API.md](docs/API.md#health-connect).
@@ -232,18 +236,21 @@ cd example && npm install && npm run android
 ## Testing
 
 ```sh
-cd android
-./gradlew test                                          # JVM, no device needed
-./gradlew :react-native-step-tracker-pro:connectedAndroidTest
+npm test                    # Jest: the JS layer against a scripted native module
+npm run test:android        # JVM, no device needed
+npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Forty-seven JVM tests cover step-source resolution, the `auto` merge, gap
-splitting and the accelerometer pedometer against synthetic gait — chiefly
-that a phone and a watch are never added together, and that a car is not a
+Thirty-nine Jest tests cover config validation and the flows in the JS
+layer. Fifty-five JVM tests cover step-source resolution, the `auto` merge and
+its coverage rule, gap splitting and the accelerometer pedometer against
+synthetic gait — chiefly that a phone and a watch are never added together,
+that a phone-side app cannot inflate a covered day, and that a car is not a
 walk.
-Twenty-two instrumented tests cover the reboot, midnight, overnight-kill,
-pause and counter-reset paths by feeding samples to the engine directly, so
-they run on an emulator with no step hardware.
+Twenty-three instrumented tests cover the reboot, midnight, overnight-kill,
+sensor-jitter, pause and counter-reset paths by feeding samples to the engine
+directly, so they run on an emulator with no step hardware. CI runs all of it
+on every push.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).

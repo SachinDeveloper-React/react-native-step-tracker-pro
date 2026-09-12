@@ -92,7 +92,10 @@ function strideForPatch(config: StepTrackerConfig): number | undefined {
 }
 
 /** Stride in metres for a given height and sex, the same formula the native side uses. */
-export function estimateStride(height: number, sex: keyof typeof STRIDE_COEFFICIENT = 'unspecified'): number {
+export function estimateStride(
+  height: number,
+  sex: keyof typeof STRIDE_COEFFICIENT = 'unspecified'
+): number {
   return (height * STRIDE_COEFFICIENT[sex]) / 100;
 }
 
@@ -100,10 +103,7 @@ const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
 
 function assertRange(startDate: string, endDate: string): void {
   if (!DATE_KEY.test(startDate) || !DATE_KEY.test(endDate)) {
-    throw new StepTrackerError(
-      'E_INVALID_CONFIG',
-      'Dates must be yyyy-MM-dd'
-    );
+    throw new StepTrackerError('E_INVALID_CONFIG', 'Dates must be yyyy-MM-dd');
   }
   if (startDate > endDate) {
     throw new StepTrackerError(
@@ -127,22 +127,33 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
   if (config.persistEveryNSteps != null && config.persistEveryNSteps < 1) {
     // 0 makes the native `pendingCommit >= threshold` check true with nothing
     // pending, which turns every step into a database write.
-    throw new StepTrackerError(
-      'E_INVALID_CONFIG',
-      'persistEveryNSteps must be >= 1'
-    );
+    throw new StepTrackerError('E_INVALID_CONFIG', 'persistEveryNSteps must be >= 1');
   }
   if (config.calorieCoefficient != null && config.calorieCoefficient < 0) {
-    throw new StepTrackerError(
-      'E_INVALID_CONFIG',
-      'calorieCoefficient must be >= 0'
-    );
+    throw new StepTrackerError('E_INVALID_CONFIG', 'calorieCoefficient must be >= 0');
   }
   if (config.historyRetentionDays != null && config.historyRetentionDays < 1) {
-    throw new StepTrackerError(
-      'E_INVALID_CONFIG',
-      'historyRetentionDays must be >= 1'
-    );
+    throw new StepTrackerError('E_INVALID_CONFIG', 'historyRetentionDays must be >= 1');
+  }
+  if (config.remoteSyncUrl) {
+    const url = config.remoteSyncUrl.toLowerCase();
+    const https = url.startsWith('https://');
+    const http = url.startsWith('http://');
+    if (!https && !(http && config.remoteSyncAllowHttp)) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'remoteSyncUrl must be an https:// URL (set remoteSyncAllowHttp for a dev server)'
+      );
+    }
+  }
+  if (config.privacyPolicyUrl) {
+    const url = config.privacyPolicyUrl.toLowerCase();
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'privacyPolicyUrl must be a web URL'
+      );
+    }
   }
   if (
     config.accelerometerThreshold != null &&
@@ -180,9 +191,7 @@ export const StepTracker = {
    */
   async initialize(config: StepTrackerConfig = {}): Promise<StepSnapshot> {
     const merged = normaliseConfig(config);
-    return call(() =>
-      getNativeModule().initialize(merged)
-    ) as Promise<StepSnapshot>;
+    return call(() => getNativeModule().initialize(merged)) as Promise<StepSnapshot>;
   },
 
   /** Patches config at runtime. Notification and goals update immediately. */
@@ -297,9 +306,7 @@ export const StepTracker = {
   /** Deletes rows older than `retentionDays`; returns rows removed. */
   async pruneHistory(retentionDays?: number): Promise<number> {
     return call(() =>
-      getNativeModule().pruneHistory(
-        retentionDays ?? DEFAULT_CONFIG.historyRetentionDays
-      )
+      getNativeModule().pruneHistory(retentionDays ?? DEFAULT_CONFIG.historyRetentionDays)
     );
   },
 
@@ -311,7 +318,9 @@ export const StepTracker = {
 
   /** Shows the Android runtime dialogs. Must be called with an Activity attached. */
   async requestPermissions(): Promise<PermissionStatus> {
-    return call(() => getNativeModule().requestPermissions()) as Promise<PermissionStatus>;
+    return call(() =>
+      getNativeModule().requestPermissions()
+    ) as Promise<PermissionStatus>;
   },
 
   async getDeviceCapabilities(): Promise<DeviceCapabilities> {
@@ -505,10 +514,7 @@ export const StepTracker = {
    * Returns an empty list when Health Connect is unavailable or reads are not
    * granted.
    */
-  async getStepSources(
-    startDate: string,
-    endDate: string
-  ): Promise<StepSourceList> {
+  async getStepSources(startDate: string, endDate: string): Promise<StepSourceList> {
     assertRange(startDate, endDate);
     return call(() =>
       getNativeModule().getStepSources(startDate, endDate)
@@ -530,9 +536,7 @@ export const StepTracker = {
    * with `null`. Stored separately from config, so it survives an
    * `initialize()` that does not mention it.
    */
-  async setPreferredStepSource(
-    packageName: string | null
-  ): Promise<ResolvedStepSource> {
+  async setPreferredStepSource(packageName: string | null): Promise<ResolvedStepSource> {
     return call(() =>
       getNativeModule().setPreferredStepSource(packageName)
     ) as Promise<ResolvedStepSource>;
@@ -544,9 +548,9 @@ export const StepTracker = {
    * has any data to look at.
    */
   async getInstalledCompanionApps(): Promise<CompanionApp[]> {
-    const result = (await call(() =>
-      getNativeModule().getInstalledCompanionApps()
-    )) as { apps: CompanionApp[] };
+    const result = (await call(() => getNativeModule().getInstalledCompanionApps())) as {
+      apps: CompanionApp[];
+    };
     return result.apps;
   },
 

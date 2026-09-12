@@ -63,22 +63,31 @@ function healthSummary(health: ReturnType<typeof useHealthConnect>): string {
 }
 
 export default function App() {
-  const { snapshot, state, ready, error, start, pause, resume, stop, requestPermissions } =
-    useStepTracker({
-      height: 175,
-      weight: 75,
-      dailyGoal: 10000,
-      historyRetentionDays: 31,
-      notificationTitle: '{steps} steps today',
-      // Required before Play will accept health permissions; Health Connect
-      // links to it from its own permission sheet.
-      privacyPolicyUrl: 'https://example.com/privacy',
-      // Take the phone's count or a paired watch's, whichever saw more of the
-      // day. Never both added together.
-      stepSource: 'auto',
-      onGoalReached: (event) =>
-        Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
-    });
+  const {
+    snapshot,
+    state,
+    ready,
+    error,
+    start,
+    pause,
+    resume,
+    stop,
+    requestPermissions,
+  } = useStepTracker({
+    height: 175,
+    weight: 75,
+    dailyGoal: 10000,
+    historyRetentionDays: 31,
+    notificationTitle: '{steps} steps today',
+    // Required before Play will accept health permissions; Health Connect
+    // links to it from its own permission sheet.
+    privacyPolicyUrl: 'https://example.com/privacy',
+    // Take the phone's count or a paired watch's, whichever saw more of the
+    // day. Never both added together.
+    stepSource: 'auto',
+    onGoalReached: (event) =>
+      Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
+  });
 
   const { stats } = useStepStats('week');
   const health = useHealthConnect();
@@ -90,8 +99,12 @@ export default function App() {
   // what decides whether to bother the user about it.
   const refreshHealth = useCallback(() => {
     if (!isSupported()) return;
-    StepTracker.getTrackingHealth().then(setTracking).catch(() => {});
-    StepTracker.getPendingSyncCount().then(setPending).catch(() => {});
+    StepTracker.getTrackingHealth()
+      .then(setTracking)
+      .catch(() => {});
+    StepTracker.getPendingSyncCount()
+      .then(setPending)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -198,8 +211,7 @@ export default function App() {
                     styles.barFill,
                     {
                       height: `${Math.max(4, (day.steps / Math.max(best, 1)) * 100)}%`,
-                      backgroundColor:
-                        day.steps >= goal ? palette.goal : palette.lane,
+                      backgroundColor: day.steps >= goal ? palette.goal : palette.lane,
                     },
                   ]}
                 />
@@ -316,7 +328,9 @@ export default function App() {
 
         <Text style={styles.footer}>
           Sensor: {snapshot?.source ?? 'none'} · State: {state}
-          {tracking ? ` · Service: ${tracking.serviceAlive ? 'alive' : 'not running'}` : ''}
+          {tracking
+            ? ` · Service: ${tracking.serviceAlive ? 'alive' : 'not running'}`
+            : ''}
           {snapshot?.stepSource?.merged
             ? ` · ${snapshot.stepSource.appName} +${snapshot.stepSource.baselineSteps.toLocaleString()} baseline`
             : ''}

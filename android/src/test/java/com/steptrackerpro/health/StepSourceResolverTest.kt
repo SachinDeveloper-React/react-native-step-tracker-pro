@@ -26,8 +26,9 @@ class StepSourceResolverTest {
         kind: StepSourceKind,
         distance: Double = 0.0,
         calories: Double = 0.0,
-        isSelf: Boolean = false
-    ) = StepSource(pkg, pkg, kind, steps, distance, calories, 0L, isSelf)
+        isSelf: Boolean = false,
+        stepsBeforeCoverage: Int = -1
+    ) = StepSource(pkg, pkg, kind, steps, distance, calories, 0L, isSelf, stepsBeforeCoverage)
 
     private fun resolve(
         policy: StepSourcePolicy,
@@ -207,10 +208,92 @@ class StepSourceResolverTest {
         assertEquals("This phone (Android)", StepSourceCatalog.appName("android"))
 
         // Under the wearable policy it is therefore ignored, and under auto it
-        // competes on count like any phone-side app.
+        // is bound by the coverage rule like any phone-side app.
         val platform = source("android", 6_000, StepSourceCatalog.classify("android", null, self))
         assertFalse(resolve(StepSourcePolicy.WEARABLE, device(500), listOf(platform)).usedExternal)
-        assertTrue(resolve(StepSourcePolicy.AUTO, device(500), listOf(platform)).usedExternal)
         assertTrue(platform.isPlatform)
+    }
+
+    // ---- the coverage rule for phone-side sources under auto ----------------
+
+    @Test
+    fun `an app installed at 15_00 takes the phone-side steps from before it, then counts on`() {
+        // Samsung Health has 6,000 for today, 5,990 of them before this app's
+        // first reading; this app has counted 10 since.
+        val samsung = source(
+            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 5_990
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(10), listOf(samsung))
+
+        assertEquals(6_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertTrue(result.merged)
+        assertEquals(5_990, result.baselineSteps)
+        assertEquals("com.sec.android.app.shealth", result.sourcePackage)
+    }
+
+    @Test
+    fun `a phone-side app cannot pull a fully covered day upward`() {
+        // An aggregator that summed the platform's count and ours reports
+        // double. This device covered the whole day, so it may add nothing.
+        val aggregator = source(
+            "com.example.aggregator", 16_000, StepSourceKind.APP, stepsBeforeCoverage = 0
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(8_000), listOf(aggregator))
+
+        assertEquals(8_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+        // Still reported, so a UI can show the discrepancy.
+        assertEquals(16_000, result.externalSteps)
+    }
+
+    @Test
+    fun `a phone-side algorithm that counts five percent high does not creep the total`() {
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_400, StepSourceKind.APP, stepsBeforeCoverage = 0
+        )
+        assertEquals(8_000, resolve(StepSourcePolicy.AUTO, device(8_000), listOf(samsung)).totals.steps)
+    }
+
+    @Test
+    fun `a watch may be ahead at any time of day`() {
+        val watch = source("com.fitbit.FitbitMobile", 9_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val result = resolve(StepSourcePolicy.AUTO, device(8_000), listOf(watch))
+
+        assertEquals(9_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertFalse(result.merged)
+    }
+
+    @Test
+    fun `a pinned phone-side source is trusted like a watch`() {
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_400, StepSourceKind.APP, stepsBeforeCoverage = 0
+        )
+        val result = resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(samsung),
+            preferred = "com.sec.android.app.shealth"
+        )
+        assertEquals(8_400, result.totals.steps)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
+    fun `on a past day a phone-side source only fills a day this device has nothing for`() {
+        // Coverage is unknown for past days (stepsBeforeCoverage = -1).
+        val platform = source("android", 7_000, StepSourceKind.PHONE)
+        assertEquals(7_000, resolve(StepSourcePolicy.AUTO, device(0), listOf(platform)).totals.steps)
+        assertEquals(6_500, resolve(StepSourcePolicy.AUTO, device(6_500), listOf(platform)).totals.steps)
+    }
+
+    @Test
+    fun `wearable and health_connect policies are exact and ignore coverage`() {
+        val samsung = source(
+            "com.sec.android.app.shealth", 4_000, StepSourceKind.APP, stepsBeforeCoverage = 0
+        )
+        val result = resolve(StepSourcePolicy.HEALTH_CONNECT, device(8_000), listOf(samsung))
+        assertEquals(4_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertFalse(result.merged)
     }
 }

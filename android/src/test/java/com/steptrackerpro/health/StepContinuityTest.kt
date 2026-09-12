@@ -116,6 +116,32 @@ class StepContinuityTest {
     }
 
     @Test
+    fun `a phone-side source supplies the pre-install steps once and the phone counts on`() {
+        // Installed at 15:00 with Samsung Health at 6,000, all before coverage.
+        val samsung = StepSource(
+            "com.sec.android.app.shealth", "Samsung Health", StepSourceKind.APP,
+            6_000, 0.0, 0.0, 0L, false, stepsBeforeCoverage = 6_000
+        )
+        val first = StepSourceResolver.resolve(StepSourcePolicy.AUTO, device(0), listOf(samsung), null, metrics)
+        val baseline = StepContinuity.observe(null, first, date, 1L)!!
+        assertEquals(6_000, baseline.offset)
+
+        // 10 steps later the phone shows 6,010 without any new read.
+        assertEquals(6_010, StepContinuity.apply(raw(10, null), baseline, metrics).totals.steps)
+
+        // Samsung syncs to 6,012 (it counts a touch high). Its pre-coverage
+        // share is unchanged, so the baseline does not move and the two extra
+        // steps of algorithmic drift never enter the total.
+        val later = StepSource(
+            "com.sec.android.app.shealth", "Samsung Health", StepSourceKind.APP,
+            6_012, 0.0, 0.0, 0L, false, stepsBeforeCoverage = 6_000
+        )
+        val second = StepSourceResolver.resolve(StepSourcePolicy.AUTO, device(10), listOf(later), null, metrics)
+        assertSame(baseline, StepContinuity.observe(baseline, second, date, 2L))
+        assertEquals(6_010, StepContinuity.apply(second, baseline, metrics).totals.steps)
+    }
+
+    @Test
     fun `never sums the two sources`() {
         val baseline = StepContinuity.observe(null, raw(7_800, 8_000), date, 1L)!!
         val shown = StepContinuity.apply(raw(7_800, 8_000), baseline, metrics)

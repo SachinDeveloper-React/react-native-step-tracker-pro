@@ -38,7 +38,11 @@ class HealthPrivacyPolicyActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Only a web URL is opened. The value comes from the app's own config,
+        // but this activity is exported and reachable from the Health Connect
+        // UI, so it never launches an arbitrary scheme on the app's behalf.
         val url = ConfigStore(this).get().privacyPolicyUrl
+            ?.takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
         if (url.isNullOrEmpty()) {
             // Better than a silent finish: the user tapped a link and deserves
             // to know it goes nowhere, and the developer sees it in QA.

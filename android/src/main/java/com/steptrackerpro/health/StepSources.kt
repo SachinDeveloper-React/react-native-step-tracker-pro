@@ -70,7 +70,16 @@ data class StepSource(
     val calories: Double,
     /** Epoch ms of the most recent record seen from this origin. */
     val lastRecordAt: Long,
-    val isSelf: Boolean
+    val isSelf: Boolean,
+    /**
+     * Of [steps], how many were recorded before this device started covering
+     * the day (see `StepStateStore.coverageStartAt`). -1 when not computed -
+     * past days, or aggregate reads. Under the `auto` policy this is all a
+     * phone-side origin is allowed to add: the same phone cannot legitimately
+     * count more steps than its own hardware counter for the hours both were
+     * watching, so anything beyond the gap is another app's inflation.
+     */
+    val stepsBeforeCoverage: Int = -1
 ) {
     val isWearable: Boolean get() = kind.isWearable
 

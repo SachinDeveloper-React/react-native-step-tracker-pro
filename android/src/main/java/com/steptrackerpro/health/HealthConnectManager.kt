@@ -98,9 +98,30 @@ class HealthConnectManager(
 
     // ---- permissions -----------------------------------------------------
 
-    suspend fun grantedPermissions(): Set<String> =
-        runCatching { client()?.permissionController?.getGrantedPermissions() }
+    @Volatile
+    private var grantedCache: Pair<Long, Set<String>>? = null
+
+    /**
+     * The grants this app holds. Cached briefly: every resolved read checks
+     * them, the sensor path can trigger one a minute, and each check is a
+     * cross-process call. [status] and anything that just changed a grant
+     * ask for a fresh answer.
+     */
+    suspend fun grantedPermissions(fresh: Boolean = false): Set<String> {
+        if (!fresh) {
+            grantedCache?.let { (at, set) ->
+                if (System.currentTimeMillis() - at < GRANT_CACHE_MS) return set
+            }
+        }
+        val set = runCatching { client()?.permissionController?.getGrantedPermissions() }
             .getOrNull() ?: emptySet()
+        grantedCache = System.currentTimeMillis() to set
+        return set
+    }
+
+    fun invalidatePermissionCache() {
+        grantedCache = null
+    }
 
     suspend fun hasAllPermissions(): Boolean = grantedPermissions().containsAll(REQUIRED)
 
@@ -117,6 +138,7 @@ class HealthConnectManager(
     suspend fun revokeAll(): Boolean = runCatching {
         client()?.permissionController?.revokeAllPermissions()
         state.healthPermissionDenials = 0
+        invalidatePermissionCache()
         true
     }.getOrDefault(false)
 
@@ -163,7 +185,11 @@ class HealthConnectManager(
 
     suspend fun status(scope: PermissionScope = PermissionScope()): Map<String, Any?> {
         val availability = availability()
-        val granted = if (availability == Availability.AVAILABLE) grantedPermissions() else emptySet()
+        val granted = if (availability == Availability.AVAILABLE) {
+            grantedPermissions(fresh = true)
+        } else {
+            emptySet()
+        }
         val required = scope.required
         val missing = scope.requested - granted
         val denials = state.healthPermissionDenials
@@ -247,10 +273,17 @@ class HealthConnectManager(
      */
     suspend fun readDailyStepsBySource(
         start: Instant,
-        end: Instant
+        end: Instant,
+        /**
+         * Epoch millis from which this device covered the day it falls on.
+         * Records on that day are additionally split into the part before it,
+         * reported as [StepSource.stepsBeforeCoverage]. 0 disables the split.
+         */
+        coverageStartMs: Long = 0L
     ): Map<String, List<StepSource>> {
         val hc = client() ?: return emptyMap()
         val self = context.packageName
+        val coverageDate = if (coverageStartMs > 0L) DateKeys.of(coverageStartMs) else null
 
         // A raw read is bounded by MAX_PAGES * PAGE_SIZE records. A watch that
         // writes one record a minute produces 1,440 a day, so anything past a
@@ -270,12 +303,28 @@ class HealthConnectManager(
         // are written in minutes-long slices by every source seen in practice,
         // so the error is bounded by one such slice per day.
         readAll(hc, StepsRecord::class.java, start, end) { record ->
-            val date = DateKeys.of(record.startTime.toEpochMilli())
+            val recordStart = record.startTime.toEpochMilli()
+            val recordEnd = record.endTime.toEpochMilli()
+            val date = DateKeys.of(recordStart)
             val pkg = record.metadata.dataOrigin.packageName
             val acc = buckets.getOrPut(date) { HashMap() }
                 .getOrPut(pkg) { Accumulator(pkg, self) }
-            acc.steps += record.count.toInt()
-            acc.observe(record.metadata.device?.type, record.endTime.toEpochMilli())
+            val count = record.count.toInt()
+            acc.steps += count
+            if (date == coverageDate) {
+                // The part of this record that predates our coverage. A record
+                // straddling the instant is split by time; step records are
+                // minutes long, so the error is bounded by one of them.
+                acc.stepsBefore += when {
+                    recordEnd <= coverageStartMs -> count
+                    recordStart >= coverageStartMs -> 0
+                    else -> {
+                        val span = (recordEnd - recordStart).coerceAtLeast(1L).toDouble()
+                        ((coverageStartMs - recordStart) / span * count).toInt()
+                    }
+                }
+            }
+            acc.observe(record.metadata.device?.type, recordEnd)
         }
         // Distance and calories are optional companions: an origin that wrote
         // steps but no distance keeps 0.0 here and has it derived from stride
@@ -291,9 +340,9 @@ class HealthConnectManager(
             buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
         }
 
-        return buckets.mapValues { (_, byPackage) ->
+        return buckets.mapValues { (date, byPackage) ->
             byPackage.values
-                .map { it.toStepSource(self) }
+                .map { it.toStepSource(self, withCoverage = date == coverageDate) }
                 .sortedByDescending { it.steps }
         }
     }
@@ -406,6 +455,7 @@ class HealthConnectManager(
 
     private class Accumulator(val packageName: String, self: String) {
         var steps: Int = 0
+        var stepsBefore: Int = 0
         var distance: Double = 0.0
         var calories: Double = 0.0
         var lastRecordAt: Long = 0L
@@ -424,7 +474,7 @@ class HealthConnectManager(
             if (at > lastRecordAt) lastRecordAt = at
         }
 
-        fun toStepSource(self: String): StepSource = StepSource(
+        fun toStepSource(self: String, withCoverage: Boolean = false): StepSource = StepSource(
             packageName = packageName,
             appName = StepSourceCatalog.appName(packageName),
             kind = kindOverride
@@ -433,7 +483,8 @@ class HealthConnectManager(
             distance = distance,
             calories = calories,
             lastRecordAt = lastRecordAt,
-            isSelf = isSelf
+            isSelf = isSelf,
+            stepsBeforeCoverage = if (withCoverage) stepsBefore.coerceIn(0, steps) else -1
         )
     }
 
@@ -571,6 +622,9 @@ class HealthConnectManager(
 
         /** Longest window answered from raw records; longer ones aggregate. */
         private const val RAW_READ_MAX_DAYS = 35L
+
+        /** How long a granted-permissions answer is reused. */
+        private const val GRANT_CACHE_MS = 5_000L
 
         val READ_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),

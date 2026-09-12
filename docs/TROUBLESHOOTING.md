@@ -145,6 +145,47 @@ filter and the `VIEW_PERMISSION_USAGE` alias resolve:
 adb shell dumpsys package <applicationId> | grep -A3 PERMISSIONS_RATIONALE
 ```
 
+## Steps keep climbing without walking
+
+In order of likelihood:
+
+1. **The hardware counter itself.** `TYPE_STEP_COUNTER` false-counts in a
+   moving vehicle and when the phone is shaken; Google Fit and Samsung
+   Health show the same on that device. Compare with the phone's own
+   Health Connect count (`getStepSources()` → `isPlatform`), which comes
+   from the same sensor: if both climb, it is the sensor.
+2. **A HAL that jitters backwards.** A reading a step below the previous one
+   used to be treated as a restart and the dip added back on the next
+   sample. Fixed in 1.3 (`JITTER_TOLERANCE_STEPS`); if you see it on an
+   older build, upgrade.
+3. **A phone-side app inflating Health Connect.** An aggregator that writes
+   the sum of two origins, or an app that counts 10% high. Under `'auto'`
+   such a source may only supply steps from before this device started
+   counting today, so it cannot pull the total up — check
+   `stepSource.kind`: if it is `'watch'` or another wearable kind, the lead
+   is trusted by design; if the user pinned the source, it is trusted by
+   choice.
+4. **The accelerometer fallback in a vehicle** — see below.
+
+## Steps are stuck
+
+1. `getTrackingHealth()` first. `looksDead: true` → the service was killed;
+   calling that from the foreground restarts it, and
+   [OEM_BATTERY.md](OEM_BATTERY.md) is how to stop it recurring.
+2. `serviceAlive: true` but `lastSensorEventAt` old and the user has walked
+   → the listener is not attached. The `error` event carries
+   `E_SENSOR_UNAVAILABLE` while the service retries (2, 5, 15, 30 s, then
+   every minute). If it never recovers, the HAL is refusing the listener;
+   a reboot is the only fix, and `getDeviceCapabilities()` will say so on
+   the next start.
+3. Screen off and the notification not moving: on a non-wake-up counter the
+   hub buffers with the CPU asleep and delivers the cumulative reading on
+   wake — nothing is lost, the display catches up when the screen comes on.
+4. `stepSource.usedExternal: true` with `merged: false` under `'wearable'`
+   or `'health_connect'`: that is the other app's exact number and moves
+   when it syncs. Use `'auto'` for a live count.
+5. `state: 'paused'`.
+
 ## Steps are roughly double what the user walked
 
 Something is summing two sources. This package never does — every `stepSource`

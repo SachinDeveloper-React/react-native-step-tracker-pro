@@ -132,39 +132,71 @@ object StepSourceResolver {
         )
 
         val externalSteps = candidate.steps
-        // AUTO is the only policy that lets the phone win over a present
-        // external source, and it does so purely on which one counted more.
-        // Ties go to the phone because its total is live rather than whatever
-        // the companion app last uploaded.
-        val useExternal = when (policy) {
-            StepSourcePolicy.DEVICE -> false
-            StepSourcePolicy.AUTO -> externalSteps > device.steps
-            StepSourcePolicy.WEARABLE, StepSourcePolicy.HEALTH_CONNECT -> true
-        }
-        if (!useExternal) {
-            return deviceResolution.copy(externalSteps = externalSteps)
+
+        if (policy == StepSourcePolicy.WEARABLE || policy == StepSourcePolicy.HEALTH_CONNECT) {
+            // The exact external number, as promised, lower or higher.
+            return external(device, candidate, externalSteps, metrics, merged = false, lead = 0)
         }
 
-        return Resolution(
-            totals = DayTotals(
-                date = device.date,
-                steps = externalSteps,
-                // A watch that publishes StepsRecord but no DistanceRecord is
-                // normal. Deriving from stride keeps distance consistent with
-                // the step count actually being shown rather than reporting 0.
-                distance = candidate.distance.takeIf { it > 0.0 }
-                    ?: metrics.distance(externalSteps),
-                calories = candidate.calories.takeIf { it > 0.0 }
-                    ?: metrics.calories(externalSteps),
-                synced = device.synced,
-                syncedRemote = device.syncedRemote
-            ),
-            kind = candidate.kind,
-            sourcePackage = candidate.packageName,
-            sourceName = candidate.appName,
-            deviceSteps = device.steps,
-            externalSteps = externalSteps,
-            usedExternal = true
-        )
+        // AUTO. How far ahead the candidate is allowed to be depends on what
+        // it is. A wearable, or a source the user pinned, is trusted outright:
+        // a watch sees a walk the phone on the desk did not. A phone-side
+        // origin - Samsung Health, the platform's own count, an aggregator -
+        // reads the same phone, so for the hours this device was counting it
+        // cannot legitimately have seen more; all it may add is the part of
+        // the day before this device's coverage began (an install at 15:00),
+        // and on a past day, the whole day only if this device has nothing
+        // for it at all. Without that rule an aggregator that sums the
+        // platform's count and ours would double the display, and a
+        // phone-side algorithm that counts 5% high would creep the total up
+        // sync after sync.
+        val trusted = pinned != null || candidate.isWearable
+        val lead = when {
+            trusted -> externalSteps - device.steps
+            candidate.stepsBeforeCoverage >= 0 -> candidate.stepsBeforeCoverage
+            device.steps == 0 -> externalSteps
+            else -> 0
+        }
+        // Ties go to the phone because its total is live rather than whatever
+        // the companion app last uploaded.
+        if (lead <= 0) return deviceResolution.copy(externalSteps = externalSteps)
+
+        return if (trusted) {
+            external(device, candidate, externalSteps, metrics, merged = false, lead = lead)
+        } else {
+            external(device, candidate, device.steps + lead, metrics, merged = true, lead = lead)
+        }
     }
+
+    private fun external(
+        device: DayTotals,
+        candidate: StepSource,
+        steps: Int,
+        metrics: MetricsCalculator,
+        merged: Boolean,
+        lead: Int
+    ): Resolution = Resolution(
+        totals = DayTotals(
+            date = device.date,
+            steps = steps,
+            // A watch that publishes StepsRecord but no DistanceRecord is
+            // normal. Deriving from stride keeps distance consistent with
+            // the step count actually being shown rather than reporting 0.
+            // A merged count is a blend, so it is always derived.
+            distance = candidate.distance.takeIf { it > 0.0 && !merged }
+                ?: metrics.distance(steps),
+            calories = candidate.calories.takeIf { it > 0.0 && !merged }
+                ?: metrics.calories(steps),
+            synced = device.synced,
+            syncedRemote = device.syncedRemote
+        ),
+        kind = candidate.kind,
+        sourcePackage = candidate.packageName,
+        sourceName = candidate.appName,
+        deviceSteps = device.steps,
+        externalSteps = candidate.steps,
+        usedExternal = true,
+        merged = merged,
+        baselineSteps = lead.coerceAtLeast(0)
+    )
 }

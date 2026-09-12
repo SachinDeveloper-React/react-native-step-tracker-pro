@@ -61,6 +61,12 @@ data class StepTrackerConfig(
     val privacyPolicyUrl: String? = null,
     val remoteSyncUrl: String? = null,
     val remoteSyncHeaders: Map<String, String> = emptyMap(),
+    /**
+     * Permit a plain `http://` remote endpoint. Off by default: step data is
+     * health data, and the worker refuses to send it in the clear unless the
+     * app has opted in - for a local development server, say.
+     */
+    val remoteSyncAllowHttp: Boolean = false,
     val autoStartOnBoot: Boolean = true,
     /**
      * What to do with steps the hardware counted while the service was dead
@@ -161,6 +167,7 @@ data class StepTrackerConfig(
         put("privacyPolicyUrl", privacyPolicyUrl ?: JSONObject.NULL)
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
         put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
+        put("remoteSyncAllowHttp", remoteSyncAllowHttp)
         put("autoStartOnBoot", autoStartOnBoot)
         put("gapRecovery", gapRecovery)
         put("watchdogEnabled", watchdogEnabled)
@@ -229,6 +236,7 @@ data class StepTrackerConfig(
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,
+                remoteSyncAllowHttp = json.optBoolean("remoteSyncAllowHttp", fallback.remoteSyncAllowHttp),
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot),
                 gapRecovery = json.optString("gapRecovery", fallback.gapRecovery),
                 watchdogEnabled = json.optBoolean("watchdogEnabled", fallback.watchdogEnabled),

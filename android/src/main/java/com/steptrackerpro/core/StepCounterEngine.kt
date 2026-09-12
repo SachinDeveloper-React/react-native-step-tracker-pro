@@ -178,6 +178,19 @@ class StepCounterEngine(
         val lastElapsed = state.lastElapsedRealtime
         val elapsedWentBackwards = lastElapsed > 0L && currentElapsed < lastElapsed
 
+        // Some HALs report a reading a step or two *below* the previous one
+        // with no reset behind it - float rounding, or a hub re-ordering a
+        // batch. Re-pinning on every such wobble added the wobble back on the
+        // next sample, so a day of jitter crept upward. A dip this small is
+        // ignored outright and the higher reading kept; a real restart drops
+        // to near zero and is caught below. Uptime going backwards is still a
+        // reboot whatever the reading did.
+        if (hasLastRaw && rawValue < lastRaw && lastRaw - rawValue <= JITTER_TOLERANCE_STEPS &&
+            !elapsedWentBackwards
+        ) {
+            return null
+        }
+
         var anchorValue = state.anchorValue
         var anchorSteps = state.anchorSteps
 
@@ -195,9 +208,14 @@ class StepCounterEngine(
                 // Never seen a reading: there is no evidence the app existed
                 // when the since-boot steps were taken, so history is not
                 // invented for them. Same-day boot claims them, as before.
+                // Either way this is the moment this device's coverage of
+                // the day begins, which is what lets a phone-side Health
+                // Connect source fill in the hours before it.
                 !hasLastRaw -> if (bootDate == state.activeDate) {
+                    state.coverageStartAt = currentBoot
                     rawValue.roundToInt() to null
                 } else {
+                    state.coverageStartAt = clockProvider()
                     0 to null
                 }
                 // A proven restart: everything since boot is real, unclaimed,
@@ -352,6 +370,7 @@ class StepCounterEngine(
     @Synchronized
     fun resetToday() {
         pendingCommit = 0
+        state.coverageStartAt = 0L
         state.writeCounterState(
             bootId = bootIdProvider(),
             anchorValue = -1f,
@@ -401,6 +420,9 @@ class StepCounterEngine(
         // in the middle of a day the user has already been walking through.
         val closing = metrics.totals(active, state.stepsToday)
         pendingCommit = 0
+        // A new day is covered from its start: with a hardware counter, gap
+        // recovery reaches back through any dead time to midnight.
+        state.coverageStartAt = 0L
         state.writeCounterState(
             bootId = bootIdProvider(),
             anchorValue = -1f,
@@ -432,6 +454,12 @@ class StepCounterEngine(
     }
 
     companion object {
+        /**
+         * A backwards move of at most this many steps is sensor jitter, not a
+         * restart. Restarts land near zero; jitter is a step or two.
+         */
+        const val JITTER_TOLERANCE_STEPS = 3f
+
         /** Approximate epoch millis at which the device booted. */
         fun currentBootId(): Long = System.currentTimeMillis() - SystemClock.elapsedRealtime()
     }

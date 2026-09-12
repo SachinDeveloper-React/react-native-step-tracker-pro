@@ -98,6 +98,17 @@ started and put every overnight step into the new day.
 Before 1.3 these steps were dropped, which is what "I walked to work and the
 app shows zero" looked like on phones that kill services overnight.
 
+### Sensor jitter
+
+Some HALs report a reading a step or two *below* the previous one with no
+restart behind it — float rounding, or a hub re-ordering a batch. Treating
+that as a restart re-pinned the anchor at the lower reading, and the next
+sample added the dip back; a day of such wobbles crept the total upward. A
+backwards move of at most `JITTER_TOLERANCE_STEPS` (3) is now ignored
+outright and the higher reading kept. A real restart drops to near zero and
+is still caught by the rule below; uptime going backwards is still a reboot
+whatever the reading did.
+
 ### Counter reset without a reboot
 
 Some OEM sensor HALs restart the counter when the last listener unregisters.
@@ -248,6 +259,15 @@ stop until something brings the service back. Three things do:
 | `WatchdogWorker` | every 15 min | Android 12+ refuses a background foreground-service start without an exemption; the battery-optimisation exemption is one |
 | `BootReceiver` | reboot / update | `autoStartOnBoot` |
 
+A sensor that exists but refuses a listener — the sensor service is not ready
+for a few seconds after boot on several OEMs, and some HALs reject a new
+listener while tearing down an old one — is retried: at 2, 5, 15 and 30
+seconds, then once a minute from the heartbeat for as long as the tracker is
+meant to be running, with `E_SENSOR_UNAVAILABLE` on the `error` event
+meanwhile. Only a device with no sensor at all is marked `unsupported`.
+Marking a transient failure unsupported is what used to leave the tracker
+idle until the user pressed start again.
+
 "Dead" is decided from `shouldAutoStart` (started, never stopped — a paused
 tracker counts, its notification is meant to be up) and the absence of a
 `StepTrackerService` instance in this process. The service, the workers and
@@ -365,9 +385,31 @@ observes it on every fresh read; and the sensor path asks for a fresh read
 syncing mid-walk reaches the notification without the app being opened —
 given `READ_HEALTH_DATA_IN_BACKGROUND`.
 
+What the lead may be depends on the source. A wearable, or a source the user
+pinned, is trusted for its whole margin: a watch sees a walk the phone on the
+desk did not. A phone-side origin reads the same phone, so for the hours this
+device was covering the day it cannot legitimately have seen more; all it may
+add is its steps from before coverage began. `StepStateStore.coverageStartAt`
+records that instant — set only by a first-ever reading, i.e. an install, and
+otherwise the start of the day, since with a hardware counter gap recovery
+reaches back through any dead time to midnight — and
+`HealthConnectManager.readDailyStepsBySource` splits each origin's records
+around it into `StepSource.stepsBeforeCoverage`. On a past day, where
+coverage is unknown, a phone-side origin is used only when this device has
+nothing stored for it. This is what stops an aggregator that sums two origins
+from doubling the display, and a phone-side algorithm that counts 5% high
+from creeping the total up sync after sync.
+
 Only `auto` merges. `wearable` and `health_connect` promise the other app's
 exact number and keep it. The phone's raw count is what is written to Health
 Connect, never the merged one, so other readers never see a blend.
+
+Every Health Connect read is bounded by `HC_READ_TIMEOUT_MS` (4 s). A
+provider that is migrating or being updated can block far longer; past the
+bound the phone's own count is the answer, nothing is cached, and the read is
+retried next time. Granted permissions are cached for five seconds between
+the explicit status checks, so the sensor path's refresh does not cost an
+IPC per minute.
 
 Goals follow the displayed number. Under `auto` it is monotonic for the day,
 and `GoalTracker` fires each goal at most once per period regardless.

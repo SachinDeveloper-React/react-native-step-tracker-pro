@@ -101,6 +101,23 @@ class StepCounterEngineTest {
     }
 
     @Test
+    fun smallBackwardsJitterIsIgnoredNotReanchored() {
+        engine.onCounterSample(1000f, now())
+
+        // A HAL wobble: one step below the last reading, no restart behind it.
+        // Re-pinning here used to add the wobble back on the next sample, and
+        // a day of them crept the total upward.
+        assertNull(engine.onCounterSample(999f, now()))
+        assertEquals(1000, state.stepsToday)
+        assertEquals(1001, engine.onCounterSample(1001f, now())!!.steps)
+
+        // A real restart still re-pins and keeps the total.
+        assertNull(engine.onCounterSample(2f, now()))
+        assertEquals(1001, state.stepsToday)
+        assertEquals(1011, engine.onCounterSample(12f, now())!!.steps)
+    }
+
+    @Test
     fun rebootOnSameDayClaimsStepsTakenSinceBoot() {
         engine.onCounterSample(1200f, now())
 
