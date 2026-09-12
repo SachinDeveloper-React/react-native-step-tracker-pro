@@ -50,7 +50,7 @@ jobs:
         run: |
           ! grep -q 'severity="Error"' build/reports/lint-results-debug.xml
           ! grep -q 'severity="Fatal"' build/reports/lint-results-debug.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-reports
@@ -83,7 +83,7 @@ jobs:
           profile: pixel_6
           working-directory: android
           script: ./gradlew --no-daemon connectedDebugAndroidTest
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: instrumented-results
