@@ -496,4 +496,108 @@ class StepSourceResolverTest {
             }
         }
     }
+
+    // ---- wearable trust (wearableTrust: metadata | catalog) ------------------
+
+    @Test
+    fun `an unknown package stamping TYPE_WATCH wins the whole day under metadata trust`() {
+        // Any app can stamp Device.TYPE_WATCH on its records. Classified as a
+        // watch for display, and by default trusted like one.
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), null, metrics,
+            wearableTrust = WearableTrust.METADATA
+        )
+        assertEquals(20_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertFalse(result.merged)
+        assertEquals(StepSourceKind.WATCH, result.kind)
+    }
+
+    @Test
+    fun `the same package is bound by the coverage rule under catalog trust`() {
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        // Only the pre-coverage share may be supplied; the rest is inflation.
+        assertEquals(4_500, result.totals.steps)
+        assertTrue(result.merged)
+        assertEquals(500, result.baselineSteps)
+        // Still a watch for display: the trust decision is separate from kind.
+        assertEquals(StepSourceKind.WATCH, result.kind)
+        assertEquals(20_000, result.externalSteps)
+    }
+
+    @Test
+    fun `a package on the allowlist is trusted under catalog trust`() {
+        val band = source("com.example.newband", 9_000, StepSourceKind.FITNESS_BAND, stepsBeforeCoverage = 0)
+        val without = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(band), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(8_000, without.totals.steps)
+        assertFalse(without.usedExternal)
+
+        val with = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(band), null, metrics,
+            wearableTrust = WearableTrust.CATALOG,
+            wearableAllowlist = setOf("com.example.newband")
+        )
+        assertEquals(9_000, with.totals.steps)
+        assertTrue(with.usedExternal)
+        assertFalse(with.merged)
+    }
+
+    @Test
+    fun `a catalogued companion app is trusted under catalog trust without an allowlist`() {
+        // Fitbit relays its watch from the phone and often stamps no device at
+        // all; the catalog is what knows it is a wearable.
+        val fitbit = source("com.fitbit.FitbitMobile", 9_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(fitbit), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(9_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
+    fun `a pin still trusts its source under catalog trust`() {
+        // The user's explicit choice outranks the rule, as it always has.
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), "com.example.faker", metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(20_000, result.totals.steps)
+    }
+
+    @Test
+    fun `trustedWearable is stamped from the same rule the resolver uses`() {
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH)
+        val fitbit = source("com.fitbit.FitbitMobile", 9_000, StepSourceKind.WATCH)
+        val samsung = source("com.sec.android.app.shealth", 6_000, StepSourceKind.APP)
+        val platform = source("android", 6_000, StepSourceKind.PHONE)
+        val sources = listOf(faker, fitbit, samsung, platform)
+
+        val metadata = StepSourceTrust.stamp(sources, WearableTrust.METADATA, emptySet())
+        assertEquals(listOf(true, true, false, false), metadata.map { it.trustedWearable })
+
+        val catalog = StepSourceTrust.stamp(sources, WearableTrust.CATALOG, emptySet())
+        assertEquals(listOf(false, true, false, false), catalog.map { it.trustedWearable })
+        // Display classification does not move.
+        assertEquals(StepSourceKind.WATCH, catalog[0].kind)
+        assertTrue(catalog[0].isWearable)
+
+        val allowed = StepSourceTrust.stamp(sources, WearableTrust.CATALOG, setOf("com.example.faker"))
+        assertTrue(allowed[0].trustedWearable)
+        // The platform's own count is never a wearable, allowlist or not.
+        assertFalse(
+            StepSourceTrust.stamp(listOf(platform), WearableTrust.CATALOG, setOf("android"))[0].trustedWearable
+        )
+        assertEquals(WearableTrust.METADATA, WearableTrust.from("nonsense"))
+        assertEquals(WearableTrust.CATALOG, WearableTrust.from("catalog"))
+    }
 }

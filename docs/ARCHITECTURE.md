@@ -404,6 +404,18 @@ has genuinely seen more. This is what stops an aggregator that sums two origins
 from doubling the display, and a phone-side algorithm that counts 5% high
 from creeping the total up sync after sync.
 
+What makes a source "a wearable" for that trust is the `wearableTrust`
+rule, decided in one place (`StepSourceTrust`) so the resolver's choice and
+the `trustedWearable` flag on each source cannot disagree. `metadata`, the
+default, goes by the `Device` stamp; `catalog` requires the package to be in
+`StepSourceCatalog.KNOWN` with a wearable kind or on the app's
+`wearableAllowlist`, and treats everything else as phone-side for the
+coverage rule while leaving its display `kind` alone. With
+`healthConnectIgnoreManualEntries` on, each source competes on its counted
+steps only: `StepSource.excludingManual()` takes the manual-entry bucket out
+of the total and out of the pre-coverage share, and the resolution reports
+what it removed as `manualStepsExcluded`.
+
 Only `auto` merges. `wearable` and `health_connect` promise the other app's
 exact number and keep it. The phone's raw count is what is written to Health
 Connect, never the merged one, so other readers never see a blend.

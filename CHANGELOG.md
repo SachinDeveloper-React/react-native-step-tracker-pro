@@ -45,6 +45,24 @@ events, the same remote payload. Everything is opt-in or additive.
   [PLAY_STORE_COMPLIANCE.md](docs/PLAY_STORE_COMPLIANCE.md#on-manual-entries)
   says so for the health declaration.
 
+#### Wearable trust under `auto` is opt-in strict
+
+- `wearableTrust` config, `'metadata'` (default, unchanged behaviour) or
+  `'catalog'`. Under `auto`, a candidate is trusted for its whole margin over
+  the phone when it is a wearable — and by default "is a wearable" comes
+  from the `Device.type` the writing app stamped on its records, which any
+  app can set to `TYPE_WATCH`. That is fine for display and wrong for an app
+  paying per step. Under `'catalog'` only a package the built-in catalog
+  knows as a wearable's companion app, or one on the new `wearableAllowlist`
+  config, earns that trust; an unlisted package that stamps a wearable type
+  keeps `kind: 'watch'` for display and is bound by the coverage rule like a
+  phone-side app. Pins, and the `wearable` / `health_connect` policies, are
+  unaffected.
+- `StepSource.trustedWearable` says which rule applied to each source.
+  `isWearable` keeps describing the display classification.
+- Changing `wearableTrust` or `wearableAllowlist` clears the day's
+  continuity baseline, like a policy change.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin

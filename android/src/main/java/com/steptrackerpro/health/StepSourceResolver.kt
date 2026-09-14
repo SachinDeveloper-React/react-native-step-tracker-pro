@@ -38,6 +38,69 @@ enum class StepSourcePolicy(val jsValue: String) {
 }
 
 /**
+ * What earns a source the `auto` policy's full trust - its whole margin over
+ * the phone - rather than the coverage-bound treatment of a phone-side app.
+ */
+enum class WearableTrust(val jsValue: String) {
+    /**
+     * Default. The `Device.type` the writing app stamped on its records
+     * decides, as it always has. Right for display: a Wear OS watch writing
+     * through Health Services stamps `TYPE_WATCH` and no catalog can keep up
+     * with every band on the market. Wrong as a fraud control: any app can
+     * stamp `TYPE_WATCH`.
+     */
+    METADATA("metadata"),
+
+    /**
+     * Only a package the [StepSourceCatalog] knows as a wearable's companion
+     * app, or one the app put on its `wearableAllowlist`, is trusted for its
+     * whole margin. An unlisted package that stamps a wearable type keeps its
+     * `kind` for display and is bound by the coverage rule like a phone-side
+     * app: it may fill the part of the day before this device's coverage
+     * began, and nothing after. For an app that pays per step.
+     */
+    CATALOG("catalog");
+
+    companion object {
+        fun from(value: String?): WearableTrust =
+            entries.firstOrNull { it.jsValue == value } ?: METADATA
+    }
+}
+
+/**
+ * The one place the wearable-trust rule lives, so the resolver's decision and
+ * the `trustedWearable` flag a consumer sees on each source cannot disagree.
+ */
+object StepSourceTrust {
+
+    fun isTrustedWearable(
+        source: StepSource,
+        trust: WearableTrust,
+        allowlist: Set<String>
+    ): Boolean = when (trust) {
+        WearableTrust.METADATA -> source.isWearable
+        WearableTrust.CATALOG ->
+            // The platform's own count is never a wearable whatever the
+            // allowlist says; classify() already forces its kind to PHONE and
+            // isWearable is false for it, so the catalog lookup alone would
+            // do - the explicit check keeps that true if the catalog changes.
+            !source.isPlatform && !source.isSelf &&
+                (StepSourceCatalog.isKnownWearable(source.packageName) ||
+                    source.packageName in allowlist)
+    }
+
+    /** The same sources with [StepSource.trustedWearable] set under [trust]. */
+    fun stamp(
+        sources: List<StepSource>,
+        trust: WearableTrust,
+        allowlist: Set<String>
+    ): List<StepSource> = sources.map { source ->
+        val trusted = isTrustedWearable(source, trust, allowlist)
+        if (source.trustedWearable == trusted) source else source.copy(trustedWearable = trusted)
+    }
+}
+
+/**
  * Picks the number a day is reported with.
  *
  * The one rule everything here exists to enforce: **origins are never summed.**
@@ -122,7 +185,15 @@ object StepSourceResolver {
          * config. Sources read through the aggregate API carry no split and
          * are left as they are.
          */
-        ignoreManualEntries: Boolean = false
+        ignoreManualEntries: Boolean = false,
+        /**
+         * What earns a source the whole-margin trust under `auto` - the
+         * `wearableTrust` config. [WearableTrust.METADATA] is the behaviour
+         * every earlier release had.
+         */
+        wearableTrust: WearableTrust = WearableTrust.METADATA,
+        /** Packages trusted as wearables under [WearableTrust.CATALOG] on top of the catalog. */
+        wearableAllowlist: Set<String> = emptySet()
     ): Resolution {
         val deviceResolution = Resolution(
             totals = device,
@@ -193,8 +264,12 @@ object StepSourceResolver {
         // for it at all. Without that rule an aggregator that sums the
         // platform's count and ours would double the display, and a
         // phone-side algorithm that counts 5% high would creep the total up
-        // sync after sync.
-        val trusted = pinned != null || candidate.isWearable || !deviceCoverageReliable
+        // sync after sync. What makes a candidate "a wearable" here is the
+        // wearableTrust rule: the record's own Device stamp by default, the
+        // catalog and the app's allowlist under `catalog`.
+        val trusted = pinned != null ||
+            StepSourceTrust.isTrustedWearable(candidate, wearableTrust, wearableAllowlist) ||
+            !deviceCoverageReliable
         val lead = when {
             trusted -> externalSteps - device.steps
             candidate.stepsBeforeCoverage >= 0 -> candidate.stepsBeforeCoverage

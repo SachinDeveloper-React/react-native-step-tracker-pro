@@ -146,7 +146,17 @@ data class StepSource(
      * hand-entered morning must not survive as "steps from before install".
      * -1 when either half is not computed. Internal to the resolver.
      */
-    val manualStepsBeforeCoverage: Int = -1
+    val manualStepsBeforeCoverage: Int = -1,
+    /**
+     * Whether the `auto` policy trusts this source for its whole margin over
+     * the phone. Under `wearableTrust: 'metadata'` (the default) it is
+     * exactly [isWearable]; under `'catalog'` only a package the catalog or
+     * the app's `wearableAllowlist` knows as a wearable qualifies, however
+     * its records were stamped. Set by [StepSourceTrust.stamp] on the way
+     * to JS so a consumer can see which rule applied; the resolver decides
+     * for itself from the same rule rather than reading this back.
+     */
+    val trustedWearable: Boolean = kind.isWearable
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
@@ -194,7 +204,8 @@ data class StepSource(
         "isPlatform" to isPlatform,
         "manualSteps" to manualSteps,
         "unknownMethodSteps" to unknownMethodSteps,
-        "recordingMethods" to recordingMethods?.toMap()
+        "recordingMethods" to recordingMethods?.toMap(),
+        "trustedWearable" to trustedWearable
     )
 }
 
@@ -278,6 +289,14 @@ object StepSourceCatalog {
     /** Companion apps worth probing for with PackageManager. */
     val COMPANION_PACKAGES: List<String> =
         KNOWN.filterValues { it.kind.isWearable }.keys.toList()
+
+    /**
+     * Whether the catalog itself knows this package as a wearable's companion
+     * app - the `wearableTrust: 'catalog'` rule. Unlike [classify] it ignores
+     * whatever `Device` the records were stamped with: any app can stamp
+     * `TYPE_WATCH`, and this is the list of ones that have earned it.
+     */
+    fun isKnownWearable(packageName: String): Boolean = KNOWN[packageName]?.kind?.isWearable == true
 
     fun appName(packageName: String): String = when {
         isPlatformOrigin(packageName) -> PLATFORM_APP_NAME

@@ -182,6 +182,18 @@ this device started counting, so it can fill in the morning after an
 afternoon install but can never inflate a day the phone covered.
 `stepSource.merged` and `stepSource.baselineSteps` report it.
 
+**`auto` is a display policy, not a fraud control.** What makes a source "a
+wearable" for that trust is, by default, the device type the writing app
+stamped on its records — and any app can stamp `TYPE_WATCH`. That is right
+for showing a user their watch's number and wrong for an app that pays per
+step. `wearableTrust: 'catalog'` changes only the trust decision: a source
+gets its whole margin only if its package is one the built-in catalog knows
+as a wearable's companion app or one you list in `wearableAllowlist`; an
+unlisted package that stamps a watch keeps `kind: 'watch'` for display but is
+bound by the coverage rule like any phone-side app. Pair it with
+`healthConnectIgnoreManualEntries: true` so a typed-in entry never becomes
+the day's number, and verify server-side with `getVerificationSnapshot()`.
+
 Permission handling, the install and settings fallbacks, and the full source
 API: [docs/API.md](docs/API.md#health-connect).
 

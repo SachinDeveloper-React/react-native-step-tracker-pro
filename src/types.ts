@@ -109,6 +109,19 @@ export interface StepTrackerConfig {
    */
   preferredStepSourcePackage?: string;
   /**
+   * What earns a Health Connect source the `'auto'` policy's full trust -
+   * its whole margin over the phone, rather than the coverage-bound share a
+   * phone-side app may add. Default `'metadata'`. See {@link WearableTrust}.
+   */
+  wearableTrust?: WearableTrust;
+  /**
+   * Packages trusted as wearables under `wearableTrust: 'catalog'` on top of
+   * the built-in catalog - a companion app the catalog has not caught up
+   * with, or a device your own users are known to wear. Ignored under
+   * `'metadata'`.
+   */
+  wearableAllowlist?: string[];
+  /**
    * Opened when Health Connect asks the user why the app wants health data.
    * Health Connect links to it from its permission sheet and Play review
    * requires it, so set it before shipping a build that requests health
@@ -337,6 +350,32 @@ export type StepSourcePolicy =
    */
   | 'auto';
 
+/**
+ * What makes a Health Connect source "a wearable" for the `'auto'` policy's
+ * trust decision. `'auto'` is a display policy: it exists so a user with a
+ * watch sees the watch's number. It is not a fraud control, because the
+ * signal it trusts by default is one any app can stamp.
+ */
+export type WearableTrust =
+  /**
+   * Default, and the behaviour of every earlier release. The `Device.type`
+   * the writing app stamped on its records decides: a source stamped
+   * `TYPE_WATCH` is trusted for its whole margin. Right for display - a Wear
+   * OS watch stamps it and no catalog keeps up with every band - and wrong
+   * for an app paying per step, since any app can stamp it.
+   */
+  | 'metadata'
+  /**
+   * Only a package the built-in catalog knows as a wearable's companion app
+   * (Fitbit, Garmin Connect, Galaxy Wearable, ...) or one on
+   * `wearableAllowlist` is trusted for its whole margin. An unlisted package
+   * that stamps a wearable type keeps `kind: 'watch'` for display but is
+   * bound by the coverage rule like a phone-side app: it may fill the part
+   * of the day before this device's coverage began, and nothing after.
+   * `StepSource.trustedWearable` says which rule applied.
+   */
+  | 'catalog';
+
 /** What sort of hardware or app produced a set of step records. */
 export type StepSourceKind =
   | 'self'
@@ -383,8 +422,18 @@ export interface StepSource {
   lastRecordAt: number;
   /** Records this package wrote itself. */
   isSelf: boolean;
-  /** Counted on the body rather than in a pocket. */
+  /** Counted on the body rather than in a pocket, going by `kind`. Display only. */
   isWearable: boolean;
+  /**
+   * Whether the `'auto'` policy trusts this source for its whole margin over
+   * the phone. Under `wearableTrust: 'metadata'` (the default) it equals
+   * `isWearable`; under `'catalog'` it is true only for a package the
+   * catalog or `wearableAllowlist` knows as a wearable, whatever its records
+   * were stamped with. A source that is `isWearable` but not
+   * `trustedWearable` is being treated as a phone-side app by the coverage
+   * rule.
+   */
+  trustedWearable: boolean;
   /**
    * Health Connect's own on-device step count (Android 14, SDK extension
    * 20+), attributed to `android` or to `com.android.healthconnect.phone.<hash>`.

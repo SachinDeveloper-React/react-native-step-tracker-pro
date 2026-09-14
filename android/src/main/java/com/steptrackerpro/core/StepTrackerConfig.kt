@@ -1,6 +1,7 @@
 package com.steptrackerpro.core
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -62,6 +63,20 @@ data class StepTrackerConfig(
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
     val preferredStepSourcePackage: String? = null,
+    /**
+     * One of [com.steptrackerpro.health.WearableTrust]'s `jsValue`s. What
+     * earns a Health Connect source the `auto` policy's whole-margin trust:
+     * the `Device` stamp on its records (`metadata`, the default and the
+     * behaviour of every earlier release), or membership of the catalog or
+     * [wearableAllowlist] (`catalog`). Display classification is unaffected.
+     */
+    val wearableTrust: String = "metadata",
+    /**
+     * Packages trusted as wearables under `wearableTrust: 'catalog'` on top
+     * of the built-in catalog - a companion app the catalog has not caught up
+     * with, or one the app's own users are known to wear.
+     */
+    val wearableAllowlist: List<String> = emptyList(),
     /**
      * Opened by [com.steptrackerpro.health.HealthPrivacyPolicyActivity] when
      * Health Connect asks why the app wants health data. Health Connect and
@@ -138,6 +153,8 @@ data class StepTrackerConfig(
         // differently, and silently counting nothing would be worse.
         stepSource = com.steptrackerpro.health.StepSourcePolicy.from(stepSource).jsValue,
         preferredStepSourcePackage = preferredStepSourcePackage?.takeIf { it.isNotBlank() },
+        wearableTrust = com.steptrackerpro.health.WearableTrust.from(wearableTrust).jsValue,
+        wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
         gapRecovery = StepCounterEngine.GapRecovery.from(gapRecovery).jsValue,
         accelerometerThreshold = if (accelerometerThreshold.isFinite()) {
@@ -174,6 +191,8 @@ data class StepTrackerConfig(
         put("healthConnectIgnoreManualEntries", healthConnectIgnoreManualEntries)
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
+        put("wearableTrust", wearableTrust)
+        put("wearableAllowlist", JSONArray(wearableAllowlist))
         put("privacyPolicyUrl", privacyPolicyUrl ?: JSONObject.NULL)
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
         put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
@@ -192,6 +211,10 @@ data class StepTrackerConfig(
             val headers = HashMap<String, String>()
             json.optJSONObject("remoteSyncHeaders")?.let { obj ->
                 obj.keys().forEach { key -> headers[key] = obj.optString(key) }
+            }
+            val allowlist = ArrayList<String>()
+            json.optJSONArray("wearableAllowlist")?.let { arr ->
+                for (i in 0 until arr.length()) arr.optString(i)?.let { allowlist.add(it) }
             }
             return StepTrackerConfig(
                 heightCm = json.optDouble("height", fallback.heightCm),
@@ -247,6 +270,8 @@ data class StepTrackerConfig(
                 stepSource = json.optString("stepSource", fallback.stepSource),
                 preferredStepSourcePackage =
                     json.optStringOrNull("preferredStepSourcePackage"),
+                wearableTrust = json.optString("wearableTrust", fallback.wearableTrust),
+                wearableAllowlist = allowlist,
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,

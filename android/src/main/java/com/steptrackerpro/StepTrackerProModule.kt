@@ -25,6 +25,7 @@ import com.steptrackerpro.util.optDouble
 import com.steptrackerpro.util.optInt
 import com.steptrackerpro.util.optLong
 import com.steptrackerpro.util.optString
+import com.steptrackerpro.util.toStringList
 import com.steptrackerpro.util.BatteryOptimizationHelper
 import com.steptrackerpro.util.PermissionHelper
 import com.steptrackerpro.util.StepEventBus
@@ -837,6 +838,13 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             preferredStepSourcePackage = patch.optString(
                 "preferredStepSourcePackage", current.preferredStepSourcePackage
             ),
+            wearableTrust = patch.optString("wearableTrust", current.wearableTrust)
+                ?: current.wearableTrust,
+            wearableAllowlist = if (patch.hasKey("wearableAllowlist") && !patch.isNull("wearableAllowlist")) {
+                patch.getArray("wearableAllowlist")?.toStringList() ?: emptyList()
+            } else {
+                current.wearableAllowlist
+            },
             privacyPolicyUrl = patch.optString("privacyPolicyUrl", current.privacyPolicyUrl),
             remoteSyncUrl = patch.optString("remoteSyncUrl", current.remoteSyncUrl),
             remoteSyncHeaders = if (patch.hasKey("remoteSyncHeaders")) {
@@ -879,6 +887,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "healthConnectIgnoreManualEntries" to config.healthConnectIgnoreManualEntries,
         "stepSource" to config.stepSource,
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
+        "wearableTrust" to config.wearableTrust,
+        "wearableAllowlist" to config.wearableAllowlist,
         "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
         "remoteSyncAllowHttp" to config.remoteSyncAllowHttp,

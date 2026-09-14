@@ -8,6 +8,8 @@ import com.steptrackerpro.health.StepSource
 import com.steptrackerpro.health.StepSourceKind
 import com.steptrackerpro.health.StepSourcePolicy
 import com.steptrackerpro.health.StepSourceResolver
+import com.steptrackerpro.health.StepSourceTrust
+import com.steptrackerpro.health.WearableTrust
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.StepEventBus
 import kotlinx.coroutines.CoroutineDispatcher
@@ -78,7 +80,9 @@ class StepTrackerCore private constructor(context: Context) {
             previous.preferredStepSourcePackage != saved.preferredStepSourcePackage ||
             previous.healthConnectEnabled != saved.healthConnectEnabled ||
             previous.healthConnectReadEnabled != saved.healthConnectReadEnabled ||
-            previous.healthConnectIgnoreManualEntries != saved.healthConnectIgnoreManualEntries
+            previous.healthConnectIgnoreManualEntries != saved.healthConnectIgnoreManualEntries ||
+            previous.wearableTrust != saved.wearableTrust ||
+            previous.wearableAllowlist != saved.wearableAllowlist
         ) {
             state.clearContinuity()
             sourceCache.invalidate()
@@ -364,6 +368,18 @@ class StepTrackerCore private constructor(context: Context) {
 
     fun sourcePolicy(): StepSourcePolicy = StepSourcePolicy.from(config().stepSource)
 
+    fun wearableTrust(): WearableTrust = WearableTrust.from(config().wearableTrust)
+
+    fun wearableAllowlist(): Set<String> = config().wearableAllowlist.toSet()
+
+    /**
+     * Sources as JS should see them, with `trustedWearable` decided under the
+     * current trust rule. Stamped on the way out rather than when read, so a
+     * cached list never carries a decision made under a previous config.
+     */
+    fun stampTrust(sources: List<StepSource>): List<StepSource> =
+        StepSourceTrust.stamp(sources, wearableTrust(), wearableAllowlist())
+
     /** A config pin wins; otherwise whatever the user last chose at runtime. */
     fun preferredSourcePackage(): String? =
         config().preferredStepSourcePackage ?: state.preferredStepSource
@@ -417,7 +433,9 @@ class StepTrackerCore private constructor(context: Context) {
         val raw = StepSourceResolver.resolve(
             policy, device, sourcesForDay(date), preferredSourcePackage(), metrics,
             deviceCoverageReliable = coverageReliable(),
-            ignoreManualEntries = config().healthConnectIgnoreManualEntries
+            ignoreManualEntries = config().healthConnectIgnoreManualEntries,
+            wearableTrust = wearableTrust(),
+            wearableAllowlist = wearableAllowlist()
         )
         if (policy != StepSourcePolicy.AUTO || !today) return raw
         // Past days are closed: max() is the right answer and nothing is
@@ -547,11 +565,15 @@ class StepTrackerCore private constructor(context: Context) {
         val baseline = if (policy == StepSourcePolicy.AUTO) storedBaseline() else null
         val reliable = coverageReliable()
         val ignoreManual = config().healthConnectIgnoreManualEntries
+        val trust = wearableTrust()
+        val allowlist = wearableAllowlist()
         val resolved = base.days.map { day ->
             val raw = StepSourceResolver.resolve(
                 policy, day, byDate[day.date].orEmpty(), preferred, metrics,
                 deviceCoverageReliable = reliable,
-                ignoreManualEntries = ignoreManual
+                ignoreManualEntries = ignoreManual,
+                wearableTrust = trust,
+                wearableAllowlist = allowlist
             )
             if (day.date == today && baseline != null) {
                 StepContinuity.apply(raw, baseline, metrics).totals
@@ -616,7 +638,7 @@ class StepTrackerCore private constructor(context: Context) {
                         minOf(DateKeys.endOfDayInstant(end), Instant.now())
                     )
                 }
-            }.getOrNull() ?: emptyList()
+            }.getOrNull()?.let { stampTrust(it) } ?: emptyList()
         }
         return emptyList()
     }
@@ -651,7 +673,9 @@ class StepTrackerCore private constructor(context: Context) {
             StepSourceResolver.resolve(
                 policy, totals, cached, preferredSourcePackage(), metrics,
                 deviceCoverageReliable = coverageReliable(),
-                ignoreManualEntries = config.healthConnectIgnoreManualEntries
+                ignoreManualEntries = config.healthConnectIgnoreManualEntries,
+                wearableTrust = wearableTrust(),
+                wearableAllowlist = wearableAllowlist()
             )
         }
         if (policy != StepSourcePolicy.AUTO) return raw

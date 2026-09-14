@@ -427,6 +427,28 @@ gets written to Health Connect, never the merged number. An aggregator that
 sums two origins cannot double the display, and a phone-side algorithm that
 counts 5% high cannot creep it upward sync after sync.
 
+#### What counts as a wearable: `wearableTrust`
+
+`'auto'` is a display policy, not a fraud control. What earns a source the
+whole-margin row in the table above is, by default, the `Device.type` the
+writing app stamped on its records (`wearableTrust: 'metadata'`) — and any
+app can stamp `TYPE_WATCH`. That is the right default for showing a user
+their watch's number, and the wrong one for an app that pays per step.
+
+`wearableTrust: 'catalog'` changes only the trust decision: a source is
+trusted for its whole margin only if its package is one the built-in catalog
+knows as a wearable's companion app (Fitbit, Garmin Connect, Galaxy
+Wearable, Mi Fitness, Oura, …) or one you put on `wearableAllowlist`. An
+unlisted package that stamps a wearable type keeps `kind: 'watch'` for
+display, still shows up in `getStepSources()` with `isWearable: true`, and
+is treated as a phone-side app by the coverage rule — it may fill the part of
+the day before this device's coverage began, and nothing after. A pinned
+source is trusted under either rule, as it always has been, and the
+`'wearable'` and `'health_connect'` policies are unaffected: they promise
+the other app's exact number by design. `StepSource.trustedWearable` says
+which rule applied to each source. Changing `wearableTrust` or the allowlist
+clears the day's continuity baseline.
+
 ```ts
 const { steps, stepSource } = await StepTracker.getTodaySteps();
 // steps: 6010
@@ -455,7 +477,8 @@ Every app that published steps over the range, with what each contributed.
       calories: 310,        // kcal, 0 when the source published none
       lastRecordAt: 1757400000000,
       isSelf: false,
-      isWearable: true,
+      isWearable: true,     // by `kind`, for display
+      trustedWearable: true, // whether 'auto' trusts its whole margin — see wearableTrust
       isPlatform: false,    // true for Health Connect's own on-device count
       manualSteps: 0,       // of `steps`, typed in by the user; -1 when not computed
       unknownMethodSteps: 0,
@@ -649,6 +672,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |
+| `wearableTrust` | `'metadata'` | `'metadata'` \| `'catalog'` — what earns a source the `'auto'` policy's whole-margin trust: the `Device` stamp on its records, or membership of the catalog / `wearableAllowlist` — see [What counts as a wearable](#what-counts-as-a-wearable-wearabletrust) |
+| `wearableAllowlist` | `[]` | packages trusted as wearables under `'catalog'` on top of the built-in catalog |
 | `privacyPolicyUrl` | — | **required before shipping health permissions**; Health Connect links to it and Play review checks for it |
 | `remoteSyncUrl` | — | optional endpoint for unsynced days; must be `https://` |
 | `remoteSyncHeaders` | `{}` | e.g. auth headers; stored in the clear, use short-lived tokens |

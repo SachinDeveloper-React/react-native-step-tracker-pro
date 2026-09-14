@@ -49,4 +49,5 @@ export type {
   TrackingHealth,
   TrackingState,
   TrackingStateEvent,
+  WearableTrust,
 } from './types';

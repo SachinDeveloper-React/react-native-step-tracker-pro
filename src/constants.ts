@@ -23,6 +23,7 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectHistoryRead'
     | 'healthConnectIgnoreManualEntries'
     | 'stepSource'
+    | 'wearableTrust'
     | 'autoStartOnBoot'
     | 'gapRecovery'
     | 'watchdogEnabled'
@@ -49,6 +50,7 @@ export const DEFAULT_CONFIG: Required<
   healthConnectHistoryRead: false,
   healthConnectIgnoreManualEntries: false,
   stepSource: 'auto',
+  wearableTrust: 'metadata',
   autoStartOnBoot: true,
   gapRecovery: 'split',
   watchdogEnabled: true,
