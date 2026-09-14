@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-09-14
+
+The release for apps that pay for steps. Nothing here changes what a
+consumer who touches no new config sees: the same resolved numbers, the same
+events, the same remote payload. Everything is opt-in or additive.
+
+### Project hygiene
+
+- The published tarball no longer carries `android/.kotlin/`. The Kotlin
+  daemon writes crash logs under `android/.kotlin/errors/` during a local
+  build, and `*.log` in `.npmignore` does not apply inside a directory that
+  `package.json#files` lists, so a stray log shipped with the package.
+  `!android/.kotlin` is now in `files`.
+- `devDependencies.react-native`, `example/package.json` and the standalone
+  Gradle pin in `android/settings.gradle` all say `0.77.0`, the floor
+  `peerDependencies` has claimed since 1.1.0. Nothing about the floor moved:
+  Room 2.7 needs Kotlin 2.0+, React Native 0.77 is the first release on
+  Kotlin 2.0.21, and 0.76 is still on 1.9.24. The package was merely being
+  developed and CI-tested against a version it does not claim to support.
+
 ## [1.3.0] - 2026-09-11
 
 The release for phones that kill services and users who also wear a watch:

@@ -18,7 +18,7 @@ gradle.beforeProject { project ->
     project.configurations.all {
         resolutionStrategy.eachDependency { details ->
             if (details.requested.group == 'com.facebook.react' && !details.requested.version) {
-                details.useVersion '0.76.5'
+                details.useVersion '0.77.0'
             }
         }
     }
