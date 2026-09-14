@@ -114,7 +114,8 @@ object StepContinuity {
             externalSteps = raw.externalSteps,
             usedExternal = true,
             merged = true,
-            baselineSteps = baseline.offset
+            baselineSteps = baseline.offset,
+            manualStepsExcluded = raw.manualStepsExcluded
         )
     }
 }

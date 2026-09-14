@@ -311,11 +311,17 @@ class HealthConnectManager(
                 .getOrPut(pkg) { Accumulator(pkg, self) }
             val count = record.count.toInt()
             acc.steps += count
+            // Bucketed by how the writing app says the steps were produced.
+            // A manually typed record is the one honest way to put 20,000
+            // steps into Health Connect from a keyboard, and it is
+            // indistinguishable from a sensor's count without this split.
+            val bucket = RecordingMethods.bucketOf(record.metadata.recordingMethod)
+            acc.methods[bucket] += count
             if (date == coverageDate) {
                 // The part of this record that predates our coverage. A record
                 // straddling the instant is split by time; step records are
                 // minutes long, so the error is bounded by one of them.
-                acc.stepsBefore += when {
+                val before = when {
                     recordEnd <= coverageStartMs -> count
                     recordStart >= coverageStartMs -> 0
                     else -> {
@@ -323,6 +329,11 @@ class HealthConnectManager(
                         ((coverageStartMs - recordStart) / span * count).toInt()
                     }
                 }
+                acc.stepsBefore += before
+                // The manual part of the pre-coverage share, so excluding
+                // manual entries can take a hand-entered morning out of what
+                // a phone-side source may supply from before install.
+                if (bucket == RecordingMethods.MANUAL) acc.manualBefore += before
             }
             acc.observe(record.metadata.device?.type, recordEnd)
         }
@@ -354,6 +365,13 @@ class HealthConnectManager(
      * aggregated across the whole window. An origin that only wrote in the
      * older part of the window is missed, which for a yearly chart is an
      * acceptable trade against a read that never finishes.
+     *
+     * The aggregate API returns totals with no per-record metadata, so the
+     * days it answers carry no recording-method split: `manualSteps` and
+     * `unknownMethodSteps` are -1 and `recordingMethods` is null on them, and
+     * `healthConnectIgnoreManualEntries` has nothing to subtract. Every path
+     * that resolves a single day - reads, events, the notification, the
+     * verification snapshot - is a one-day window and never comes here.
      */
     private suspend fun readDailyStepsBySourceAggregated(
         hc: HealthConnectClient,
@@ -410,6 +428,18 @@ class HealthConnectManager(
             acc.steps += source.steps
             acc.distance += source.distance
             acc.calories += source.calories
+            // The method split is only as good as its worst day: one day
+            // answered from the aggregate API has no split, and a partial sum
+            // presented as the range's manual total would understate it.
+            val methods = source.recordingMethods
+            if (methods == null) {
+                acc.methodsKnown = false
+            } else {
+                acc.methods[RecordingMethods.ACTIVE] += methods.active
+                acc.methods[RecordingMethods.AUTOMATIC] += methods.automatic
+                acc.methods[RecordingMethods.MANUAL] += methods.manual
+                acc.methods[RecordingMethods.UNKNOWN] += methods.unknown
+            }
             // A source is wearable-backed for the range if it was on any day in
             // it. Taking the last day's classification would let one day the
             // companion app relayed without device metadata mask a watch.
@@ -463,6 +493,17 @@ class HealthConnectManager(
         private var deviceType: Int? = null
         val isSelf: Boolean = packageName == self
 
+        /** Steps per recording method, indexed by [RecordingMethods.bucketOf]. */
+        val methods = IntArray(4)
+        /** Manual-entry steps that fell before coverage; a subset of [stepsBefore]. */
+        var manualBefore: Int = 0
+        /**
+         * False once any part of the total came from a read that carries no
+         * per-record metadata (the aggregate path), at which point no split
+         * can honestly be reported.
+         */
+        var methodsKnown: Boolean = true
+
         fun observe(type: Int?, at: Long) {
             // A wearable type wins over TYPE_UNKNOWN or TYPE_PHONE: companion
             // apps that relay a watch sometimes write a mix, and the day is
@@ -474,18 +515,29 @@ class HealthConnectManager(
             if (at > lastRecordAt) lastRecordAt = at
         }
 
-        fun toStepSource(self: String, withCoverage: Boolean = false): StepSource = StepSource(
-            packageName = packageName,
-            appName = StepSourceCatalog.appName(packageName),
-            kind = kindOverride
-                ?: StepSourceCatalog.classify(packageName, deviceType, self),
-            steps = steps,
-            distance = distance,
-            calories = calories,
-            lastRecordAt = lastRecordAt,
-            isSelf = isSelf,
-            stepsBeforeCoverage = if (withCoverage) stepsBefore.coerceIn(0, steps) else -1
-        )
+        fun toStepSource(self: String, withCoverage: Boolean = false): StepSource {
+            val split = if (methodsKnown) RecordingMethods.fromBuckets(methods) else null
+            return StepSource(
+                packageName = packageName,
+                appName = StepSourceCatalog.appName(packageName),
+                kind = kindOverride
+                    ?: StepSourceCatalog.classify(packageName, deviceType, self),
+                steps = steps,
+                distance = distance,
+                calories = calories,
+                lastRecordAt = lastRecordAt,
+                isSelf = isSelf,
+                stepsBeforeCoverage = if (withCoverage) stepsBefore.coerceIn(0, steps) else -1,
+                manualSteps = split?.manual ?: -1,
+                unknownMethodSteps = split?.unknown ?: -1,
+                recordingMethods = split,
+                manualStepsBeforeCoverage = if (withCoverage && split != null) {
+                    manualBefore.coerceIn(0, split.manual)
+                } else {
+                    -1
+                }
+            )
+        }
     }
 
     // ---- writes ----------------------------------------------------------

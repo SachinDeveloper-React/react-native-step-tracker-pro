@@ -69,7 +69,15 @@ object StepSourceResolver {
          * source was when the baseline was taken.
          */
         val merged: Boolean = false,
-        val baselineSteps: Int = 0
+        val baselineSteps: Int = 0,
+        /**
+         * Manual-entry steps subtracted from the external source that was
+         * evaluated, under `healthConnectIgnoreManualEntries`. Zero when the
+         * flag is off. `externalSteps + manualStepsExcluded` is what Health
+         * Connect itself shows for that source, which is what a UI needs in
+         * order to explain why the number here is lower.
+         */
+        val manualStepsExcluded: Int = 0
     ) {
         fun toMap(): Map<String, Any?> = mapOf(
             "date" to totals.date,
@@ -81,7 +89,8 @@ object StepSourceResolver {
             "externalSteps" to externalSteps,
             "usedExternal" to usedExternal,
             "merged" to merged,
-            "baselineSteps" to baselineSteps
+            "baselineSteps" to baselineSteps,
+            "manualStepsExcluded" to manualStepsExcluded
         )
     }
 
@@ -105,7 +114,15 @@ object StepSourceResolver {
          * accelerometer, where a dead process loses steps and a phone-side
          * app that kept counting has genuinely seen more.
          */
-        deviceCoverageReliable: Boolean = true
+        deviceCoverageReliable: Boolean = true,
+        /**
+         * Subtract each external source's manual-entry steps before it
+         * competes, so a hand-typed 20,000 can never become the day's number
+         * under any policy or pin. The `healthConnectIgnoreManualEntries`
+         * config. Sources read through the aggregate API carry no split and
+         * are left as they are.
+         */
+        ignoreManualEntries: Boolean = false
     ): Resolution {
         val deviceResolution = Resolution(
             totals = device,
@@ -118,7 +135,11 @@ object StepSourceResolver {
         )
         if (policy == StepSourcePolicy.DEVICE) return deviceResolution
 
+        // With manual entries excluded every candidate competes on what it
+        // counted rather than what was typed into it; the total it drops by
+        // is carried back out on the resolution so a UI can say why.
         val external = sources.filterNot { it.isSelf }
+            .map { if (ignoreManualEntries) it.excludingManual() else it }
         if (external.isEmpty()) return deviceResolution
 
         val pinned = preferredPackage?.takeIf { it.isNotEmpty() }
@@ -139,10 +160,26 @@ object StepSourceResolver {
         )
 
         val externalSteps = candidate.steps
+        val excluded = if (ignoreManualEntries) candidate.manualSteps.coerceAtLeast(0) else 0
+
+        // A source with nothing left once its manual entries are out has no
+        // count to offer under any policy - even `wearable`, which promises
+        // the watch's number whenever it "has data": a typed-in number is
+        // not data the watch produced. The phone answers, and the exclusion
+        // is still reported so the discrepancy with Health Connect's own
+        // screen can be explained. Only reached when something was actually
+        // taken out, so a source that published a zero-count record behaves
+        // exactly as it did before the flag existed.
+        if (externalSteps <= 0 && excluded > 0) {
+            return deviceResolution.copy(externalSteps = 0, manualStepsExcluded = excluded)
+        }
 
         if (policy == StepSourcePolicy.WEARABLE || policy == StepSourcePolicy.HEALTH_CONNECT) {
             // The exact external number, as promised, lower or higher.
-            return external(device, candidate, externalSteps, metrics, merged = false, lead = 0)
+            return external(
+                device, candidate, externalSteps, metrics, merged = false, lead = 0,
+                excluded = excluded
+            )
         }
 
         // AUTO. How far ahead the candidate is allowed to be depends on what
@@ -166,12 +203,22 @@ object StepSourceResolver {
         }
         // Ties go to the phone because its total is live rather than whatever
         // the companion app last uploaded.
-        if (lead <= 0) return deviceResolution.copy(externalSteps = externalSteps)
+        if (lead <= 0) {
+            return deviceResolution.copy(
+                externalSteps = externalSteps, manualStepsExcluded = excluded
+            )
+        }
 
         return if (trusted) {
-            external(device, candidate, externalSteps, metrics, merged = false, lead = lead)
+            external(
+                device, candidate, externalSteps, metrics, merged = false, lead = lead,
+                excluded = excluded
+            )
         } else {
-            external(device, candidate, device.steps + lead, metrics, merged = true, lead = lead)
+            external(
+                device, candidate, device.steps + lead, metrics, merged = true, lead = lead,
+                excluded = excluded
+            )
         }
     }
 
@@ -181,7 +228,8 @@ object StepSourceResolver {
         steps: Int,
         metrics: MetricsCalculator,
         merged: Boolean,
-        lead: Int
+        lead: Int,
+        excluded: Int
     ): Resolution = Resolution(
         totals = DayTotals(
             date = device.date,
@@ -204,6 +252,7 @@ object StepSourceResolver {
         externalSteps = candidate.steps,
         usedExternal = true,
         merged = merged,
-        baselineSteps = lead.coerceAtLeast(0)
+        baselineSteps = lead.coerceAtLeast(0),
+        manualStepsExcluded = excluded
     )
 }

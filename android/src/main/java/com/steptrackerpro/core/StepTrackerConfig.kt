@@ -49,6 +49,15 @@ data class StepTrackerConfig(
     val healthConnectBackgroundRead: Boolean = false,
     /** Ask for `READ_HEALTH_DATA_HISTORY`, needed to read past 30 days. */
     val healthConnectHistoryRead: Boolean = false,
+    /**
+     * Subtract manually entered steps (`RECORDING_METHOD_MANUAL_ENTRY`) from
+     * every Health Connect source before the resolver picks a winner. Off by
+     * default, because for a display app a user's typed-in correction is
+     * legitimate data; on for an app that pays per step, where it is the
+     * easiest way to fake a day. The records are still read and still
+     * reported per source - only the resolved number leaves them out.
+     */
+    val healthConnectIgnoreManualEntries: Boolean = false,
     /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
@@ -162,6 +171,7 @@ data class StepTrackerConfig(
         put("healthConnectWriteEnabled", healthConnectWriteEnabled)
         put("healthConnectBackgroundRead", healthConnectBackgroundRead)
         put("healthConnectHistoryRead", healthConnectHistoryRead)
+        put("healthConnectIgnoreManualEntries", healthConnectIgnoreManualEntries)
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
         put("privacyPolicyUrl", privacyPolicyUrl ?: JSONObject.NULL)
@@ -229,6 +239,10 @@ data class StepTrackerConfig(
                 ),
                 healthConnectHistoryRead = json.optBoolean(
                     "healthConnectHistoryRead", fallback.healthConnectHistoryRead
+                ),
+                healthConnectIgnoreManualEntries = json.optBoolean(
+                    "healthConnectIgnoreManualEntries",
+                    fallback.healthConnectIgnoreManualEntries
                 ),
                 stepSource = json.optString("stepSource", fallback.stepSource),
                 preferredStepSourcePackage =

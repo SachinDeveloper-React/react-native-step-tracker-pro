@@ -83,6 +83,22 @@ export interface StepTrackerConfig {
    */
   healthConnectHistoryRead?: boolean;
   /**
+   * Subtract steps the user typed in by hand
+   * (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source
+   * before a winner is picked. Default false.
+   *
+   * Off, a manual entry is ordinary data - for a display app a user's own
+   * correction is legitimate. On, a hand-entered 20,000 can never become the
+   * day's number under any policy or pin: each source competes on
+   * `steps - manualSteps`, and `ResolvedStepSource.manualStepsExcluded`
+   * says how much was taken out so the UI can explain why the number is
+   * lower than Health Connect's own screen. The records are still read and
+   * still listed per source by `getStepSources()`; the same permission
+   * covers them. Sources answered from the aggregate API (windows over 35
+   * days) carry no per-record split and are left as they are.
+   */
+  healthConnectIgnoreManualEntries?: boolean;
+  /**
    * How to reconcile this phone's sensor with what other apps published to
    * Health Connect. Default 'auto'. See {@link StepSourcePolicy}.
    */
@@ -332,12 +348,32 @@ export type StepSourceKind =
   | 'app'
   | 'unknown';
 
+/**
+ * How the steps behind a source's records were produced, as stamped by the
+ * writing app in Health Connect's `Metadata.recordingMethod`. The four buckets
+ * sum to `StepSource.steps`.
+ */
+export interface RecordingMethodBreakdown {
+  /** Counted by a sensor while the writing app was in use. */
+  active: number;
+  /** Counted by a sensor in the background - a watch, a phone pedometer. */
+  automatic: number;
+  /** Typed in by the user. */
+  manual: number;
+  /**
+   * Unstated. Every record written before the field existed carries this,
+   * and so does one from an app that never sets it.
+   */
+  unknown: number;
+}
+
 /** One app contributing steps to Health Connect, with what it contributed. */
 export interface StepSource {
   packageName: string;
   /** Friendly name where the package is recognised, else the package name. */
   appName: string;
   kind: StepSourceKind;
+  /** The origin's full total, manual entries included. */
   steps: number;
   /** Metres. 0 when the source published steps but no distance. */
   distance: number;
@@ -356,6 +392,23 @@ export interface StepSource {
    * classified `'phone'`, never a wearable.
    */
   isPlatform: boolean;
+  /**
+   * Of `steps`, how many came from records the writing app stamped
+   * `RECORDING_METHOD_MANUAL_ENTRY` - typed in by the user rather than
+   * counted by anything. The single easiest way to fake a day through a
+   * third-party app, and the bucket `healthConnectIgnoreManualEntries`
+   * subtracts.
+   *
+   * `-1` when not computed: windows over 35 days are answered through the
+   * aggregate API, which returns totals with no per-record metadata, the
+   * same way `stepsBeforeCoverage` is unavailable there. Every single-day
+   * read is exact.
+   */
+  manualSteps: number;
+  /** Of `steps`, how many carried `RECORDING_METHOD_UNKNOWN`. `-1` when not computed. */
+  unknownMethodSteps: number;
+  /** The full split of `steps` by recording method. `null` when not computed. */
+  recordingMethods: RecordingMethodBreakdown | null;
 }
 
 /** The outcome of picking a source for one day. */
@@ -382,6 +435,14 @@ export interface ResolvedStepSource {
   merged: boolean;
   /** How far ahead the external source was when the baseline was taken. */
   baselineSteps: number;
+  /**
+   * Manual-entry steps subtracted from the external source that was
+   * evaluated, under `healthConnectIgnoreManualEntries`. `0` when the flag
+   * is off. `externalSteps + manualStepsExcluded` is what Health Connect's
+   * own screen shows for that source, so a UI can say "20,000 typed in by
+   * hand were not counted" instead of leaving the difference unexplained.
+   */
+  manualStepsExcluded: number;
 }
 
 export interface CurrentStepSource extends ResolvedStepSource {

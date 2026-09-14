@@ -113,6 +113,23 @@ own origin is recognised by the package (`isPlatform: true`, `kind: 'phone'`,
 "This phone (Android)"); other origins you do not recognise — OEM health apps
 write under their own package names — are just another source.
 
+### On manual entries
+
+Health Connect lets a user type steps in by hand, in its own UI or in any
+app that offers it, and stamps such records `RECORDING_METHOD_MANUAL_ENTRY`.
+There is no separate permission for them: `READ_STEPS` returns typed-in
+records alongside counted ones, so this package always *reads* them and
+always lists them — `getStepSources()` reports `manualSteps` and a
+`recordingMethods` split per source. What it does with them is config:
+by default a manual entry is ordinary data, and with
+`healthConnectIgnoreManualEntries: true` it is left out of the resolved
+number, which is the right setting for any app that converts steps into
+currency, rewards or a leaderboard position. Say which in your privacy
+policy if you rely on the distinction, and note that the stamp is the
+writing app's own statement — every mainstream app labels its manual
+entries honestly, but a purpose-built app can lie, which is why a rewards
+app still verifies server-side (see [SECURITY.md](../SECURITY.md)).
+
 ### On reporting a watch's steps as your own
 
 When a wearable owns the day, the number your UI shows was measured by hardware

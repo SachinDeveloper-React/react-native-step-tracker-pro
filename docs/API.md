@@ -457,11 +457,32 @@ Every app that published steps over the range, with what each contributed.
       isSelf: false,
       isWearable: true,
       isPlatform: false,    // true for Health Connect's own on-device count
+      manualSteps: 0,       // of `steps`, typed in by the user; -1 when not computed
+      unknownMethodSteps: 0,
+      recordingMethods: { active: 0, automatic: 8240, manual: 0, unknown: 0 },
     },
   ],
   hasWearable: true,
 }
 ```
+
+`manualSteps`, `unknownMethodSteps` and `recordingMethods` split `steps` by
+Health Connect's `recordingMethod`, which the writing app stamps on every
+record: counted by a sensor while the app was in use (`active`), counted in
+the background (`automatic`), typed in by the user (`manual`), or unstated
+(`unknown` — every record written before the field existed, and every app
+that never sets it). `steps` is always the full total. A manual entry is the
+one honest way to put 20,000 steps into Health Connect from a keyboard, and
+without this split it is indistinguishable from a watch's count; an app that
+verifies steps server-side wants the `manual` bucket separately, and
+`healthConnectIgnoreManualEntries` keeps it out of the resolved number.
+
+Windows longer than 35 days are answered through Health Connect's aggregate
+API, which returns totals with no per-record metadata. On those days
+`manualSteps` and `unknownMethodSteps` are `-1` and `recordingMethods` is
+`null` — the same limitation `stepsBeforeCoverage` has there. Every
+single-day read (`getTodaySteps`, `getStepsForDate`, the events, the
+notification, `getVerificationSnapshot`) is exact.
 
 On Android 14 with SDK extension 20+, Health Connect records the phone's own
 steps itself once any app holds `READ_STEPS`. That origin shows up here as
@@ -495,6 +516,7 @@ Which source is answering for today, and what the alternatives counted.
   usedExternal: true,
   merged: false,        // true when steps = external baseline + phone delta ('auto')
   baselineSteps: 0,     // the external lead when the baseline was taken
+  manualStepsExcluded: 0, // typed-in steps left out under healthConnectIgnoreManualEntries
   policy: 'auto',
   preferredPackage: null,
 }
@@ -502,6 +524,22 @@ Which source is answering for today, and what the alternatives counted.
 
 `deviceSteps` and `externalSteps` are always both populated, so a UI can offer
 "your watch counted 8,240 — use that instead?" without a second call.
+
+#### Manual entries
+
+With `healthConnectIgnoreManualEntries: true`, every external source
+competes on `steps - manualSteps` — under every policy, and even when
+pinned — so a hand-entered 20,000 can never become the day's number. A
+source with nothing left once its manual entries are out has no count to
+offer and the phone answers. `manualStepsExcluded` on the resolution is what
+was taken out of the source that was evaluated, and
+`externalSteps + manualStepsExcluded` is the figure Health Connect's own
+screen shows for it, so the UI can say "12,000 in Fitbit · 5,000 typed in by
+hand were not counted" rather than leaving the difference unexplained. When
+manual entries are excluded, distance and calories for that source are
+re-derived from the steps that remain instead of carrying a typed-in distance
+along. The flag is off by default: for a display app a user's own correction
+is legitimate data, and nothing moves for a consumer who does not set it.
 
 ### `setPreferredStepSource(packageName: string | null)`
 
@@ -608,6 +646,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own; `WRITE_*` is then never requested |
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
+| `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |
 | `privacyPolicyUrl` | — | **required before shipping health permissions**; Health Connect links to it and Play review checks for it |

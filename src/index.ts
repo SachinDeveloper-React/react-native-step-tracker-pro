@@ -30,6 +30,7 @@ export type {
   PermissionStatus,
   RangeOptions,
   RangeStats,
+  RecordingMethodBreakdown,
   RequestHealthConnectOptions,
   ResolvedStepSource,
   SensorSource,

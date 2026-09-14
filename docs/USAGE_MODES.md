@@ -273,6 +273,26 @@ reported so a UI can show "5,500 on this phone · 6,000 from Samsung Health".
 exact number and keep it, jumps included, which is what a user who treats the
 watch as the source of truth wants. `'device'` never reads.
 
+### Steps typed in by hand
+
+Every Health Connect record says how it was produced — counted by a sensor,
+or typed in by the user (`RECORDING_METHOD_MANUAL_ENTRY`). `getStepSources()`
+reports the split per source as `manualSteps` and `recordingMethods`, and by
+default the resolver treats a manual entry like any other steps: for a
+display app a user correcting their own day is legitimate. An app that
+converts steps into anything of value should set
+
+```ts
+healthConnectIgnoreManualEntries: true,
+```
+
+after which every source competes on `steps - manualSteps` under every
+policy, pin included, and `stepSource.manualStepsExcluded` on each snapshot
+says how much was left out so the screen can explain the difference from
+Health Connect's own number. The records are still read — the permission is
+the same — and still listed; only the resolved number changes. Details in
+[API.md](API.md#manual-entries).
+
 ### Manifest
 
 Nothing to remove for the default set. Trim the optional permissions you do

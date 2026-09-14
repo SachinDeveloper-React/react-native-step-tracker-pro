@@ -71,11 +71,14 @@ class StepTrackerCore private constructor(context: Context) {
         metrics.config = saved
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
         // A different policy or pin changes what the baseline means, so it is
-        // taken again from the next read rather than carried across.
+        // taken again from the next read rather than carried across. So does
+        // the manual-entry rule: a baseline taken from a typed-in total would
+        // otherwise survive until midnight after the app turned the flag on.
         if (previous.stepSource != saved.stepSource ||
             previous.preferredStepSourcePackage != saved.preferredStepSourcePackage ||
             previous.healthConnectEnabled != saved.healthConnectEnabled ||
-            previous.healthConnectReadEnabled != saved.healthConnectReadEnabled
+            previous.healthConnectReadEnabled != saved.healthConnectReadEnabled ||
+            previous.healthConnectIgnoreManualEntries != saved.healthConnectIgnoreManualEntries
         ) {
             state.clearContinuity()
             sourceCache.invalidate()
@@ -413,7 +416,8 @@ class StepTrackerCore private constructor(context: Context) {
         }
         val raw = StepSourceResolver.resolve(
             policy, device, sourcesForDay(date), preferredSourcePackage(), metrics,
-            deviceCoverageReliable = coverageReliable()
+            deviceCoverageReliable = coverageReliable(),
+            ignoreManualEntries = config().healthConnectIgnoreManualEntries
         )
         if (policy != StepSourcePolicy.AUTO || !today) return raw
         // Past days are closed: max() is the right answer and nothing is
@@ -542,10 +546,12 @@ class StepTrackerCore private constructor(context: Context) {
         val today = DateKeys.today()
         val baseline = if (policy == StepSourcePolicy.AUTO) storedBaseline() else null
         val reliable = coverageReliable()
+        val ignoreManual = config().healthConnectIgnoreManualEntries
         val resolved = base.days.map { day ->
             val raw = StepSourceResolver.resolve(
                 policy, day, byDate[day.date].orEmpty(), preferred, metrics,
-                deviceCoverageReliable = reliable
+                deviceCoverageReliable = reliable,
+                ignoreManualEntries = ignoreManual
             )
             if (day.date == today && baseline != null) {
                 StepContinuity.apply(raw, baseline, metrics).totals
@@ -644,7 +650,8 @@ class StepTrackerCore private constructor(context: Context) {
         } else {
             StepSourceResolver.resolve(
                 policy, totals, cached, preferredSourcePackage(), metrics,
-                deviceCoverageReliable = coverageReliable()
+                deviceCoverageReliable = coverageReliable(),
+                ignoreManualEntries = config.healthConnectIgnoreManualEntries
             )
         }
         if (policy != StepSourcePolicy.AUTO) return raw

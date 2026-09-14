@@ -1,6 +1,7 @@
 package com.steptrackerpro.health
 
 import androidx.health.connect.client.records.metadata.Device
+import androidx.health.connect.client.records.metadata.Metadata
 
 /**
  * What produced a set of Health Connect step records.
@@ -49,6 +50,50 @@ enum class StepSourceKind(val jsValue: String) {
 }
 
 /**
+ * How the steps behind a set of records were produced, per Health Connect's
+ * `Metadata.recordingMethod`: counted by a sensor while the app was open
+ * (active), counted by a sensor in the background (automatic), typed in by
+ * the user (manual), or unstated (unknown - the value every record written
+ * before the field existed carries, and what apps that never set it stamp).
+ *
+ * The writing app stamps it, so it is a statement rather than proof - but a
+ * manual entry is the one honest way for a user to put 20,000 steps into
+ * Health Connect from a keyboard, and every mainstream app labels it as such.
+ * An app that pays for steps wants that bucket separated out.
+ */
+data class RecordingMethods(
+    val active: Int,
+    val automatic: Int,
+    val manual: Int,
+    val unknown: Int
+) {
+    fun toMap(): Map<String, Any?> = mapOf(
+        "active" to active,
+        "automatic" to automatic,
+        "manual" to manual,
+        "unknown" to unknown
+    )
+
+    companion object {
+        const val ACTIVE = 0
+        const val AUTOMATIC = 1
+        const val MANUAL = 2
+        const val UNKNOWN = 3
+
+        /** Bucket index for a raw `Metadata.recordingMethod` value. */
+        fun bucketOf(method: Int): Int = when (method) {
+            Metadata.RECORDING_METHOD_ACTIVELY_RECORDED -> ACTIVE
+            Metadata.RECORDING_METHOD_AUTOMATICALLY_RECORDED -> AUTOMATIC
+            Metadata.RECORDING_METHOD_MANUAL_ENTRY -> MANUAL
+            else -> UNKNOWN
+        }
+
+        fun fromBuckets(buckets: IntArray): RecordingMethods =
+            RecordingMethods(buckets[ACTIVE], buckets[AUTOMATIC], buckets[MANUAL], buckets[UNKNOWN])
+    }
+}
+
+/**
  * One app contributing steps to Health Connect over a time range, with the
  * totals it contributed.
  *
@@ -79,12 +124,62 @@ data class StepSource(
      * count more steps than its own hardware counter for the hours both were
      * watching, so anything beyond the gap is another app's inflation.
      */
-    val stepsBeforeCoverage: Int = -1
+    val stepsBeforeCoverage: Int = -1,
+    /**
+     * Of [steps], how many came from records stamped
+     * `RECORDING_METHOD_MANUAL_ENTRY` - typed in by the user rather than
+     * counted by anything. -1 when not computed: the aggregate API used for
+     * windows over 35 days returns totals with no per-record metadata, so
+     * there is nothing to bucket. [steps] always includes them; the
+     * `healthConnectIgnoreManualEntries` config decides whether the resolver
+     * subtracts them.
+     */
+    val manualSteps: Int = -1,
+    /** Of [steps], how many carried `RECORDING_METHOD_UNKNOWN`. -1 when not computed. */
+    val unknownMethodSteps: Int = -1,
+    /** The full split of [steps] by recording method. Null when not computed. */
+    val recordingMethods: RecordingMethods? = null,
+    /**
+     * Of [manualSteps], how many fell before this device's coverage began.
+     * Kept alongside [stepsBeforeCoverage] so excluding manual entries can
+     * take them out of the pre-coverage share as well as the total - a
+     * hand-entered morning must not survive as "steps from before install".
+     * -1 when either half is not computed. Internal to the resolver.
+     */
+    val manualStepsBeforeCoverage: Int = -1
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
     /** Health Connect's own on-device count - see [StepSourceCatalog.isPlatformOrigin]. */
     val isPlatform: Boolean get() = StepSourceCatalog.isPlatformOrigin(packageName)
+
+    /**
+     * This source with its manual entries taken out, for the resolver: the
+     * total and the pre-coverage share both drop by their manual part, and
+     * distance and calories are zeroed so they are re-derived from the steps
+     * that remain rather than carrying a hand-entered distance along.
+     * [manualSteps] itself is kept, so the caller can still report how much
+     * was excluded. Unchanged when nothing is known to be manual.
+     */
+    fun excludingManual(): StepSource {
+        if (manualSteps <= 0) return this
+        val kept = (steps - manualSteps).coerceAtLeast(0)
+        val before = when {
+            stepsBeforeCoverage < 0 -> -1
+            manualStepsBeforeCoverage >= 0 ->
+                (stepsBeforeCoverage - manualStepsBeforeCoverage).coerceIn(0, kept)
+            // The split of the manual part around coverage is unknown: take
+            // the conservative view that all of it could have been before,
+            // so the pre-coverage share can never carry a manual entry.
+            else -> (stepsBeforeCoverage - manualSteps).coerceIn(0, kept)
+        }
+        return copy(
+            steps = kept,
+            distance = 0.0,
+            calories = 0.0,
+            stepsBeforeCoverage = before
+        )
+    }
 
     fun toMap(): Map<String, Any?> = mapOf(
         "packageName" to packageName,
@@ -96,7 +191,10 @@ data class StepSource(
         "lastRecordAt" to lastRecordAt,
         "isSelf" to isSelf,
         "isWearable" to isWearable,
-        "isPlatform" to isPlatform
+        "isPlatform" to isPlatform,
+        "manualSteps" to manualSteps,
+        "unknownMethodSteps" to unknownMethodSteps,
+        "recordingMethods" to recordingMethods?.toMap()
     )
 }
 

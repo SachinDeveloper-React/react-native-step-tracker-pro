@@ -60,6 +60,10 @@ prove the steps were walked:
   time** (`gapRecovery: 'split'`), which is an estimate. Use `'drop'` where an
   over-credit costs money.
 - Under `'auto'`, a source the user pins is trusted outright.
+- Steps typed into Health Connect by hand are read like any other record.
+  Set `healthConnectIgnoreManualEntries` to keep them out of the resolved
+  number, and check `StepSource.manualSteps` server-side; the recording
+  method is the writing app's own statement, not proof.
 
 If steps have monetary value, verify server-side: rate-limit implausible
 daily totals, compare against `stepSource` and `getTrackingHealth()`

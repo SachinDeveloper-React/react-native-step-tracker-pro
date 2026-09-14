@@ -5,6 +5,7 @@ import com.steptrackerpro.core.MetricsCalculator
 import com.steptrackerpro.core.StepTrackerConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -27,15 +28,30 @@ class StepSourceResolverTest {
         distance: Double = 0.0,
         calories: Double = 0.0,
         isSelf: Boolean = false,
-        stepsBeforeCoverage: Int = -1
-    ) = StepSource(pkg, pkg, kind, steps, distance, calories, 0L, isSelf, stepsBeforeCoverage)
+        stepsBeforeCoverage: Int = -1,
+        manualSteps: Int = -1,
+        manualStepsBeforeCoverage: Int = -1
+    ) = StepSource(
+        pkg, pkg, kind, steps, distance, calories, 0L, isSelf, stepsBeforeCoverage,
+        manualSteps = manualSteps,
+        unknownMethodSteps = if (manualSteps >= 0) 0 else -1,
+        recordingMethods = if (manualSteps >= 0) {
+            RecordingMethods(active = 0, automatic = steps - manualSteps, manual = manualSteps, unknown = 0)
+        } else {
+            null
+        },
+        manualStepsBeforeCoverage = manualStepsBeforeCoverage
+    )
 
     private fun resolve(
         policy: StepSourcePolicy,
         device: DayTotals,
         sources: List<StepSource>,
-        preferred: String? = null
-    ) = StepSourceResolver.resolve(policy, device, sources, preferred, metrics)
+        preferred: String? = null,
+        ignoreManualEntries: Boolean = false
+    ) = StepSourceResolver.resolve(
+        policy, device, sources, preferred, metrics, ignoreManualEntries = ignoreManualEntries
+    )
 
     @Test
     fun `never sums the phone and a watch covering the same day`() {
@@ -310,5 +326,174 @@ class StepSourceResolverTest {
         assertEquals(4_000, result.totals.steps)
         assertTrue(result.usedExternal)
         assertFalse(result.merged)
+    }
+
+    // ---- manual entries (healthConnectIgnoreManualEntries) -------------------
+
+    @Test
+    fun `a source that is entirely typed in wins under auto with the flag off and loses with it on`() {
+        // 20,000 steps entered by hand into a third-party app. Nothing was
+        // counted by anything.
+        val typed = source(
+            "com.example.faker", 20_000, StepSourceKind.WATCH, manualSteps = 20_000
+        )
+        val off = resolve(StepSourcePolicy.AUTO, device(4_000), listOf(typed))
+        assertEquals(20_000, off.totals.steps)
+        assertTrue(off.usedExternal)
+        assertEquals(0, off.manualStepsExcluded)
+
+        val on = resolve(StepSourcePolicy.AUTO, device(4_000), listOf(typed), ignoreManualEntries = true)
+        assertEquals(4_000, on.totals.steps)
+        assertFalse(on.usedExternal)
+        assertEquals(StepSourceKind.SELF, on.kind)
+        // What was taken out, and what is left, so the UI can say why the
+        // number is 4,000 when Health Connect's own screen says 20,000.
+        assertEquals(20_000, on.manualStepsExcluded)
+        assertEquals(0, on.externalSteps)
+    }
+
+    @Test
+    fun `a mixed source is reduced by exactly its manual share`() {
+        // A watch counted 7,000 and the user typed in 5,000 more on top.
+        val watch = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, manualSteps = 5_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(6_000), listOf(watch), ignoreManualEntries = true)
+
+        assertEquals(7_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertEquals(7_000, result.externalSteps)
+        assertEquals(5_000, result.manualStepsExcluded)
+        // Never summed: the phone's 6,000 is not added to anything.
+        assertTrue(result.totals.steps < 6_000 + 7_000)
+        // The shown distance follows the counted steps, not the source's own
+        // figure, which would include the distance typed in alongside.
+        assertEquals(metrics.distance(7_000), result.totals.distance, 0.001)
+    }
+
+    @Test
+    fun `the flag off leaves a mixed source exactly as before`() {
+        val watch = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, distance = 9_000.0,
+            manualSteps = 5_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(6_000), listOf(watch))
+        assertEquals(12_000, result.totals.steps)
+        assertEquals(12_000, result.externalSteps)
+        assertEquals(9_000.0, result.totals.distance, 0.001)
+        assertEquals(0, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a pinned source cannot smuggle a manual entry in`() {
+        val typed = source(
+            "com.example.faker", 20_000, StepSourceKind.APP, manualSteps = 20_000
+        )
+        val result = resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(typed),
+            preferred = "com.example.faker", ignoreManualEntries = true
+        )
+        assertEquals(4_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+        assertEquals(20_000, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a typed-in morning does not survive as steps from before coverage`() {
+        // Installed at 15:00. Samsung Health holds 8,000 for the day, all
+        // before install - but 6,000 of them were typed in by hand.
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_000, StepSourceKind.APP,
+            stepsBeforeCoverage = 8_000, manualSteps = 6_000, manualStepsBeforeCoverage = 6_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(10), listOf(samsung), ignoreManualEntries = true)
+
+        // Only the counted 2,000 may be supplied from before install.
+        assertEquals(2_010, result.totals.steps)
+        assertTrue(result.merged)
+        assertEquals(2_000, result.baselineSteps)
+        assertEquals(6_000, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `when the split of the manual part around coverage is unknown the pre-coverage share is taken conservatively`() {
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_000, StepSourceKind.APP,
+            stepsBeforeCoverage = 3_000, manualSteps = 6_000
+        )
+        // 8,000 - 6,000 = 2,000 counted; the pre-coverage share can be at most
+        // that, and with the manual part's timing unknown it is assumed to
+        // have all been before, leaving 0.
+        val result = resolve(StepSourcePolicy.AUTO, device(10), listOf(samsung), ignoreManualEntries = true)
+        assertEquals(10, result.totals.steps)
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `wearable and health_connect policies also compete on the counted number only`() {
+        val typed = source("com.fitbit.FitbitMobile", 20_000, StepSourceKind.WATCH, manualSteps = 20_000)
+        val mixed = source("com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, manualSteps = 5_000)
+
+        // Entirely typed in: the watch has no counted data, the phone answers.
+        val none = resolve(StepSourcePolicy.WEARABLE, device(4_000), listOf(typed), ignoreManualEntries = true)
+        assertEquals(4_000, none.totals.steps)
+        assertFalse(none.usedExternal)
+        assertEquals(20_000, none.manualStepsExcluded)
+
+        // Mixed: the exact counted number, as the policy promises.
+        val some = resolve(StepSourcePolicy.HEALTH_CONNECT, device(9_000), listOf(mixed), ignoreManualEntries = true)
+        assertEquals(7_000, some.totals.steps)
+        assertTrue(some.usedExternal)
+        assertEquals(5_000, some.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a source with no method split is left alone by the flag`() {
+        // The aggregate path (windows over 35 days) carries no per-record
+        // metadata: manualSteps is -1, nothing can be subtracted.
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(7_800), listOf(watch), ignoreManualEntries = true)
+        assertEquals(8_000, result.totals.steps)
+        assertEquals(0, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `excludingManual reports the source's own counted number and keeps what was removed`() {
+        val mixed = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, distance = 9_000.0,
+            stepsBeforeCoverage = 4_000, manualSteps = 5_000, manualStepsBeforeCoverage = 1_000
+        )
+        val reduced = mixed.excludingManual()
+        assertEquals(7_000, reduced.steps)
+        assertEquals(3_000, reduced.stepsBeforeCoverage)
+        assertEquals(5_000, reduced.manualSteps)
+        assertEquals(0.0, reduced.distance, 0.0)
+        // Nothing to exclude leaves the instance untouched.
+        val clean = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, manualSteps = 0)
+        assertSame(clean, clean.excludingManual())
+    }
+
+    @Test
+    fun `default arguments reproduce the 1_3_0 resolution for every policy`() {
+        // Nothing an existing consumer did not opt into may move a number.
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, distance = 6_100.0, manualSteps = 3_000)
+        val samsung = source(
+            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 5_990, manualSteps = 100
+        )
+        val phone = device(7_800)
+        for (policy in StepSourcePolicy.entries) {
+            val result = StepSourceResolver.resolve(policy, phone, listOf(watch, samsung), null, metrics)
+            val expected = when (policy) {
+                StepSourcePolicy.DEVICE -> 7_800
+                StepSourcePolicy.WEARABLE, StepSourcePolicy.HEALTH_CONNECT -> 8_000
+                StepSourcePolicy.AUTO -> 8_000
+            }
+            assertEquals(policy.name, expected, result.totals.steps)
+            assertEquals(policy.name, 0, result.manualStepsExcluded)
+            if (policy != StepSourcePolicy.DEVICE) {
+                assertEquals(policy.name, 8_000, result.externalSteps)
+                assertEquals(policy.name, 6_100.0, result.totals.distance, 0.001)
+            }
+        }
     }
 }

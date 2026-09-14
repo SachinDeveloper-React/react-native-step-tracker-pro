@@ -21,6 +21,7 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectWriteEnabled'
     | 'healthConnectBackgroundRead'
     | 'healthConnectHistoryRead'
+    | 'healthConnectIgnoreManualEntries'
     | 'stepSource'
     | 'autoStartOnBoot'
     | 'gapRecovery'
@@ -46,6 +47,7 @@ export const DEFAULT_CONFIG: Required<
   healthConnectWriteEnabled: true,
   healthConnectBackgroundRead: false,
   healthConnectHistoryRead: false,
+  healthConnectIgnoreManualEntries: false,
   stepSource: 'auto',
   autoStartOnBoot: true,
   gapRecovery: 'split',

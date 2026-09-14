@@ -7,6 +7,7 @@ import {
   setNativeModule,
 } from '../__mocks__/react-native';
 import StepTracker, { estimateStride, isSupported } from '../StepTracker';
+import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
 import type { HealthConnectStatus } from '../types';
 
@@ -132,6 +133,24 @@ describe('initialize()', () => {
       remoteSyncAllowHttp: true,
     });
     expect(native.calledWith('initialize')).toHaveLength(1);
+  });
+
+  it('round-trips healthConnectIgnoreManualEntries through initialize() and getConfig()', async () => {
+    // The flag is a plain pass-through: JS neither defaults it nor rewrites
+    // it, so an app that never sets it sends nothing and the native default
+    // (off) stands.
+    await StepTracker.initialize({ healthConnectIgnoreManualEntries: true });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      healthConnectIgnoreManualEntries: true,
+    });
+    native.when('getConfig', {
+      stepSource: 'auto',
+      healthConnectIgnoreManualEntries: true,
+    });
+    await expect(StepTracker.getConfig()).resolves.toMatchObject({
+      healthConnectIgnoreManualEntries: true,
+    });
+    expect(DEFAULT_CONFIG.healthConnectIgnoreManualEntries).toBe(false);
   });
 
   it('allows https remote endpoints and web privacy policies', async () => {

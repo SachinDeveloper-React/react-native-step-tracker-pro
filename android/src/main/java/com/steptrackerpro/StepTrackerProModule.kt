@@ -830,6 +830,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectHistoryRead = patch.optBoolean(
                 "healthConnectHistoryRead", current.healthConnectHistoryRead
             ),
+            healthConnectIgnoreManualEntries = patch.optBoolean(
+                "healthConnectIgnoreManualEntries", current.healthConnectIgnoreManualEntries
+            ),
             stepSource = patch.optString("stepSource", current.stepSource) ?: current.stepSource,
             preferredStepSourcePackage = patch.optString(
                 "preferredStepSourcePackage", current.preferredStepSourcePackage
@@ -873,6 +876,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "healthConnectWriteEnabled" to config.healthConnectWriteEnabled,
         "healthConnectBackgroundRead" to config.healthConnectBackgroundRead,
         "healthConnectHistoryRead" to config.healthConnectHistoryRead,
+        "healthConnectIgnoreManualEntries" to config.healthConnectIgnoreManualEntries,
         "stepSource" to config.stepSource,
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
         "privacyPolicyUrl" to config.privacyPolicyUrl,

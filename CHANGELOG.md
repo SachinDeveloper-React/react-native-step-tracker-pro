@@ -11,6 +11,40 @@ The release for apps that pay for steps. Nothing here changes what a
 consumer who touches no new config sees: the same resolved numbers, the same
 events, the same remote payload. Everything is opt-in or additive.
 
+### Added
+
+#### Health Connect recording method per source
+
+- `StepSource` now splits each origin's `steps` by Health Connect's
+  `recordingMethod`, which the writing app stamps on every record:
+  `manualSteps` (typed in by the user, `RECORDING_METHOD_MANUAL_ENTRY`),
+  `unknownMethodSteps`, and the full `recordingMethods` split
+  `{ active, automatic, manual, unknown }`. `steps` is still the full total.
+  A hand-entered 20,000 was previously indistinguishable from a watch's
+  count, which is the single easiest way to fake steps through a third-party
+  app. Windows over 35 days are answered through the aggregate API, which
+  carries no per-record metadata, so on those days the new fields are `-1` /
+  `null` — the same limitation `stepsBeforeCoverage` has there. Every
+  single-day read is exact.
+- `healthConnectIgnoreManualEntries` config (default `false`). On, every
+  external source competes on `steps - manualSteps` under every policy and
+  even when pinned, so a typed-in number can never become the day's number;
+  a source with nothing left once its manual entries are out has no count to
+  offer and the phone answers. A manual entry's share of the pre-coverage
+  steps is taken out too, so a hand-entered morning cannot survive as "steps
+  from before install". Distance and calories for a reduced source are
+  re-derived from the steps that remain. Turning the flag on or off clears
+  the day's continuity baseline, so a baseline taken from a typed-in total
+  does not survive until midnight.
+- `ResolvedStepSource.manualStepsExcluded`: how much was taken out of the
+  source that was evaluated. `externalSteps + manualStepsExcluded` is what
+  Health Connect's own screen shows for it, so a UI can explain the
+  difference. `0` whenever the flag is off.
+- The records are still read — `READ_STEPS` covers them, there is no separate
+  permission — and still listed per source; only the resolved number changes.
+  [PLAY_STORE_COMPLIANCE.md](docs/PLAY_STORE_COMPLIANCE.md#on-manual-entries)
+  says so for the health declaration.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin
