@@ -28,8 +28,8 @@ jobs:
       - name: Pack and inspect what would be published
         run: |
           npm pack --dry-run 2>&1 | tee pack.txt
-          # Tests, mocks and build output must never ship.
-          ! grep -E '__tests__|__mocks__|android/build/' pack.txt
+          # Tests, mocks, build output and the Kotlin daemon's logs must never ship.
+          ! grep -E '__tests__|__mocks__|android/build/|android/\.kotlin' pack.txt
 
   android:
     name: Kotlin compile, JVM tests, lint

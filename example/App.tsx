@@ -17,7 +17,7 @@ import StepTracker, {
   useStepStats,
   useStepTracker,
 } from 'react-native-step-tracker-pro';
-import type { TrackingHealth } from 'react-native-step-tracker-pro';
+import type { TrackingHealth, VerificationSnapshot } from 'react-native-step-tracker-pro';
 
 const palette = {
   surface: '#E9EDF2',
@@ -85,6 +85,17 @@ export default function App() {
     // Take the phone's count or a paired watch's, whichever saw more of the
     // day. Never both added together.
     stepSource: 'auto',
+    // The settings an app that pays for steps would use, here so the example
+    // shows what they change. Off, a typed-in entry counts like any other;
+    // on, it is read and listed but never becomes the day's number.
+    healthConnectIgnoreManualEntries: true,
+    // Only a catalogued companion app (or one on wearableAllowlist) is
+    // trusted for its whole margin; anything else stamping TYPE_WATCH is
+    // bound by the coverage rule like a phone-side app.
+    wearableTrust: 'catalog',
+    // A closed day never changes after the fact, and one day can never be
+    // handed a week's worth of counter.
+    gapRecovery: 'today_capped',
     onGoalReached: (event) =>
       Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
   });
@@ -93,6 +104,7 @@ export default function App() {
   const health = useHealthConnect();
   const [pending, setPending] = useState(0);
   const [tracking, setTracking] = useState<TrackingHealth | null>(null);
+  const [verification, setVerification] = useState<VerificationSnapshot | null>(null);
 
   // Re-read on every foreground: getTrackingHealth() is also what restarts a
   // service the OEM killed while the app was closed, and recoveryCount is
@@ -106,6 +118,20 @@ export default function App() {
       .then(setPending)
       .catch(() => {});
   }, []);
+
+  // What a server would be sent for today: the phone's own count, every
+  // Health Connect origin unresolved, and what the policy chose. Re-read
+  // with the snapshot so the manual and recovered figures track the count.
+  const refreshVerification = useCallback(() => {
+    if (!isSupported() || !snapshot?.date) return;
+    StepTracker.getVerificationSnapshot(snapshot.date)
+      .then(setVerification)
+      .catch(() => {});
+  }, [snapshot?.date]);
+
+  useEffect(() => {
+    refreshVerification();
+  }, [refreshVerification, snapshot?.steps]);
 
   useEffect(() => {
     refreshHealth();
@@ -170,6 +196,12 @@ export default function App() {
   const km = ((snapshot?.distance ?? 0) / 1000).toFixed(2);
   const kcal = Math.round(snapshot?.calories ?? 0);
   const best = stats?.bestDay?.steps ?? 1;
+  // Typed-in steps across every external origin for the day. Read and
+  // listed, and under healthConnectIgnoreManualEntries never counted.
+  const manualSteps = (verification?.sources ?? [])
+    .filter((source) => !source.isSelf && source.manualSteps > 0)
+    .reduce((sum, source) => sum + source.manualSteps, 0);
+  const recoveredSteps = snapshot?.recoveredSteps ?? 0;
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -194,6 +226,22 @@ export default function App() {
         <Text style={styles.laneLabel}>
           {Math.round(progress * 100)}% of {goal.toLocaleString()}
         </Text>
+        {/*
+          The two figures a server weighs differently from the headline:
+          steps this phone credited in one go after a dead period, and steps
+          somebody typed into Health Connect by hand.
+        */}
+        {(recoveredSteps > 0 || manualSteps > 0) && (
+          <Text style={styles.laneLabel}>
+            {recoveredSteps > 0
+              ? `${recoveredSteps.toLocaleString()} recovered after a gap`
+              : ''}
+            {recoveredSteps > 0 && manualSteps > 0 ? ' · ' : ''}
+            {manualSteps > 0
+              ? `${manualSteps.toLocaleString()} typed in by hand, not counted`
+              : ''}
+          </Text>
+        )}
 
         <View style={styles.row}>
           <Metric value={km} unit="km" />
@@ -323,6 +371,47 @@ export default function App() {
               </Text>
             </Pressable>
           )}
+
+        {/*
+          What getVerificationSnapshot() would hand a server for today:
+          nothing resolved, every origin separately, so the number on screen
+          is never the one that gets paid.
+        */}
+        {verification && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Verification snapshot</Text>
+            <Text style={styles.body}>
+              Phone {verification.deviceSteps.toLocaleString()} via {verification.sensor}
+              {verification.recoveredSteps > 0
+                ? ` (${verification.recoveredSteps.toLocaleString()} recovered)`
+                : ''}
+              {' · '}resolved {verification.resolved.steps.toLocaleString()} from{' '}
+              {verification.resolved.appName}
+              {verification.resolved.manualStepsExcluded > 0
+                ? ` (${verification.resolved.manualStepsExcluded.toLocaleString()} manual excluded)`
+                : ''}
+            </Text>
+            {verification.sources
+              .filter((source) => !source.isSelf)
+              .map((source) => (
+                <Text key={source.packageName} style={styles.cardMeta}>
+                  {source.appName}: {source.steps.toLocaleString()}
+                  {source.manualSteps > 0
+                    ? ` · ${source.manualSteps.toLocaleString()} manual`
+                    : ''}
+                  {source.isWearable
+                    ? source.trustedWearable
+                      ? ' · trusted wearable'
+                      : ' · stamped as a wearable, not trusted'
+                    : ''}
+                </Text>
+              ))}
+            <Text style={styles.cardMeta}>
+              Recovered {verification.health.recoveryCount}× ·{' '}
+              {verification.clock.timezone}
+            </Text>
+          </View>
+        )}
 
         {error && <Text style={styles.error}>{error.message}</Text>}
 

@@ -45,13 +45,15 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer (39 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer (56 tests, no device)
-npm run test:android:device   # instrumented engine tests
+npm test                 # Jest, JS layer (45 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, remote payload (85 tests, no device)
+npm run test:android:device   # instrumented engine and Room migration tests
 ```
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Twenty-four cases, among them:
+sensor. Thirty-one cases: twenty-nine drive the engine, two build the Room
+database as version 2 from the exported schema, migrate real rows to the
+current version and check every one survived. Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -59,7 +61,9 @@ sensor. Twenty-four cases, among them:
 | `sensorResetWithoutRebootDoesNotDoubleCount` | OEM HAL restarts inflate the total |
 | `rebootOnSameDayClaimsStepsTakenSinceBoot` | steps between boot and service start are lost |
 | `rebootOnPreviousDaySplitsPreServiceStepsAcrossMidnight` | steps since a pre-midnight boot are dropped or all land in one day |
-| `overnightKillRecoversTheGapOnBothSidesOfMidnight` | steps counted while an OEM had the process dead overnight are lost |
+| `overnightKillRecoversTheGapOnBothSidesOfMidnight` | steps counted while an OEM had the process dead overnight are lost, or the recovered share is not recorded |
+| `aWeekLongKillCannotMintAWeekOfStepsOnOneDayUnderTodayCapped` | `today_capped` hands one day a week of counter |
+| `migrate2To3KeepsEveryRowAndReadsRecoveredAsZero` | upgrading to 1.4 loses the user's history |
 | `freshInstallOnAnOldBootDoesNotInventHistory` | a new install credits itself with days of steps it never saw |
 | `wallClockJumpIsNotMistakenForAReboot` | an NTP correction doubles the day |
 | `smallBackwardsJitterIsIgnoredNotReanchored` | a HAL that wobbles a step backwards creeps the total upward |

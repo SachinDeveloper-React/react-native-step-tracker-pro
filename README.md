@@ -76,6 +76,13 @@ await StepTracker.initialize({
 });
 ```
 
+An app that converts steps into anything of value adds
+`healthConnectIgnoreManualEntries: true`, `wearableTrust: "catalog"`,
+`gapRecovery: "today_capped"` and `remoteSyncPayload: "full"`, and posts
+`getVerificationSnapshot(date)` to its server rather than the number on
+screen — see [Watches and Health Connect](#watches-and-health-connect) and
+[docs/API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot).
+
 Stride length defaults to `height × 0.415` (male) / `0.413` (female) /
 `0.414` (unspecified); pass `strideLength` in metres to override. Calories use
 `0.57 kcal × body mass (kg) × distance (km)`, adjustable via
@@ -253,16 +260,18 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Thirty-nine Jest tests cover config validation and the flows in the JS
-layer. Fifty-six JVM tests cover step-source resolution, the `auto` merge and
-its coverage rule, gap splitting and the accelerometer pedometer against
-synthetic gait — chiefly that a phone and a watch are never added together,
-that a phone-side app cannot inflate a covered day, and that a car is not a
-walk.
-Twenty-four instrumented tests cover the reboot, midnight, overnight-kill,
-sensor-jitter, pause and counter-reset paths by feeding samples to the engine
-directly, so they run on an emulator with no step hardware. CI runs all of it
-on every push.
+Forty-five Jest tests cover config validation and the flows in the JS
+layer. Eighty-five JVM tests cover step-source resolution, the `auto` merge
+and its coverage rule, manual-entry exclusion and wearable trust, gap
+splitting under all four policies, the accelerometer pedometer against
+synthetic gait, and the remote payload — chiefly that a phone and a watch
+are never added together, that a phone-side app cannot inflate a covered
+day, that a typed-in number never becomes the day's number, and that a car
+is not a walk. Thirty-one instrumented tests cover the reboot, midnight,
+overnight-kill, capped-recovery, sensor-jitter, pause and counter-reset
+paths by feeding samples to the engine directly, plus the Room migration
+against real rows, so they run on an emulator with no step hardware. CI
+runs all of it on every push.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
