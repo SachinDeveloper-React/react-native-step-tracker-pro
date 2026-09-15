@@ -110,6 +110,22 @@ events, the same remote payload. Everything is opt-in or additive.
   touching native, like the range reads. [API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot)
   has a worked example of posting it and a rule set for the other end.
 
+#### Remote sync: idempotent, and optionally richer
+
+- Every upload to `remoteSyncUrl` carries an `Idempotency-Key` header — a
+  SHA-256 digest of the package name and each record's date and step count,
+  sorted by date — so a batch WorkManager retried, or one `syncNow()` queued
+  alongside the periodic job, is recognisable server-side as the same
+  content. A day whose count has since grown produces a new key.
+- `remoteSyncPayload` config, `'totals'` (default; the 1.3 shape byte for
+  byte) or `'full'`, which adds per record this device's `deviceSteps` and
+  `recoveredSteps`, the `stepSource` the policy resolved to, and the
+  unresolved Health Connect `sources` for the day, read at upload time and
+  `[]` when reads are not permitted.
+- The body and the key moved into `RemotePayload`, pure and JVM-tested: same
+  records → same key, one step changed → different key, and the default body
+  has exactly the four fields it had in 1.3.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin

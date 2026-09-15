@@ -476,6 +476,14 @@ class StepTrackerCore private constructor(context: Context) {
     // ---- verification ----------------------------------------------------
 
     /**
+     * Every Health Connect origin for one day, unresolved, self included,
+     * with `trustedWearable` stamped - or nothing, under the same rules that
+     * keep every other read off Health Connect when it cannot be consulted.
+     */
+    suspend fun unresolvedSources(date: String): List<StepSource> =
+        if (shouldConsultHealthConnect()) stampTrust(sourcesForDay(date)) else emptyList()
+
+    /**
      * Everything a server needs to judge one day, with nothing resolved for
      * it: this phone's own count and recovered share, every Health Connect
      * origin unresolved and self included, what the current policy would
@@ -492,7 +500,7 @@ class StepTrackerCore private constructor(context: Context) {
         val today = date == DateKeys.today()
         if (today) engine.reconcile()
         val device = dayTotals(date)
-        val sources = if (shouldConsultHealthConnect()) stampTrust(sourcesForDay(date)) else emptyList()
+        val sources = unresolvedSources(date)
         val resolved = resolveDay(date)
         val capabilities = com.steptrackerpro.util.PermissionHelper.capabilities(
             appContext, allowAccelerometer = config().accelerometerFallback

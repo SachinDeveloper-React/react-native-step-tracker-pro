@@ -142,6 +142,16 @@ export interface StepTrackerConfig {
    * with `E_INVALID_CONFIG`. For a local development server only.
    */
   remoteSyncAllowHttp?: boolean;
+  /**
+   * What each record in the `remoteSyncUrl` upload carries. Default
+   * `'totals'`: `{ date, steps, distance, calories }`, the shape every
+   * earlier release sent, so existing endpoints keep working. `'full'` adds
+   * this device's own `deviceSteps` and `recoveredSteps`, the `stepSource`
+   * the policy resolved to, and the unresolved Health Connect `sources` for
+   * the day (read at upload time; `[]` when reads are not permitted). Every
+   * upload also carries an `Idempotency-Key` header, whichever shape.
+   */
+  remoteSyncPayload?: 'totals' | 'full';
   /** Restart tracking automatically after device reboot. Default true. */
   autoStartOnBoot?: boolean;
   /**

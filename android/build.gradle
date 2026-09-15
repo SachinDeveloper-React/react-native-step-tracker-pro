@@ -135,6 +135,10 @@ dependencies {
     implementation "androidx.health.connect:connect-client:$healthConnectVersion"
 
     testImplementation "junit:junit:4.13.2"
+    // The SDK's org.json is a stub on the JVM (every method throws); the
+    // real library stands in so the remote payload shape can be pinned by a
+    // unit test instead of a device run.
+    testImplementation "org.json:json:20240303"
 
     androidTestImplementation "androidx.test:core-ktx:1.6.1"
     androidTestImplementation "androidx.test:runner:1.6.2"

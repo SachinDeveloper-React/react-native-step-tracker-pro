@@ -705,6 +705,81 @@ network.
 
 Days written locally but not yet mirrored. Non-zero offline is normal.
 
+### Remote sync
+
+With `remoteSyncUrl` set, a WorkManager job POSTs every day not yet uploaded
+(`syncedRemote: false`) once an hour when a network is available, with
+exponential backoff, and marks them uploaded on any 2xx. `syncNow()` queues
+the same job immediately. The URL must be `https://` unless
+`remoteSyncAllowHttp` is set; `remoteSyncHeaders` go on every request.
+
+**Every request carries an `Idempotency-Key` header**: a SHA-256 hex digest of
+the app's package name and each record's `date` and `steps`, sorted by date.
+WorkManager retries a failed batch verbatim, and `syncNow()` can queue the
+same pending rows the periodic job is about to send, so a server may see one
+batch twice; two requests with the same key carry the same numbers and the
+second can be treated as a retry. A day whose count has grown since — a
+`historyBackfilled` recovery — produces a new key, because it is new content.
+Distance, calories and the recovered share are derived from or a split of
+the same count and do not change the key. Set the header yourself in
+`remoteSyncHeaders` to override it.
+
+`remoteSyncPayload: 'totals'` (default) sends the shape every earlier release
+sent, byte for byte:
+
+```json
+{
+  "source": "react-native-step-tracker-pro",
+  "sentAt": 1757845200000,
+  "records": [
+    { "date": "2026-09-13", "steps": 11204, "distance": 7887.6, "calories": 336.4 }
+  ]
+}
+```
+
+`remoteSyncPayload: 'full'` keeps those fields and adds, per record, what a
+server that never trusts a single number needs:
+
+```json
+{
+  "source": "react-native-step-tracker-pro",
+  "sentAt": 1757845200000,
+  "records": [
+    {
+      "date": "2026-09-13",
+      "steps": 11204,
+      "distance": 7887.6,
+      "calories": 336.4,
+      "deviceSteps": 11204,
+      "recoveredSteps": 200,
+      "stepSource": {
+        "date": "2026-09-13", "steps": 12000, "kind": "watch",
+        "packageName": "com.fitbit.FitbitMobile", "appName": "Fitbit",
+        "deviceSteps": 11204, "externalSteps": 12000, "usedExternal": true,
+        "merged": false, "baselineSteps": 0, "manualStepsExcluded": 0
+      },
+      "sources": [
+        { "packageName": "com.fitbit.FitbitMobile", "appName": "Fitbit", "kind": "watch",
+          "steps": 12000, "distance": 8900, "calories": 0, "lastRecordAt": 1757800000000,
+          "isSelf": false, "isWearable": true, "trustedWearable": true, "isPlatform": false,
+          "manualSteps": 0, "unknownMethodSteps": 0,
+          "recordingMethods": { "active": 0, "automatic": 12000, "manual": 0, "unknown": 0 } },
+        { "packageName": "com.example.app", "appName": "com.example.app", "kind": "self",
+          "steps": 11204, "isSelf": true, "isWearable": false, "trustedWearable": false, "..." : "..." }
+      ]
+    }
+  ]
+}
+```
+
+`steps` and `deviceSteps` are the same number — the stored row is always this
+device's own count, whatever the policy showed the user; `stepSource` is what
+it showed. `sources` is read from Health Connect at upload time and is `[]`
+when reads are not permitted, the provider is missing or `stepSource` is
+`'device'`; `stepSource` is then this device's. Each pending day costs one
+bounded, cached Health Connect read under `'full'`; pending is normally the
+handful of days since the last successful upload.
+
 ---
 
 ## Events
@@ -771,6 +846,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `remoteSyncUrl` | — | optional endpoint for unsynced days; must be `https://` |
 | `remoteSyncHeaders` | `{}` | e.g. auth headers; stored in the clear, use short-lived tokens |
 | `remoteSyncAllowHttp` | `false` | permit a plain `http://` endpoint, for a development server |
+| `remoteSyncPayload` | `'totals'` | `'totals'` \| `'full'` — what each uploaded record carries; see [Remote sync](#remote-sync) |
 | `autoStartOnBoot` | `true` | |
 | `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, `'today_capped'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery). For an app where a closed day must never change, `'today_capped'` or `'drop'` |
 | `gapRecoveryMaxSteps` | 20000 | under `'today_capped'`, the most one recovery may credit to the active day; the rest is dropped |

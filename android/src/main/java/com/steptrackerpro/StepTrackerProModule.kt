@@ -866,6 +866,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 current.remoteSyncHeaders
             },
             remoteSyncAllowHttp = patch.optBoolean("remoteSyncAllowHttp", current.remoteSyncAllowHttp),
+            remoteSyncPayload = patch.optString("remoteSyncPayload", current.remoteSyncPayload)
+                ?: current.remoteSyncPayload,
             autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot),
             gapRecovery = patch.optString("gapRecovery", current.gapRecovery) ?: current.gapRecovery,
             gapRecoveryMaxSteps = patch.optInt("gapRecoveryMaxSteps", current.gapRecoveryMaxSteps),
@@ -906,6 +908,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
         "remoteSyncAllowHttp" to config.remoteSyncAllowHttp,
+        "remoteSyncPayload" to config.remoteSyncPayload,
         "autoStartOnBoot" to config.autoStartOnBoot,
         "gapRecovery" to config.gapRecovery,
         "gapRecoveryMaxSteps" to config.gapRecoveryMaxSteps,

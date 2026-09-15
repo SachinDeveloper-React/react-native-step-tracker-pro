@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectIgnoreManualEntries'
     | 'stepSource'
     | 'wearableTrust'
+    | 'remoteSyncPayload'
     | 'autoStartOnBoot'
     | 'gapRecovery'
     | 'gapRecoveryMaxSteps'
@@ -52,6 +53,7 @@ export const DEFAULT_CONFIG: Required<
   healthConnectIgnoreManualEntries: false,
   stepSource: 'auto',
   wearableTrust: 'metadata',
+  remoteSyncPayload: 'totals',
   autoStartOnBoot: true,
   gapRecovery: 'split',
   gapRecoveryMaxSteps: 20000,

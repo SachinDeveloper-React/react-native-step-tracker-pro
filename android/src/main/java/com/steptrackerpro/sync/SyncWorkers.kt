@@ -10,8 +10,6 @@ import com.steptrackerpro.util.StepEventBus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -85,8 +83,26 @@ class RemoteSyncWorker(
         val pending = core.repository.unsynced(SyncTarget.REMOTE, limit = 200)
         if (pending.isEmpty()) return Result.success()
 
+        // The full shape reads Health Connect once per pending day, at upload
+        // time, so the server sees the origins as they stood when the batch
+        // was built. Pending is normally the handful of days since the last
+        // successful upload; each read is bounded and cached by the core.
+        val shape = RemotePayload.Shape.from(config.remoteSyncPayload)
+        val details = if (shape == RemotePayload.Shape.FULL) {
+            pending.associate { day ->
+                day.date to RemotePayload.DayDetail(
+                    stepSource = runCatching { core.resolveDay(day.date).toMap() }
+                        .getOrDefault(emptyMap()),
+                    sources = runCatching { core.unresolvedSources(day.date).map { it.toMap() } }
+                        .getOrDefault(emptyList())
+                )
+            }
+        } else {
+            emptyMap()
+        }
+
         val ok = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-            post(url, config.remoteSyncHeaders, pending)
+            post(url, config.remoteSyncHeaders, pending, shape, details)
         } ?: false
 
         if (ok) {
@@ -121,29 +137,13 @@ class RemoteSyncWorker(
     private suspend fun post(
         url: String,
         headers: Map<String, String>,
-        records: List<DayTotals>
+        records: List<DayTotals>,
+        shape: RemotePayload.Shape,
+        details: Map<String, RemotePayload.DayDetail>
     ): Boolean = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            val body = JSONObject().apply {
-                put("source", "react-native-step-tracker-pro")
-                put("sentAt", System.currentTimeMillis())
-                put(
-                    "records",
-                    JSONArray().apply {
-                        records.forEach { record ->
-                            put(
-                                JSONObject().apply {
-                                    put("date", record.date)
-                                    put("steps", record.steps)
-                                    put("distance", record.distance)
-                                    put("calories", record.calories)
-                                }
-                            )
-                        }
-                    }
-                )
-            }.toString()
+            val body = RemotePayload.body(records, shape, System.currentTimeMillis(), details).toString()
 
             connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -151,6 +151,12 @@ class RemoteSyncWorker(
                 readTimeout = 15_000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                // Set before the app's own headers, so an app that wants to
+                // name the key itself can still override it.
+                setRequestProperty(
+                    RemotePayload.IDEMPOTENCY_HEADER,
+                    RemotePayload.idempotencyKey(applicationContext.packageName, records)
+                )
                 headers.forEach { (key, value) -> setRequestProperty(key, value) }
             }
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }

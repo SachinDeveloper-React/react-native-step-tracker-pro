@@ -91,6 +91,13 @@ data class StepTrackerConfig(
      * app has opted in - for a local development server, say.
      */
     val remoteSyncAllowHttp: Boolean = false,
+    /**
+     * One of [com.steptrackerpro.sync.RemotePayload.Shape]'s `jsValue`s.
+     * `totals` (default) is the record shape every earlier release sent;
+     * `full` adds this device's own count, the recovered share, the resolved
+     * source and the unresolved Health Connect origins per record.
+     */
+    val remoteSyncPayload: String = "totals",
     val autoStartOnBoot: Boolean = true,
     /**
      * What to do with steps the hardware counted while the service was dead
@@ -162,6 +169,7 @@ data class StepTrackerConfig(
         wearableTrust = com.steptrackerpro.health.WearableTrust.from(wearableTrust).jsValue,
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
+        remoteSyncPayload = com.steptrackerpro.sync.RemotePayload.Shape.from(remoteSyncPayload).jsValue,
         gapRecovery = StepCounterEngine.GapRecovery.from(gapRecovery).jsValue,
         gapRecoveryMaxSteps = gapRecoveryMaxSteps.coerceAtLeast(0),
         accelerometerThreshold = if (accelerometerThreshold.isFinite()) {
@@ -204,6 +212,7 @@ data class StepTrackerConfig(
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
         put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
         put("remoteSyncAllowHttp", remoteSyncAllowHttp)
+        put("remoteSyncPayload", remoteSyncPayload)
         put("autoStartOnBoot", autoStartOnBoot)
         put("gapRecovery", gapRecovery)
         put("gapRecoveryMaxSteps", gapRecoveryMaxSteps)
@@ -284,6 +293,7 @@ data class StepTrackerConfig(
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,
                 remoteSyncAllowHttp = json.optBoolean("remoteSyncAllowHttp", fallback.remoteSyncAllowHttp),
+                remoteSyncPayload = json.optString("remoteSyncPayload", fallback.remoteSyncPayload),
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot),
                 gapRecovery = json.optString("gapRecovery", fallback.gapRecovery),
                 gapRecoveryMaxSteps = json.optInt("gapRecoveryMaxSteps", fallback.gapRecoveryMaxSteps),
