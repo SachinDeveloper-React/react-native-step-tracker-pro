@@ -280,10 +280,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **1.3.0** — live continuity
-between Health Connect and the phone's sensor, gap recovery for steps counted
-while the service was dead, OEM watchdog and background-restriction helpers,
-config-scoped Health Connect permissions, and the usage-mode guides.
+[CHANGELOG.md](CHANGELOG.md). Latest release **1.4.0** — the release for
+apps that pay for steps: Health Connect recording method per source with
+manual entries excludable from the resolved number, opt-in strict wearable
+trust under `auto`, auditable gap recovery (`recoveredSteps`,
+`historyBackfilled`, `today_capped`), one verification snapshot for
+server-side ingest, an idempotent and optionally richer remote upload, and
+opt-in motion signature windows. Nothing changes for a consumer who sets
+none of it.
 
 ## Licence
 

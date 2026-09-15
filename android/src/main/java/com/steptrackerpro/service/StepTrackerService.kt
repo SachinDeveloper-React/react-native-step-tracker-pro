@@ -19,6 +19,7 @@ import android.util.Log
 import com.steptrackerpro.core.AccelerometerStepDetector
 import com.steptrackerpro.core.MotionWindowSampler
 import com.steptrackerpro.core.SensorSource
+import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
 import com.steptrackerpro.sync.SyncScheduler
@@ -509,7 +510,7 @@ class StepTrackerService : Service(), SensorEventListener {
      * a phone the user has not exempted is exactly the kind of cost Doze
      * exists to stop, so it is not taken.
      */
-    private fun maybeOpenMotionWindow(config: com.steptrackerpro.core.StepTrackerConfig) {
+    private fun maybeOpenMotionWindow(config: StepTrackerConfig) {
         if (motionSampler != null) return
         if (!listening || core.engine.paused) return
         val sensor = accelerometerSensor ?: return
