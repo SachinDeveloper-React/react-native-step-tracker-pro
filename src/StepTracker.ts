@@ -178,6 +178,20 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
       'accelerometerThreshold must be 0.3–10 m/s²'
     );
   }
+  if (
+    config.wearableAllowlist != null &&
+    (!Array.isArray(config.wearableAllowlist) ||
+      config.wearableAllowlist.some(
+        (pkg) => typeof pkg !== 'string' || pkg.trim() === ''
+      ))
+  ) {
+    // Native reads the array with getString(); a non-string entry would
+    // reject from the bridge as E_UNKNOWN rather than as bad config.
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'wearableAllowlist must be an array of package names'
+    );
+  }
   const motion = config.motionSampling;
   if (motion != null) {
     // The sampler holds a minute at 50 Hz and does not resample, and an

@@ -124,7 +124,10 @@ events, the same remote payload. Everything is opt-in or additive.
   `[]` when reads are not permitted.
 - The body and the key moved into `RemotePayload`, pure and JVM-tested: same
   records → same key, one step changed → different key, and the default body
-  has exactly the four fields it had in 1.3.
+  has exactly the four fields it had in 1.3. A day whose Health Connect read
+  failed uploads as this device's own with no origins, never with an empty
+  `stepSource`; and the per-day reads for `'full'` are bounded as a whole,
+  so a hanging provider cannot outlast the worker.
 
 #### Motion signature windows (opt-in)
 

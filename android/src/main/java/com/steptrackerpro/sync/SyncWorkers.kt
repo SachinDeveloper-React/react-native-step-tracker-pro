@@ -7,6 +7,7 @@ import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.util.StepEventBus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -86,19 +87,23 @@ class RemoteSyncWorker(
         // The full shape reads Health Connect once per pending day, at upload
         // time, so the server sees the origins as they stood when the batch
         // was built. Pending is normally the handful of days since the last
-        // successful upload; each read is bounded and cached by the core.
+        // successful upload and each read is bounded and cached by the core,
+        // but a provider that is hanging times out per read, and two hundred
+        // of those would outlast the worker's own budget - so the whole pass
+        // is bounded too, and a day it did not reach uploads as this device's
+        // own with no origins, exactly as a day whose read was not permitted.
         val shape = RemotePayload.Shape.from(config.remoteSyncPayload)
-        val details = if (shape == RemotePayload.Shape.FULL) {
-            pending.associate { day ->
-                day.date to RemotePayload.DayDetail(
-                    stepSource = runCatching { core.resolveDay(day.date).toMap() }
-                        .getOrDefault(emptyMap()),
-                    sources = runCatching { core.unresolvedSources(day.date).map { it.toMap() } }
-                        .getOrDefault(emptyList())
-                )
+        val details = HashMap<String, RemotePayload.DayDetail>()
+        if (shape == RemotePayload.Shape.FULL) {
+            withTimeoutOrNull(DETAIL_TIMEOUT_MS) {
+                for (day in pending) {
+                    details[day.date] = RemotePayload.DayDetail(
+                        stepSource = detailOrNull { core.resolveDay(day.date).toMap() } ?: emptyMap(),
+                        sources = detailOrNull { core.unresolvedSources(day.date).map { it.toMap() } }
+                            ?: emptyList()
+                    )
+                }
             }
-        } else {
-            emptyMap()
         }
 
         val ok = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
@@ -132,6 +137,19 @@ class RemoteSyncWorker(
         // As above: failure() would retire the periodic work permanently, so an
         // endpoint that is down for a day would never be retried again.
         return if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.success()
+    }
+
+    /**
+     * A failed read of one day is that day's problem, not the batch's - but a
+     * cancellation is the timeout above ending the pass, and swallowing it
+     * would have the loop spin through every remaining day instead of stopping.
+     */
+    private inline fun <T> detailOrNull(block: () -> T): T? = try {
+        block()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        null
     }
 
     private suspend fun post(
@@ -176,6 +194,9 @@ class RemoteSyncWorker(
         const val NAME = "stp_remote_sync"
         private const val MAX_ATTEMPTS = 5
         private const val REQUEST_TIMEOUT_MS = 45_000L
+
+        /** Most of the worker's budget the `full` shape may spend reading Health Connect. */
+        private const val DETAIL_TIMEOUT_MS = 120_000L
     }
 }
 

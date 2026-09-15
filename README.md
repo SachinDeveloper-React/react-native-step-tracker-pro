@@ -261,7 +261,7 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Fifty-one Jest tests cover config validation and the flows in the JS
+Fifty-four Jest tests cover config validation and the flows in the JS
 layer. Ninety-two JVM tests cover step-source resolution, the `auto` merge
 and its coverage rule, manual-entry exclusion and wearable trust, gap
 splitting under all four policies, the accelerometer pedometer against

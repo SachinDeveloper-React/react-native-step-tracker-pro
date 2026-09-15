@@ -120,8 +120,11 @@ export default function App() {
   }, []);
 
   // What a server would be sent for today: the phone's own count, every
-  // Health Connect origin unresolved, and what the policy chose. Re-read
-  // with the snapshot so the manual and recovered figures track the count.
+  // Health Connect origin unresolved, and what the policy chose. Read on
+  // the same cadence as tracking health - foreground, date and state
+  // changes - not per step: it costs a Health Connect read and a battery
+  // status IPC, and the manual figure it feeds only moves when another app
+  // syncs. The recovered figure comes live off the snapshot regardless.
   const refreshVerification = useCallback(() => {
     if (!isSupported() || !snapshot?.date) return;
     StepTracker.getVerificationSnapshot(snapshot.date)
@@ -131,7 +134,11 @@ export default function App() {
 
   useEffect(() => {
     refreshVerification();
-  }, [refreshVerification, snapshot?.steps]);
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshVerification();
+    });
+    return () => sub.remove();
+  }, [refreshVerification, state]);
 
   useEffect(() => {
     refreshHealth();

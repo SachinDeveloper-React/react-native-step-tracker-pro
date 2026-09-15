@@ -110,20 +110,28 @@ class StepTrackerService : Service(), SensorEventListener {
     //
     // All of this state lives on the sensor thread: the tick, the samples and
     // the close all run there, and the main-thread paths (pause, config,
-    // stop) post to it rather than touching it.
+    // stop) post to it rather than touching it. The one exception is
+    // unregisterSensors(), which drops an open window from whichever thread
+    // is tearing the listener down; the fields are volatile for that, and
+    // a close racing a close is harmless - the second finds no sampler.
 
     /** The window being filled, or null between windows. */
     @Volatile
     private var motionSampler: MotionWindowSampler? = null
 
     /** `stepsToday` when the open window started, for `stepsDuringWindow`. */
+    @Volatile
     private var motionStepsAtOpen = 0
 
     /** `stepsToday` and date when the last window closed: no new steps, no new window. */
+    @Volatile
     private var motionLastSteps = -1
+
+    @Volatile
     private var motionLastDate: String? = null
 
     /** Held only while a window is open on a non-wake-up accelerometer; timed, so it cannot leak. */
+    @Volatile
     private var motionWakeLock: PowerManager.WakeLock? = null
 
     private val motionTick = object : Runnable {
@@ -567,7 +575,9 @@ class StepTrackerService : Service(), SensorEventListener {
         // A rollover inside the window makes the difference negative; that
         // window's step count is simply unknown, and 0 is the honest floor.
         val features = sampler.features((steps - motionStepsAtOpen).coerceAtLeast(0))
-        if (features.sampleCount < MotionWindowSampler.MIN_SAMPLES) return
+        // Too few samples, or timestamps that never advanced (a HAL quirk),
+        // is no signature at all - not an all-zero one.
+        if (features.sampleCount < MotionWindowSampler.MIN_SAMPLES || features.durationMs <= 0L) return
         core.recordMotionWindow(features)
     }
 

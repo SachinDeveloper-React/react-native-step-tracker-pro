@@ -65,7 +65,8 @@ object RemotePayload {
 
     /**
      * @param details per-date detail for the `full` shape; a record with no
-     *   entry gets `stepSource` of this device and `sources: []`, which is
+     *   entry, or one whose resolution came back empty because the read
+     *   failed, gets `stepSource` of this device and `sources: []`, which is
      *   what a read that was not permitted looks like.
      */
     fun body(
@@ -92,7 +93,9 @@ object RemotePayload {
                                 put("deviceSteps", record.steps)
                                 put("recoveredSteps", record.recoveredSteps)
                                 val detail = details[record.date]
-                                put("stepSource", JSONObject(detail?.stepSource ?: deviceOnly(record)))
+                                val stepSource = detail?.stepSource?.takeIf { it.isNotEmpty() }
+                                    ?: deviceOnly(record)
+                                put("stepSource", JSONObject(stepSource))
                                 put(
                                     "sources",
                                     JSONArray().apply {

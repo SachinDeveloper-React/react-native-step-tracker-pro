@@ -116,7 +116,15 @@ class RemotePayloadTest {
         assertTrue(second.getJSONArray("sources").getJSONObject(1).getBoolean("isSelf"))
 
         // A day with no detail - Health Connect not readable - is this
-        // device's own, with no origins, rather than missing fields.
+        // device's own, with no origins, rather than missing fields. So is
+        // one whose resolution came back empty because the read failed.
+        val failed = RemotePayload.body(
+            batch, RemotePayload.Shape.FULL, 1L,
+            mapOf("2026-09-12" to RemotePayload.DayDetail(emptyMap(), emptyList()))
+        ).getJSONArray("records").getJSONObject(0)
+        assertEquals("self", failed.getJSONObject("stepSource").getString("kind"))
+        assertEquals(8_000, failed.getJSONObject("stepSource").getInt("steps"))
+
         val first = records.getJSONObject(0)
         assertEquals(0, first.getJSONArray("sources").length())
         assertEquals("self", first.getJSONObject("stepSource").getString("kind"))

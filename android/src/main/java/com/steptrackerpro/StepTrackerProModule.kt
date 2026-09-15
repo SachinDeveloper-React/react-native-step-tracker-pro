@@ -643,7 +643,11 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                                 "distance" to day.distance,
                                 "calories" to day.calories,
                                 "synced" to true,
-                                "syncedRemote" to false
+                                "syncedRemote" to false,
+                                // An aggregate of other apps' records has no
+                                // recovered share; the field is there so the
+                                // row is a DayRecord like every other.
+                                "recoveredSteps" to 0
                             )
                         }
                     )

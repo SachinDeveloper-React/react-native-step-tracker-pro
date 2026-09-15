@@ -121,6 +121,11 @@ describe('initialize()', () => {
     [{ motionSampling: { enabled: true, windowSeconds: 61 } }, /windowSeconds/],
     [{ motionSampling: { enabled: true, intervalMinutes: 0 } }, /intervalMinutes/],
     [{ motionWindowRetention: 0 }, /motionWindowRetention/],
+    [{ wearableAllowlist: ['com.example.band', ''] }, /wearableAllowlist/],
+    [
+      { wearableAllowlist: 'com.example.band' as unknown as string[] },
+      /wearableAllowlist/,
+    ],
     [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
     [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
     [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
@@ -139,6 +144,18 @@ describe('initialize()', () => {
       remoteSyncAllowHttp: true,
     });
     expect(native.calledWith('initialize')).toHaveLength(1);
+  });
+
+  it('passes wearableTrust and an allowlist through untouched', async () => {
+    await StepTracker.initialize({
+      wearableTrust: 'catalog',
+      wearableAllowlist: ['com.example.band'],
+    });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      wearableTrust: 'catalog',
+      wearableAllowlist: ['com.example.band'],
+    });
+    expect(DEFAULT_CONFIG.wearableTrust).toBe('metadata');
   });
 
   it('passes today_capped and its cap through untouched', async () => {
