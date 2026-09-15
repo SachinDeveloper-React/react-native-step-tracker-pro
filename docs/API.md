@@ -110,7 +110,9 @@ climbing is the cue to show the OEM battery guidance; see
   goalReached: false,
   state: 'running',
   source: 'step_counter',
-  timestamp: 1757145600000
+  timestamp: 1757145600000,
+  recoveredSteps: 0,     // of this device's count, credited by gap recovery
+  stepSource: { /* ResolvedStepSource, see Step sources */ }
 }
 ```
 
@@ -129,8 +131,18 @@ Health Connect round trip.
 `date` is `yyyy-MM-dd` in the device timezone.
 
 ```ts
-{ date: '2026-09-05', steps: 11204, distance: 7887.6, calories: 336.4, synced: true }
+{ date: '2026-09-05', steps: 11204, distance: 7887.6, calories: 336.4, synced: true,
+  syncedRemote: false, recoveredSteps: 200 }
 ```
+
+`recoveredSteps` is how many of this device's steps for the day were
+credited in one go by [gap recovery](ARCHITECTURE.md#gap-recovery) — the
+share of an overnight kill apportioned to the day, a reboot's since-boot
+steps, an install's since-boot claim — rather than observed sample by sample.
+An apportionment is an estimate, so a server judging the day wants it
+separately. It grows when a past day is backfilled (`historyBackfilled`), is
+`0` for a day counted live and for every day stored before 1.4.0, and never
+includes anything from Health Connect. Also on `StepSnapshot`.
 
 ### `getWeeklyStats(options?)` / `getMonthlyStats(options?)` / `getYearlyStats(options?)`
 
@@ -634,6 +646,7 @@ StepTracker.removeListener();              // everything
 | `stepSourceChanged` | `ResolvedStepSource`. Fires when the app answering for the user's steps flips — a watch coming into range mid-morning, or a pin being changed. |
 | `healthConnectStatusChanged` | `HealthConnectStatus`. Fires after a permission request, a revoke, and on every foreground where the status moved — which is how you notice the user granting or revoking from outside the app. |
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
+| `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it. Once per affected day, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
 | `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
 
@@ -679,7 +692,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `remoteSyncHeaders` | `{}` | e.g. auth headers; stored in the clear, use short-lived tokens |
 | `remoteSyncAllowHttp` | `false` | permit a plain `http://` endpoint, for a development server |
 | `autoStartOnBoot` | `true` | |
-| `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery) |
+| `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, `'today_capped'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery). For an app where a closed day must never change, `'today_capped'` or `'drop'` |
+| `gapRecoveryMaxSteps` | 20000 | under `'today_capped'`, the most one recovery may credit to the active day; the rest is dropped |
 | `watchdogEnabled` | `true` | 15-minute WorkManager job that restarts a killed service (needs the battery exemption on Android 12+) |
 | `accelerometerFallback` | `true` | count over the accelerometer on phones with neither step sensor — see [ARCHITECTURE.md](ARCHITECTURE.md#the-accelerometer-fallback) |
 | `accelerometerWakeLock` | `true` | hold a partial wake lock while sampling a non-wake-up accelerometer, so counting survives the screen going off |

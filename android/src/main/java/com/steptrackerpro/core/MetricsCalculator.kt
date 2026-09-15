@@ -26,8 +26,13 @@ class MetricsCalculator(@Volatile var config: StepTrackerConfig) {
         return config.calorieCoefficient * config.weightKg * km
     }
 
-    fun totals(date: String, steps: Int, synced: Boolean = false): DayTotals =
-        DayTotals(date, steps, distance(steps), calories(steps), synced)
+    fun totals(
+        date: String,
+        steps: Int,
+        synced: Boolean = false,
+        recoveredSteps: Int = 0
+    ): DayTotals =
+        DayTotals(date, steps, distance(steps), calories(steps), synced, recoveredSteps = recoveredSteps)
 
     fun goalProgress(steps: Int, goal: Int): Double {
         if (goal <= 0) return 0.0

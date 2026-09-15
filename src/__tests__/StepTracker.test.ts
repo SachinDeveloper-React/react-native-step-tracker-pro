@@ -116,6 +116,8 @@ describe('initialize()', () => {
     [{ historyRetentionDays: 0 }, /historyRetentionDays/],
     [{ strideLength: 0 }, /strideLength/],
     [{ accelerometerThreshold: 0.1 }, /accelerometerThreshold/],
+    [{ gapRecoveryMaxSteps: -1 }, /gapRecoveryMaxSteps/],
+    [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
     [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
     [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
     [{ privacyPolicyUrl: 'intent://evil' }, /privacyPolicyUrl/],
@@ -133,6 +135,15 @@ describe('initialize()', () => {
       remoteSyncAllowHttp: true,
     });
     expect(native.calledWith('initialize')).toHaveLength(1);
+  });
+
+  it('passes today_capped and its cap through untouched', async () => {
+    await StepTracker.initialize({ gapRecovery: 'today_capped', gapRecoveryMaxSteps: 0 });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      gapRecovery: 'today_capped',
+      gapRecoveryMaxSteps: 0,
+    });
+    expect(DEFAULT_CONFIG.gapRecoveryMaxSteps).toBe(20000);
   });
 
   it('round-trips healthConnectIgnoreManualEntries through initialize() and getConfig()', async () => {
@@ -312,9 +323,25 @@ describe('events', () => {
   it('removeListener() with no argument clears every event', () => {
     StepTracker.addListener('goalReached', () => {});
     StepTracker.addListener('dayChanged', () => {});
+    StepTracker.addListener('historyBackfilled', () => {});
     StepTracker.removeListener();
     expect(__listenerCount('StepTrackerPro:goalReached')).toBe(0);
     expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(0);
+    expect(__listenerCount('StepTrackerPro:historyBackfilled')).toBe(0);
+  });
+
+  it('delivers historyBackfilled with its payload', () => {
+    const seen: unknown[] = [];
+    StepTracker.addListener('historyBackfilled', (p) => seen.push(p));
+    __emit('StepTrackerPro:historyBackfilled', {
+      date: '2026-09-13',
+      addedSteps: 200,
+      totalSteps: 4200,
+      reason: 'gap',
+    });
+    expect(seen).toEqual([
+      { date: '2026-09-13', addedSteps: 200, totalSteps: 4200, reason: 'gap' },
+    ]);
   });
 });
 

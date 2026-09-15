@@ -94,10 +94,16 @@ data class StepTrackerConfig(
     val autoStartOnBoot: Boolean = true,
     /**
      * What to do with steps the hardware counted while the service was dead
-     * and the gap crossed midnight. One of `split` (default), `today`, `drop`.
-     * See [StepCounterEngine.GapRecovery].
+     * and the gap crossed midnight. One of `split` (default), `today`,
+     * `today_capped`, `drop`. See [StepCounterEngine.GapRecovery].
      */
     val gapRecovery: String = "split",
+    /**
+     * Under `today_capped`, the most one recovery may credit to the active
+     * day; the rest is dropped. A closed day never changes and one day can
+     * never be handed a week of counter.
+     */
+    val gapRecoveryMaxSteps: Int = StepCounterEngine.DEFAULT_GAP_RECOVERY_MAX_STEPS,
     /**
      * Re-launch the service from a periodic WorkManager job when it is found
      * dead while tracking is supposed to be on. Needed on OEM skins that kill
@@ -157,6 +163,7 @@ data class StepTrackerConfig(
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
         gapRecovery = StepCounterEngine.GapRecovery.from(gapRecovery).jsValue,
+        gapRecoveryMaxSteps = gapRecoveryMaxSteps.coerceAtLeast(0),
         accelerometerThreshold = if (accelerometerThreshold.isFinite()) {
             accelerometerThreshold.coerceIn(0.3, 10.0)
         } else {
@@ -199,6 +206,7 @@ data class StepTrackerConfig(
         put("remoteSyncAllowHttp", remoteSyncAllowHttp)
         put("autoStartOnBoot", autoStartOnBoot)
         put("gapRecovery", gapRecovery)
+        put("gapRecoveryMaxSteps", gapRecoveryMaxSteps)
         put("watchdogEnabled", watchdogEnabled)
         put("accelerometerFallback", accelerometerFallback)
         put("accelerometerWakeLock", accelerometerWakeLock)
@@ -278,6 +286,7 @@ data class StepTrackerConfig(
                 remoteSyncAllowHttp = json.optBoolean("remoteSyncAllowHttp", fallback.remoteSyncAllowHttp),
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot),
                 gapRecovery = json.optString("gapRecovery", fallback.gapRecovery),
+                gapRecoveryMaxSteps = json.optInt("gapRecoveryMaxSteps", fallback.gapRecoveryMaxSteps),
                 watchdogEnabled = json.optBoolean("watchdogEnabled", fallback.watchdogEnabled),
                 accelerometerFallback = json.optBoolean(
                     "accelerometerFallback", fallback.accelerometerFallback

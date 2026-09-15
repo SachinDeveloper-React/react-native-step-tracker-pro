@@ -150,6 +150,15 @@ export interface StepTrackerConfig {
    */
   gapRecovery?: GapRecovery;
   /**
+   * Under `gapRecovery: 'today_capped'`, the most one recovery may credit to
+   * the active day; whatever is over it is dropped, not moved. Default
+   * 20000 — twice a very active day. A genuine overnight gap on a phone that
+   * kills services is a few thousand steps; tens of thousands after a long
+   * dead period is a counter glitch or a week of walking that cannot
+   * honestly be given to one day.
+   */
+  gapRecoveryMaxSteps?: number;
+  /**
    * Re-launch the service from a 15-minute WorkManager job when an OEM task
    * killer has removed it. Default true. Needs the battery-optimisation
    * exemption on Android 12+ to actually succeed from the background; the
@@ -189,13 +198,23 @@ export interface StepTrackerConfig {
  *
  * - `'split'` (default) spreads them across the days in the gap in proportion
  *   to time. A service killed at 23:00 and revived at 09:00 gives one tenth
- *   to yesterday and the rest to today.
- * - `'today'` credits all of them to the current day.
- * - `'drop'` discards whatever cannot be placed on the current day. The
- *   choice for an app where step counts have monetary value and an
- *   over-credit is worse than a loss.
+ *   to yesterday and the rest to today. **Yesterday's stored total grows
+ *   after the fact**, announced by `historyBackfilled`.
+ * - `'today'` credits all of them to the current day. Closed days never
+ *   change, but one day can be handed everything since the last reading.
+ * - `'today_capped'` is `'today'` bounded by `gapRecoveryMaxSteps` (default
+ *   20,000); the rest is dropped. Closed days never change, and a counter
+ *   glitch after a week-long kill cannot mint 100,000 steps on one day.
+ * - `'drop'` discards whatever cannot be placed on the current day.
+ *
+ * For an app where a day must never change once it has been settled — paid
+ * for, uploaded, shown on a leaderboard — use `'today_capped'` or `'drop'`.
+ * Both leave closed days alone; `'drop'` also refuses the current day
+ * anything from a gap that started on another one. Under either, the share
+ * a day did receive is reported as `recoveredSteps`, so a server can weigh
+ * it differently from steps observed live.
  */
-export type GapRecovery = 'split' | 'today' | 'drop';
+export type GapRecovery = 'split' | 'today' | 'today_capped' | 'drop';
 
 export interface StepSnapshot {
   /** yyyy-MM-dd in the device timezone. */
@@ -215,6 +234,13 @@ export interface StepSnapshot {
   source: SensorSource;
   /** Epoch ms of the last sensor sample. */
   timestamp: number;
+  /**
+   * Of this device's own count for the day, how many steps gap recovery
+   * credited in one go rather than observing sample by sample. See
+   * {@link DayRecord.recoveredSteps}. Never includes Health Connect, and
+   * unchanged when a Health Connect source supplied `steps`.
+   */
+  recoveredSteps: number;
   /** Which source the numbers above came from. */
   stepSource: ResolvedStepSource;
 }
@@ -228,6 +254,17 @@ export interface DayRecord {
   synced: boolean;
   /** Uploaded to `remoteSyncUrl`. Always false when no endpoint is configured. */
   syncedRemote: boolean;
+  /**
+   * Of this device's own count for the day, how many steps were credited in
+   * one go by gap recovery — the share of an overnight kill apportioned to
+   * the day, a reboot's since-boot steps, an install's since-boot claim —
+   * rather than observed sample by sample. An apportionment is an estimate,
+   * so a server judging the day wants it separately. Grows when a past day
+   * is backfilled (`historyBackfilled`); `0` for a day counted live, and for
+   * every day stored before 1.4.0, whose split was never recorded. Always
+   * this device's figure; Health Connect never contributes to it.
+   */
+  recoveredSteps: number;
   /**
    * Which source the numbers came from. Absent on records returned by
    * `getHistory()`, which reports the on-device rows verbatim.
@@ -640,12 +677,36 @@ export interface DayChangedEvent {
   previousDaySteps: number;
 }
 
+/**
+ * A past day's stored total grew after the fact: gap recovery placed steps
+ * on it — the part of an overnight kill that fell before midnight under
+ * `'split'`, or a reboot's since-boot steps spread from the boot instant.
+ * Fired once per affected day, after the write has committed, so an app that
+ * has already settled that day knows to look again. `dayChanged` is
+ * unrelated and unchanged. Never fires under `'today'`, `'today_capped'` or
+ * `'drop'`, which leave closed days alone.
+ */
+export interface HistoryBackfilledEvent {
+  /** yyyy-MM-dd of the day that changed. Never the current day. */
+  date: string;
+  /** Steps added to it by this recovery. */
+  addedSteps: number;
+  /** Its stored total afterwards. */
+  totalSteps: number;
+  /**
+   * `'gap'` — nothing was listening between the last reading and this one.
+   * `'reboot'` — the counter restarted, and these are the steps since boot.
+   */
+  reason: 'gap' | 'reboot';
+}
+
 export interface StepTrackerEventMap {
   stepsChanged: StepsChangedEvent;
   goalReached: GoalReachedEvent;
   goalProgressChanged: GoalProgressEvent;
   trackingStateChanged: TrackingStateEvent;
   dayChanged: DayChangedEvent;
+  historyBackfilled: HistoryBackfilledEvent;
   syncCompleted: SyncEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;

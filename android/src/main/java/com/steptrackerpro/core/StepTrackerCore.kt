@@ -55,8 +55,9 @@ class StepTrackerCore private constructor(context: Context) {
 
     val engine = StepCounterEngine(state, metrics).apply {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
-        onBackfill = { shares -> handleBackfill(shares) }
+        onBackfill = { shares, reason -> handleBackfill(shares, reason) }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
+        gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
     }
 
     private val lastEventAt = AtomicLong(0L)
@@ -72,6 +73,7 @@ class StepTrackerCore private constructor(context: Context) {
         val saved = configStore.save(config)
         metrics.config = saved
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
+        engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
         // A different policy or pin changes what the baseline means, so it is
         // taken again from the next read rather than carried across. So does
         // the manual-entry rule: a baseline taken from a typed-in total would
@@ -263,15 +265,30 @@ class StepTrackerCore private constructor(context: Context) {
     /**
      * Steps the engine recovered for days other than the active one - the part
      * of an overnight gap that fell before midnight. Added on top of whatever
-     * those days already have, then re-queued for sync.
+     * those days already have, then re-queued for sync, and announced per day
+     * through `historyBackfilled` once the write has committed: an app that
+     * has already settled that day - paid for it, shown it, uploaded it -
+     * needs to know its number moved, and nothing else tells it.
      */
-    private fun handleBackfill(shares: Map<String, Int>) {
+    private fun handleBackfill(
+        shares: Map<String, Int>,
+        reason: StepCounterEngine.BackfillReason
+    ) {
         val retention = config().historyRetentionDays
         val cutoff = DateKeys.minusDays(DateKeys.today(), retention)
         scope.launch(writeLane) {
             shares.forEach { (date, steps) ->
                 if (date < cutoff || steps <= 0) return@forEach
-                repository.addToDay(date, steps, metrics)
+                val stored = repository.addToDay(date, steps, metrics) ?: return@forEach
+                StepEventBus.emit(
+                    StepEventBus.Events.HISTORY_BACKFILLED,
+                    mapOf(
+                        "date" to date,
+                        "addedSteps" to steps,
+                        "totalSteps" to stored.steps,
+                        "reason" to reason.jsValue
+                    )
+                )
             }
             sourceCache.invalidate()
         }
@@ -288,7 +305,8 @@ class StepTrackerCore private constructor(context: Context) {
             // already has steps against it. Restore them so the user does not
             // land to a counter reading zero halfway through their day.
             if (newDate < closing.date) {
-                engine.seedActiveDay(newDate, repository.getDay(newDate).steps)
+                val stored = repository.getDay(newDate)
+                engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps)
             }
             repository.prune(config().historyRetentionDays)
             StepEventBus.emit(
@@ -351,7 +369,8 @@ class StepTrackerCore private constructor(context: Context) {
             snapshot.steps,
             snapshot.distance,
             snapshot.calories,
-            false
+            false,
+            recoveredSteps = snapshot.recoveredSteps
         )
     }
 

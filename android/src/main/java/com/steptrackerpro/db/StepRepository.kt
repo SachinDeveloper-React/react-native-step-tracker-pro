@@ -24,13 +24,14 @@ class StepRepository(context: Context) {
      */
     suspend fun saveDay(totals: DayTotals) = db.withTransaction {
         history.upsert(totals.toEntity())
-        summaries.upsert(totals.toSummary())
+        summaries.upsertKeepingRecovered(totals.toSummary())
     }
 
     /**
      * Writes a day even when that lowers it. Only for deliberate, user-initiated
      * writes - `resetToday()` - where [saveDay]'s guard would silently keep the
      * old total and leave history disagreeing with the live counter forever.
+     * The recovered share is overwritten too: a reset day has recovered nothing.
      */
     suspend fun overwriteDay(totals: DayTotals) = db.withTransaction {
         history.replace(totals.toEntity())
@@ -41,29 +42,38 @@ class StepRepository(context: Context) {
      * Adds steps on top of a stored day - the backfill path for steps the
      * hardware counted while the process was dead and the gap crossed
      * midnight. Distance and calories are re-derived from the new total so
-     * the three stay consistent, and the row is re-queued for both syncs by
-     * [StepHistoryDao.update].
+     * the three stay consistent, the row is re-queued for both syncs by
+     * [StepHistoryDao.update], and the day's recovered share grows by the
+     * same amount so the row says how much of it was apportioned rather
+     * than observed.
+     *
+     * @return the day as stored afterwards, or null when nothing was added.
      */
-    suspend fun addToDay(date: String, steps: Int, metrics: MetricsCalculator) {
-        if (steps <= 0) return
-        db.withTransaction {
+    suspend fun addToDay(date: String, steps: Int, metrics: MetricsCalculator): DayTotals? {
+        if (steps <= 0) return null
+        return db.withTransaction {
             val existing = history.findByDate(date)
+            val recovered = (summaries.findByDate(date)?.recoveredSteps ?: 0) + steps
             val total = (existing?.steps ?: 0) + steps
-            val totals = metrics.totals(date, total)
+            val totals = metrics.totals(date, total, recoveredSteps = recovered)
             history.replace(totals.toEntity())
             summaries.upsert(totals.toSummary())
+            totals
         }
     }
 
     suspend fun getDay(date: String): DayTotals =
-        history.findByDate(date)?.toTotals()
+        history.findByDate(date)?.toTotals(summaries.findByDate(date))
             ?: DayTotals(date, 0, 0.0, 0.0, synced = true, syncedRemote = true)
 
     /** Zero-filled, ascending, inclusive of both ends. */
     suspend fun getRange(start: String, end: String): List<DayTotals> {
         val stored = history.findRange(start, end).associateBy { it.date }
+        // The recovered share lives on the summary row, written in the same
+        // transaction as the history row, so the two are read together.
+        val recovered = summaries.findRange(start, end).associateBy { it.date }
         return DateKeys.rangeOf(start, end).map { key ->
-            stored[key]?.toTotals()
+            stored[key]?.toTotals(recovered[key])
                 ?: DayTotals(key, 0, 0.0, 0.0, synced = true, syncedRemote = true)
         }
     }
@@ -117,10 +127,16 @@ class StepRepository(context: Context) {
 
     suspend fun sumSteps(start: String, end: String): Int = history.sumSteps(start, end)
 
-    suspend fun unsynced(target: SyncTarget, limit: Int = 100): List<DayTotals> = when (target) {
-        SyncTarget.HEALTH_CONNECT -> history.findUnsyncedHealth(limit)
-        SyncTarget.REMOTE -> history.findUnsyncedRemote(limit)
-    }.map { it.toTotals() }
+    suspend fun unsynced(target: SyncTarget, limit: Int = 100): List<DayTotals> {
+        val rows = when (target) {
+            SyncTarget.HEALTH_CONNECT -> history.findUnsyncedHealth(limit)
+            SyncTarget.REMOTE -> history.findUnsyncedRemote(limit)
+        }
+        if (rows.isEmpty()) return emptyList()
+        val recovered = summaries.findRange(rows.first().date, rows.last().date)
+            .associateBy { it.date }
+        return rows.map { it.toTotals(recovered[it.date]) }
+    }
 
     suspend fun countUnsynced(): Int = history.countUnsynced()
 
@@ -144,8 +160,13 @@ class StepRepository(context: Context) {
         summaries.deleteAll()
     }
 
-    private fun StepHistoryEntity.toTotals() =
-        DayTotals(date, steps, distance, calories, syncedHealth, syncedRemote)
+    private fun StepHistoryEntity.toTotals(summary: DailySummaryEntity?) =
+        DayTotals(
+            date, steps, distance, calories, syncedHealth, syncedRemote,
+            // Never more than the day has: a summary row is replaced whole,
+            // and a reset that lowered the total lowered this with it.
+            recoveredSteps = (summary?.recoveredSteps ?: 0).coerceIn(0, steps)
+        )
 
     private fun DayTotals.toEntity() = StepHistoryEntity(
         date = date,
@@ -160,6 +181,7 @@ class StepRepository(context: Context) {
         date = date,
         totalSteps = steps,
         totalDistance = distance,
-        totalCalories = calories
+        totalCalories = calories,
+        recoveredSteps = recoveredSteps
     )
 }

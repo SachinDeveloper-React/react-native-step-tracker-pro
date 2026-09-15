@@ -44,6 +44,7 @@ class StepCounterEngineTest {
     private var fakeNow: Long = 0L
     private val rollovers = mutableListOf<Pair<DayTotals, String>>()
     private val backfills = mutableListOf<Map<String, Int>>()
+    private val backfillReasons = mutableListOf<StepCounterEngine.BackfillReason>()
 
     private fun now() = fakeNow
 
@@ -70,6 +71,7 @@ class StepCounterEngineTest {
 
         rollovers.clear()
         backfills.clear()
+        backfillReasons.clear()
         engine = StepCounterEngine(
             state,
             MetricsCalculator(StepTrackerConfig()),
@@ -78,7 +80,10 @@ class StepCounterEngineTest {
             { fakeNow }
         )
         engine.onDayRollover = { totals, nextDate -> rollovers += totals to nextDate }
-        engine.onBackfill = { shares -> backfills += shares }
+        engine.onBackfill = { shares, reason ->
+            backfills += shares
+            backfillReasons += reason
+        }
     }
 
     @Test
@@ -139,9 +144,13 @@ class StepCounterEngineTest {
 
         assertEquals(1560, engine.onCounterSample(400f, now())!!.steps)
         assertEquals(listOf(mapOf(DateKeys.yesterday() to 40)), backfills)
+        assertEquals(listOf(StepCounterEngine.BackfillReason.REBOOT), backfillReasons)
+        // Today's 360 were apportioned, not observed.
+        assertEquals(360, state.recoveredToday)
 
         // Everything after the re-anchor counts normally.
         assertEquals(1590, engine.onCounterSample(430f, now())!!.steps)
+        assertEquals(360, state.recoveredToday)
     }
 
     @Test
@@ -174,13 +183,115 @@ class StepCounterEngineTest {
         fakeNow = bootAt(DateKeys.today(), 8)
 
         // Two of the ten hours were yesterday: 200 back to yesterday, 800 today.
-        assertEquals(800, engine.onCounterSample(5000f, now())!!.steps)
+        val first = engine.onCounterSample(5000f, now())!!
+        assertEquals(800, first.steps)
         assertEquals(1, rollovers.size)
         assertEquals(4000, rollovers[0].first.steps)
         assertEquals(listOf(mapOf(DateKeys.yesterday() to 200)), backfills)
+        assertEquals(listOf(StepCounterEngine.BackfillReason.GAP), backfillReasons)
         assertEquals(DateKeys.today(), state.activeDate)
+        // Every one of today's 800 was apportioned by the gap rule.
+        assertEquals(800, first.recoveredSteps)
 
-        assertEquals(850, engine.onCounterSample(5050f, now())!!.steps)
+        // The 50 that follow are observed; the recovered share stays put.
+        val next = engine.onCounterSample(5050f, now())!!
+        assertEquals(850, next.steps)
+        assertEquals(800, next.recoveredSteps)
+        assertEquals(800, engine.consumeCommit().recoveredSteps)
+    }
+
+    @Test
+    fun overnightKillUnderTodayCappedPolicyCreditsAtMostTheCap() {
+        engine.gapRecovery = StepCounterEngine.GapRecovery.TODAY_CAPPED
+        engine.gapRecoveryMaxSteps = 600
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 0f
+        state.anchorSteps = 0
+        state.lastRawValue = 4000f
+        state.stepsToday = 4000
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 22)
+        fakeBoot = bootAt(DateKeys.yesterday(), 6)
+        fakeNow = bootAt(DateKeys.today(), 8)
+
+        // 1,000 recovered, 600 kept on today, nothing to yesterday, 400 gone.
+        val first = engine.onCounterSample(5000f, now())!!
+        assertEquals(600, first.steps)
+        assertEquals(600, first.recoveredSteps)
+        assertTrue(backfills.isEmpty())
+        // Yesterday closed at 4,000 and stays there.
+        assertEquals(4000, rollovers[0].first.steps)
+
+        // The cap is on the recovery, not the day: counting continues past it.
+        assertEquals(650, engine.onCounterSample(5050f, now())!!.steps)
+    }
+
+    @Test
+    fun aWeekLongKillCannotMintAWeekOfStepsOnOneDayUnderTodayCapped() {
+        engine.gapRecovery = StepCounterEngine.GapRecovery.TODAY_CAPPED
+        // Default cap: 20,000.
+        state.activeDate = DateKeys.format(DateKeys.parse(DateKeys.today()).minusDays(7))
+        state.anchorValue = 0f
+        state.anchorSteps = 0
+        state.lastRawValue = 1000f
+        state.stepsToday = 1000
+        state.lastEventAt = bootAt(state.activeDate, 20)
+        fakeBoot = bootAt(state.activeDate, 6)
+        fakeNow = bootAt(DateKeys.today(), 9)
+
+        // 100,000 on the counter since the last reading a week ago.
+        val first = engine.onCounterSample(101_000f, now())!!
+        assertEquals(20_000, first.steps)
+        assertEquals(20_000, first.recoveredSteps)
+        assertTrue(backfills.isEmpty())
+    }
+
+    @Test
+    fun recoveredShareIsZeroForADayCountedLive() {
+        engine.onCounterSample(50f, now())
+        val snapshot = engine.onCounterSample(120f, now())!!
+        assertEquals(120, snapshot.steps)
+        assertEquals(0, snapshot.recoveredSteps)
+        assertEquals(0, engine.consumeCommit().recoveredSteps)
+    }
+
+    @Test
+    fun rolloverClosesTheDayWithItsRecoveredShareAndStartsTheNewDayAtZero() {
+        // Yesterday had 300 of its 900 recovered earlier.
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 4100f
+        state.anchorSteps = 0
+        state.lastRawValue = 5000f
+        state.stepsToday = 900
+        state.recoveredToday = 300
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 23) + 59 * 60_000L + 30_000L
+        fakeBoot = bootAt(DateKeys.yesterday(), 8)
+        fakeNow = bootAt(DateKeys.today(), 0) + 30_000L
+
+        val first = engine.onCounterSample(5010f, now())!!
+        assertEquals(300, rollovers[0].first.recoveredSteps)
+        assertEquals(900, rollovers[0].first.steps)
+        // Today's 5 straddled midnight and were apportioned; that is all
+        // today has recovered.
+        assertEquals(5, first.steps)
+        assertEquals(5, first.recoveredSteps)
+    }
+
+    @Test
+    fun resetTodayClearsTheRecoveredShareWithTheTotal() {
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 0f
+        state.anchorSteps = 0
+        state.lastRawValue = 4000f
+        state.stepsToday = 4000
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 22)
+        fakeBoot = bootAt(DateKeys.yesterday(), 6)
+        fakeNow = bootAt(DateKeys.today(), 8)
+        engine.onCounterSample(5000f, now())
+        assertEquals(800, state.recoveredToday)
+
+        engine.resetToday()
+        assertEquals(0, state.recoveredToday)
+        assertEquals(0, engine.snapshot().recoveredSteps)
     }
 
     @Test
@@ -354,9 +465,11 @@ class StepCounterEngineTest {
         assertEquals(3000, rollovers[0].first.steps)
         assertEquals(0, state.stepsToday)
 
-        // The caller restores the adopted day's stored total.
-        engine.seedActiveDay(DateKeys.today(), 9000)
+        // The caller restores the adopted day's stored total, recovered
+        // share included, so the day does not read as fully observed.
+        engine.seedActiveDay(DateKeys.today(), 9000, recoveredSteps = 1200)
         assertEquals(9000, state.stepsToday)
+        assertEquals(1200, state.recoveredToday)
 
         // Seeding clears the anchor; the next sample claims exactly the delta
         // since the last reading on top of the seeded total.

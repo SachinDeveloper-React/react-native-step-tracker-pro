@@ -62,6 +62,17 @@ data class DailySummaryEntity(
     val totalSteps: Int,
     val totalDistance: Double,
     val totalCalories: Double,
+    /**
+     * Of `totalSteps`, how many were credited to the day in one go by gap
+     * recovery - after a process kill across midnight, a reboot, or the
+     * since-boot claim on install - rather than observed sample by sample.
+     * A server judging a day wants this separately: a recovered share is an
+     * apportionment, not an observation. Added in version 3 with a default
+     * of 0, so rows from before it read as fully observed, which is the
+     * only honest answer for a day nobody recorded the split for.
+     */
+    @ColumnInfo(name = "recoveredSteps", defaultValue = "0")
+    val recoveredSteps: Int = 0,
     @ColumnInfo(name = "updatedAt")
     val updatedAt: Long = System.currentTimeMillis()
 )

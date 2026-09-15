@@ -94,6 +94,12 @@ android {
                 java.srcDirs += ["src/oldarch/java"]
             }
         }
+        // Room's exported schemas, so MigrationTestHelper can build the
+        // database as an older version really had it and run the migrations
+        // against real rows. Test-only: `android/schemas` is not published.
+        androidTest {
+            assets.srcDirs += files("$projectDir/schemas")
+        }
     }
 
     lint {
@@ -133,4 +139,5 @@ dependencies {
     androidTestImplementation "androidx.test:core-ktx:1.6.1"
     androidTestImplementation "androidx.test:runner:1.6.2"
     androidTestImplementation "androidx.test.ext:junit:1.2.1"
+    androidTestImplementation "androidx.room:room-testing:$roomVersion"
 }

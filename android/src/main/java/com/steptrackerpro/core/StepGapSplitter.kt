@@ -30,6 +30,49 @@ object StepGapSplitter {
      *   present, summing exactly to [steps]. A gap that does not cross
      *   midnight returns a single entry.
      */
+    /**
+     * Applies a [StepCounterEngine.GapRecovery] policy to a recovered block
+     * of steps: which days get what. Pure, so the four policies are tested
+     * on the JVM without an engine behind them.
+     *
+     * @param activeDate the day the closing reading fell on, which is the
+     *   only day the engine can credit directly.
+     * @param maxSteps for [StepCounterEngine.GapRecovery.TODAY_CAPPED]: the
+     *   most the active day may be credited; the rest is dropped.
+     */
+    fun apply(
+        policy: StepCounterEngine.GapRecovery,
+        fromMillis: Long,
+        toMillis: Long,
+        steps: Int,
+        activeDate: String,
+        maxSteps: Int = StepCounterEngine.DEFAULT_GAP_RECOVERY_MAX_STEPS,
+        zone: ZoneId = DateKeys.zone()
+    ): Map<String, Int> {
+        if (steps <= 0) return emptyMap()
+        return when (policy) {
+            StepCounterEngine.GapRecovery.SPLIT -> split(fromMillis, toMillis, steps, zone)
+            StepCounterEngine.GapRecovery.TODAY -> mapOf(activeDate to steps)
+            // Like TODAY, but bounded: a week-long kill followed by a counter
+            // glitch could otherwise mint a hundred thousand steps on one
+            // day, and an app paying for steps would rather lose them than
+            // pay for them. Whatever is over the cap is dropped, not moved.
+            StepCounterEngine.GapRecovery.TODAY_CAPPED ->
+                mapOf(activeDate to steps.coerceAtMost(maxSteps.coerceAtLeast(0)))
+            StepCounterEngine.GapRecovery.DROP -> {
+                // Only the part provably inside the active day is kept: with
+                // no timestamps per step that is nothing when the gap started
+                // on another day, and all of it otherwise.
+                val startDate = if (fromMillis > 0L) {
+                    Instant.ofEpochMilli(fromMillis).atZone(zone).toLocalDate().let(DateKeys::format)
+                } else {
+                    activeDate
+                }
+                if (startDate == activeDate) mapOf(activeDate to steps) else emptyMap()
+            }
+        }
+    }
+
     fun split(
         fromMillis: Long,
         toMillis: Long,

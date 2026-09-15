@@ -27,6 +27,7 @@ export type {
   HealthConnectAvailability,
   HealthConnectStatus,
   HealthConnectStatusEvent,
+  HistoryBackfilledEvent,
   PermissionStatus,
   RangeOptions,
   RangeStats,

@@ -87,13 +87,45 @@ from `lastEventAt`, the time of the last reading:
 | inside one day | any | all to today |
 | across midnight | `'split'` (default) | spread across the days in proportion to time: killed at 23:00, revived at 09:00 → 10% to yesterday, 90% to today |
 | across midnight | `'today'` | all to today |
+| across midnight | `'today_capped'` | all to today, up to `gapRecoveryMaxSteps` (20,000); the rest is dropped, not moved |
 | across midnight | `'drop'` | discarded — for an app where an over-credit costs money |
 
+The policy is applied by `StepGapSplitter.apply()`, which is pure and
+tested on the JVM for all four; the engine only supplies the dates and the
+cap. `'today_capped'` exists for the week-long kill: the first sample back
+carries every step since the last reading, and a counter glitch on top of
+that could hand one day a hundred thousand steps. The cap applies to what a
+recovery credits, not to the day — counting continues past it — and it also
+bounds the one case the splitter cannot place, a last reading that is in the
+future because the clock was set back.
+
 Shares for days other than the active one go out through
-`StepCounterEngine.onBackfill`, and `StepTrackerCore` adds them to the stored
-rows (re-queuing them for sync). The rollover deliberately preserves
-`lastEventAt`: stamping "now" there erased the evidence of when the gap
-started and put every overnight step into the new day.
+`StepCounterEngine.onBackfill` with a reason (`gap`, or `reboot` when the
+counter provably restarted), and `StepTrackerCore` adds them to the stored
+rows (re-queuing them for sync) and then emits `historyBackfilled` once per
+day, after the write has committed. Only `'split'` ever produces one: the
+other three leave closed days alone, which is why `'today_capped'` and
+`'drop'` are the recommendation for an app that has already paid for a day.
+The rollover deliberately preserves `lastEventAt`: stamping "now" there
+erased the evidence of when the gap started and put every overnight step
+into the new day.
+
+### The recovered share
+
+Every step a recovery credits — today's share of a gap, a reboot's since-boot
+steps, an install's since-boot claim — was apportioned, not observed. The
+engine keeps a running `recoveredToday` in `StepStateStore`, written in the
+same atomic edit as the counter state so the two cannot drift, zeroed with
+the total at rollover and reset, and restored with it when the date moves
+backwards. It is committed to `daily_summary.recoveredSteps` with every
+write; `StepRepository.addToDay()` grows it by exactly what it added to a
+past day, and `upsertKeepingRecovered` refuses to let a stale snapshot of the
+live day lower it under a backfill. `DayRecord.recoveredSteps` and
+`StepSnapshot.recoveredSteps` report it, and the verification snapshot and
+the `'full'` remote payload carry it, so a server can weigh a recovered share
+differently from steps it knows were watched. Days stored before the column
+existed read `0`: the only honest value for a day whose split was never
+recorded.
 
 Before 1.3 these steps were dropped, which is what "I walked to work and the
 app shows zero" looked like on phones that kill services overnight.
@@ -206,8 +238,10 @@ Two Room tables:
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
 - `daily_summary` — `date` (PK), `totalSteps`, `totalDistance`,
-  `totalCalories`, `updatedAt`. Rolled-up mirror of the same values, written in
-  the same transaction as `step_history`.
+  `totalCalories`, `recoveredSteps`, `updatedAt`. Rolled-up mirror of the
+  same values, written in the same transaction as `step_history`, plus the
+  recovered share (schema version 3; earlier rows migrate with `0`). Reads
+  join it back onto the history row.
 
 `saveDay()` refuses to lower an existing day's count. A re-anchored counter can
 briefly report fewer steps than were already committed; ignoring that write is

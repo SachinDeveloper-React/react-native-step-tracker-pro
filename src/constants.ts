@@ -26,6 +26,7 @@ export const DEFAULT_CONFIG: Required<
     | 'wearableTrust'
     | 'autoStartOnBoot'
     | 'gapRecovery'
+    | 'gapRecoveryMaxSteps'
     | 'watchdogEnabled'
     | 'accelerometerFallback'
     | 'accelerometerWakeLock'
@@ -53,6 +54,7 @@ export const DEFAULT_CONFIG: Required<
   wearableTrust: 'metadata',
   autoStartOnBoot: true,
   gapRecovery: 'split',
+  gapRecoveryMaxSteps: 20000,
   watchdogEnabled: true,
   accelerometerFallback: true,
   accelerometerWakeLock: true,

@@ -105,7 +105,8 @@ object StepContinuity {
                 distance = metrics.distance(merged),
                 calories = metrics.calories(merged),
                 synced = raw.totals.synced,
-                syncedRemote = raw.totals.syncedRemote
+                syncedRemote = raw.totals.syncedRemote,
+                recoveredSteps = raw.totals.recoveredSteps
             ),
             kind = baseline.kind,
             sourcePackage = baseline.packageName,

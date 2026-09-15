@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [StepHistoryEntity::class, DailySummaryEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 abstract class StepDatabase : RoomDatabase() {
@@ -39,6 +39,24 @@ abstract class StepDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * `daily_summary.recoveredSteps`: how many of a day's steps were
+         * credited by gap recovery rather than observed. Existing rows get 0,
+         * the only honest value for a day whose split was never recorded.
+         * A destructive fallback is not an option here: users have 35 days
+         * of history in this table and nothing else holds it.
+         */
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE daily_summary ADD COLUMN recoveredSteps INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /** Every migration, in order, for the builder and the migration test. */
+        internal val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+
         @Volatile
         private var instance: StepDatabase? = null
 
@@ -49,7 +67,7 @@ abstract class StepDatabase : RoomDatabase() {
                     StepDatabase::class.java,
                     NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(*MIGRATIONS)
                     // Counter state lives in SharedPreferences, so a corrupt or
                     // unmigratable history file costs history, never the live count.
                     .fallbackToDestructiveMigrationOnDowngrade()

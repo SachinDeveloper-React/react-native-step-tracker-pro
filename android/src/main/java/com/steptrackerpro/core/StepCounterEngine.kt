@@ -70,9 +70,19 @@ class StepCounterEngine(
     /**
      * Invoked with steps recovered for days *other than* the active one, when
      * a gap in samples crossed midnight. Keys are `yyyy-MM-dd`; values are
-     * steps to add on top of whatever the day already has stored.
+     * steps to add on top of whatever the day already has stored. The reason
+     * says what the gap was - a dead process, or a proven reboot - so the
+     * `historyBackfilled` event can carry it.
      */
-    var onBackfill: ((Map<String, Int>) -> Unit)? = null
+    var onBackfill: ((Map<String, Int>, BackfillReason) -> Unit)? = null
+
+    /** Why a past day is being credited after the fact. Values match the JS event. */
+    enum class BackfillReason(val jsValue: String) {
+        /** Nothing was listening between the last reading and this one. */
+        GAP("gap"),
+        /** The counter restarted; the steps are the ones taken since boot. */
+        REBOOT("reboot")
+    }
 
     @Volatile
     var paused: Boolean = false
@@ -97,11 +107,21 @@ class StepCounterEngine(
     @Volatile
     var gapRecovery: GapRecovery = GapRecovery.SPLIT
 
+    /** The most [GapRecovery.TODAY_CAPPED] credits to the active day in one recovery. */
+    @Volatile
+    var gapRecoveryMaxSteps: Int = DEFAULT_GAP_RECOVERY_MAX_STEPS
+
     enum class GapRecovery(val jsValue: String) {
         /** Spread across the days in the gap in proportion to time. Default. */
         SPLIT("split"),
         /** Everything to the active day. */
         TODAY("today"),
+        /**
+         * Everything to the active day, up to [gapRecoveryMaxSteps]; the
+         * rest is dropped. A closed day never changes, and one day can never
+         * be handed a week's worth of counter.
+         */
+        TODAY_CAPPED("today_capped"),
         /** Discard anything that cannot be placed on the active day. */
         DROP("drop");
 
@@ -111,30 +131,30 @@ class StepCounterEngine(
         }
     }
 
-    /**
-     * @return today's share of [steps] and, when any of them belong to other
-     *   days, the backfill for those days.
-     */
-    private fun recover(steps: Int, fromMillis: Long, nowMillis: Long): Pair<Int, Map<String, Int>?> {
-        if (steps <= 0) return 0 to null
+    /** What one blank-anchor sample recovered: the active day's share, and other days'. */
+    private class Recovered(val today: Int, val others: Map<String, Int>?)
+
+    private fun recover(steps: Int, fromMillis: Long, nowMillis: Long): Recovered {
+        if (steps <= 0) return Recovered(0, null)
         // A last reading that is in the future means the wall clock was set
         // back. There is no honest way to place the gap then; keep it on the
         // active day rather than crediting a day that has not happened yet.
-        if (fromMillis > nowMillis) return steps to null
-        val shares = when (gapRecovery) {
-            GapRecovery.SPLIT -> StepGapSplitter.split(fromMillis, nowMillis, steps)
-            GapRecovery.TODAY -> mapOf(state.activeDate to steps)
-            GapRecovery.DROP -> {
-                // Only the part provably inside the active day is kept: with
-                // no timestamps per step that is nothing when the gap started
-                // on another day, and all of it otherwise.
-                val startDate = if (fromMillis > 0L) DateKeys.of(fromMillis) else state.activeDate
-                if (startDate == state.activeDate) mapOf(state.activeDate to steps) else emptyMap()
+        // The cap still applies: a clock set back is exactly the kind of
+        // glitch it exists for.
+        if (fromMillis > nowMillis) {
+            val kept = if (gapRecovery == GapRecovery.TODAY_CAPPED) {
+                steps.coerceAtMost(gapRecoveryMaxSteps.coerceAtLeast(0))
+            } else {
+                steps
             }
+            return Recovered(kept, null)
         }
+        val shares = StepGapSplitter.apply(
+            gapRecovery, fromMillis, nowMillis, steps, state.activeDate, gapRecoveryMaxSteps
+        )
         val today = shares[state.activeDate] ?: 0
         val others = shares.filterKeys { it != state.activeDate }.filterValues { it > 0 }
-        return today to others.takeIf { it.isNotEmpty() }
+        return Recovered(today, others.takeIf { it.isNotEmpty() })
     }
 
     /**
@@ -195,6 +215,12 @@ class StepCounterEngine(
         var anchorSteps = state.anchorSteps
 
         var backfill: Map<String, Int>? = null
+        var backfillReason = BackfillReason.GAP
+        // Steps this sample credits to the active day in one go rather than
+        // as an observed delta, so the day's record can say how much of it
+        // was apportioned. Everything that goes through recover() qualifies,
+        // and so does an install's since-boot claim: none of it was watched.
+        var recoveredNow = 0
         if (state.anchorValue < 0f || bootIdMoved(currentBoot)) {
             // Steps accumulated between boot and this first sample are only
             // claimable when the counter really did restart - proven by the
@@ -204,7 +230,7 @@ class StepCounterEngine(
             // themselves.
             val counterRestarted = !hasLastRaw || counterWentBackwards || elapsedWentBackwards
             val bootDate = DateKeys.of(currentBoot)
-            val recovered: Pair<Int, Map<String, Int>?> = when {
+            val recovered: Recovered = when {
                 // Never seen a reading: there is no evidence the app existed
                 // when the since-boot steps were taken, so history is not
                 // invented for them. Same-day boot claims them, as before.
@@ -213,16 +239,18 @@ class StepCounterEngine(
                 // Connect source fill in the hours before it.
                 !hasLastRaw -> if (bootDate == state.activeDate) {
                     state.coverageStartAt = currentBoot
-                    rawValue.roundToInt() to null
+                    Recovered(rawValue.roundToInt(), null)
                 } else {
                     state.coverageStartAt = clockProvider()
-                    0 to null
+                    Recovered(0, null)
                 }
                 // A proven restart: everything since boot is real, unclaimed,
                 // and happened after the last reading. Spread it from the
                 // boot instant to now.
-                counterRestarted ->
+                counterRestarted -> {
+                    backfillReason = BackfillReason.REBOOT
                     recover(rawValue.roundToInt(), currentBoot, clockProvider())
+                }
                 // The counter did not restart, so the delta since the last
                 // reading is exact. It covers whatever happened while the
                 // anchor was blank - a midnight rollover, a reset, a
@@ -234,9 +262,10 @@ class StepCounterEngine(
                     clockProvider()
                 )
             }
-            anchorValue = rawValue - recovered.first
+            anchorValue = rawValue - recovered.today
             anchorSteps = state.stepsToday
-            backfill = recovered.second
+            backfill = recovered.others
+            recoveredNow = recovered.today
         } else if (reanchorOnNextSample || counterWentBackwards || elapsedWentBackwards ||
             rawValue < anchorValue
         ) {
@@ -254,6 +283,7 @@ class StepCounterEngine(
         if (paused) {
             // Absorb the delta into the anchor so paused steps never land in
             // the total, and the counter picks straight back up on resume.
+            // Whatever recover() apportioned is discarded with them.
             state.writeCounterState(
                 bootId = currentBoot,
                 anchorValue = rawValue,
@@ -262,7 +292,8 @@ class StepCounterEngine(
                 activeDate = state.activeDate,
                 stepsToday = previous,
                 lastEventAt = eventAtMillis,
-                lastElapsed = currentElapsed
+                lastElapsed = currentElapsed,
+                recoveredToday = state.recoveredToday
             )
             return null
         }
@@ -275,10 +306,13 @@ class StepCounterEngine(
             activeDate = state.activeDate,
             stepsToday = total,
             lastEventAt = eventAtMillis,
-            lastElapsed = currentElapsed
+            lastElapsed = currentElapsed,
+            // Never more than the day has: total < previous + recoveredNow
+            // only when the arithmetic clamped, and the share cannot exceed it.
+            recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(total)
         )
 
-        backfill?.let { shares -> onBackfill?.invoke(shares) }
+        backfill?.let { shares -> onBackfill?.invoke(shares, backfillReason) }
 
         if (total == previous) return null
         pendingCommit += (total - previous)
@@ -316,7 +350,8 @@ class StepCounterEngine(
             activeDate = state.activeDate,
             stepsToday = total,
             lastEventAt = eventAtMillis,
-            lastElapsed = elapsedProvider()
+            lastElapsed = elapsedProvider(),
+            recoveredToday = state.recoveredToday
         )
         // The counter total no longer matches the anchor arithmetic, so make the
         // next counter sample re-pin instead of recomputing from a stale anchor.
@@ -352,7 +387,9 @@ class StepCounterEngine(
     @Synchronized
     fun consumeCommit(): DayTotals {
         pendingCommit = 0
-        return metrics.totals(state.activeDate, state.stepsToday)
+        return metrics.totals(
+            state.activeDate, state.stepsToday, recoveredSteps = state.recoveredToday
+        )
     }
 
     @Synchronized
@@ -369,7 +406,8 @@ class StepCounterEngine(
             goalReached = goal > 0 && steps >= goal,
             state = state.trackingState,
             source = state.source,
-            timestamp = state.lastEventAt.takeIf { it > 0 } ?: clockProvider()
+            timestamp = state.lastEventAt.takeIf { it > 0 } ?: clockProvider(),
+            recoveredSteps = state.recoveredToday.coerceIn(0, steps)
         )
     }
 
@@ -389,7 +427,8 @@ class StepCounterEngine(
             activeDate = DateKeys.today(),
             stepsToday = 0,
             lastEventAt = clockProvider(),
-            lastElapsed = elapsedProvider()
+            lastElapsed = elapsedProvider(),
+            recoveredToday = 0
         )
     }
 
@@ -397,9 +436,12 @@ class StepCounterEngine(
      * Restores the live total for the active day from storage. Used when the
      * local date moves backwards - travelling west across the date line - and
      * the adopted day already has steps recorded against it.
+     *
+     * @param recoveredSteps the stored row's recovered share, restored with
+     *   the total so the day does not read as fully observed afterwards.
      */
     @Synchronized
-    fun seedActiveDay(date: String, steps: Int) {
+    fun seedActiveDay(date: String, steps: Int, recoveredSteps: Int = 0) {
         if (date != state.activeDate || steps <= state.stepsToday) return
         state.writeCounterState(
             bootId = bootIdProvider(),
@@ -409,7 +451,8 @@ class StepCounterEngine(
             activeDate = state.activeDate,
             stepsToday = steps,
             lastEventAt = clockProvider(),
-            lastElapsed = elapsedProvider()
+            lastElapsed = elapsedProvider(),
+            recoveredToday = recoveredSteps.coerceIn(0, steps)
         )
     }
 
@@ -425,7 +468,9 @@ class StepCounterEngine(
         // it, so [onDayRollover]'s receiver compares the two dates and re-seeds
         // through [seedActiveDay] rather than letting the counter report zero
         // in the middle of a day the user has already been walking through.
-        val closing = metrics.totals(active, state.stepsToday)
+        val closing = metrics.totals(
+            active, state.stepsToday, recoveredSteps = state.recoveredToday
+        )
         pendingCommit = 0
         // A new day is covered from its start: with a hardware counter, gap
         // recovery reaches back through any dead time to midnight.
@@ -443,7 +488,8 @@ class StepCounterEngine(
             // right side of midnight. Stamping "now" here erased that and put
             // every overnight step into the new day.
             lastEventAt = state.lastEventAt,
-            lastElapsed = elapsedProvider()
+            lastElapsed = elapsedProvider(),
+            recoveredToday = 0
         )
         onDayRollover?.invoke(closing, today)
     }
@@ -466,6 +512,15 @@ class StepCounterEngine(
          * restart. Restarts land near zero; jitter is a step or two.
          */
         const val JITTER_TOLERANCE_STEPS = 3f
+
+        /**
+         * Default cap for [GapRecovery.TODAY_CAPPED]. Twice a very active
+         * day: a genuine overnight gap on a phone that kills services is a
+         * few thousand steps, and anything in the tens of thousands after a
+         * long dead period is a counter glitch or a week's worth of walking
+         * that cannot honestly be given to one day.
+         */
+        const val DEFAULT_GAP_RECOVERY_MAX_STEPS = 20_000
 
         /** Approximate epoch millis at which the device booted. */
         fun currentBootId(): Long = System.currentTimeMillis() - SystemClock.elapsedRealtime()

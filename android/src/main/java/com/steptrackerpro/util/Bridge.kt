@@ -25,6 +25,9 @@ object Bridge {
         putString("state", snapshot.state.jsValue)
         putString("source", snapshot.source.jsValue)
         putDouble("timestamp", snapshot.timestamp.toDouble())
+        // This device's own recovered share; a Health Connect winner does not
+        // change it, so it is not touched by the resolution overload below.
+        putInt("recoveredSteps", snapshot.recoveredSteps)
     }
 
     /**
@@ -75,7 +78,8 @@ object Bridge {
         "goalReached" to snapshot.goalReached,
         "state" to snapshot.state.jsValue,
         "source" to snapshot.source.jsValue,
-        "timestamp" to snapshot.timestamp
+        "timestamp" to snapshot.timestamp,
+        "recoveredSteps" to snapshot.recoveredSteps
     )
 
     fun snapshotMap(
@@ -92,6 +96,7 @@ object Bridge {
         putDouble("calories", round(totals.calories, 2))
         putBoolean("synced", totals.synced)
         putBoolean("syncedRemote", totals.syncedRemote)
+        putInt("recoveredSteps", totals.recoveredSteps)
     }
 
     fun days(list: List<DayTotals>): WritableArray = Arguments.createArray().apply {

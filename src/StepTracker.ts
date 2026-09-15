@@ -155,6 +155,12 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
       );
     }
   }
+  if (config.gapRecoveryMaxSteps != null && !(config.gapRecoveryMaxSteps >= 0)) {
+    // Zero is meaningful - "credit nothing from a recovery" - but a negative
+    // or NaN cap has no reading, and the native clamp would silently turn
+    // it into zero, which is a stricter policy than the caller wrote.
+    throw new StepTrackerError('E_INVALID_CONFIG', 'gapRecoveryMaxSteps must be >= 0');
+  }
   if (
     config.accelerometerThreshold != null &&
     !(config.accelerometerThreshold >= 0.3 && config.accelerometerThreshold <= 10)
@@ -592,6 +598,7 @@ export const StepTracker = {
           'goalProgressChanged',
           'trackingStateChanged',
           'dayChanged',
+          'historyBackfilled',
           'syncCompleted',
           'stepSourceChanged',
           'healthConnectStatusChanged',

@@ -69,6 +69,17 @@ class StepStateStore(context: Context) {
         get() = prefs.getInt(KEY_STEPS_TODAY, 0)
         set(value) = prefs.edit().putInt(KEY_STEPS_TODAY, value).apply()
 
+    /**
+     * Of [stepsToday], how many gap recovery credited in one go - after a
+     * kill across midnight, a reboot, or the since-boot claim on install -
+     * rather than being observed sample by sample. Written with the counter
+     * state so the two cannot drift, zeroed with it at rollover and reset,
+     * and stored into `daily_summary.recoveredSteps` with every commit.
+     */
+    var recoveredToday: Int
+        get() = prefs.getInt(KEY_RECOVERED_TODAY, 0)
+        set(value) = prefs.edit().putInt(KEY_RECOVERED_TODAY, value.coerceAtLeast(0)).apply()
+
     var trackingState: TrackingState
         get() = TrackingState.from(prefs.getString(KEY_STATE, null))
         set(value) = prefs.edit().putString(KEY_STATE, value.jsValue).apply()
@@ -249,7 +260,7 @@ class StepStateStore(context: Context) {
         prefs.edit().putInt(KEY_STATE_VERSION, STATE_VERSION).apply()
     }
 
-    /** One atomic write for the hot path, instead of six separate commits. */
+    /** One atomic write for the hot path, instead of nine separate commits. */
     fun writeCounterState(
         bootId: Long,
         anchorValue: Float,
@@ -258,7 +269,8 @@ class StepStateStore(context: Context) {
         activeDate: String,
         stepsToday: Int,
         lastEventAt: Long,
-        lastElapsed: Long
+        lastElapsed: Long,
+        recoveredToday: Int
     ) {
         prefs.edit()
             .putLong(KEY_BOOT_ID, bootId)
@@ -269,6 +281,7 @@ class StepStateStore(context: Context) {
             .putInt(KEY_STEPS_TODAY, stepsToday)
             .putLong(KEY_LAST_EVENT_AT, lastEventAt)
             .putLong(KEY_LAST_ELAPSED, lastElapsed)
+            .putInt(KEY_RECOVERED_TODAY, recoveredToday.coerceAtLeast(0))
             .apply()
     }
 
@@ -285,6 +298,7 @@ class StepStateStore(context: Context) {
         private const val KEY_LAST_ELAPSED = "last_elapsed_realtime"
         private const val KEY_ACTIVE_DATE = "active_date"
         private const val KEY_STEPS_TODAY = "steps_today"
+        private const val KEY_RECOVERED_TODAY = "recovered_today"
         private const val KEY_COVERAGE_START = "coverage_start_at"
         private const val KEY_STATE = "tracking_state"
         private const val KEY_SOURCE = "sensor_source"

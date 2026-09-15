@@ -63,6 +63,38 @@ events, the same remote payload. Everything is opt-in or additive.
 - Changing `wearableTrust` or `wearableAllowlist` clears the day's
   continuity baseline, like a policy change.
 
+#### Gap recovery is auditable and can leave closed days alone
+
+- `recoveredSteps` on `DayRecord` and `StepSnapshot`: of this device's count
+  for the day, how many steps gap recovery credited in one go — today's
+  share of an overnight kill, a reboot's since-boot steps, an install's
+  since-boot claim — rather than observing sample by sample. An
+  apportionment is an estimate, and a server judging a day wants it
+  separately. Stored as `daily_summary.recoveredSteps`, kept in the engine's
+  atomic counter state so it cannot drift from the total, grown by exactly
+  what a backfill adds to a past day, and `0` for a day counted live.
+- **Room schema 3**, with a real `Migration(2, 3)` that adds the column
+  with a default of `0` — the only honest value for a day whose split was
+  never recorded. No destructive fallback: users have 35 days of history in
+  that table. An instrumented `MigrationTestHelper` test builds version 2
+  from the exported schema, migrates real rows and checks every one is
+  still there.
+- `historyBackfilled` event, `{ date, addedSteps, totalSteps, reason: 'gap'
+  | 'reboot' }`, fired once per affected past day after the repository
+  write commits. Until now `StepRepository.addToDay()` changed a previous
+  day's stored total with no signal to JS; an app that had already paid for
+  that day had no way to know its number moved. `dayChanged` is unchanged.
+- `gapRecovery: 'today_capped'` and `gapRecoveryMaxSteps` (default 20,000):
+  like `'today'`, but a recovery credits at most the cap to the active day
+  and drops the rest, so a counter glitch after a week-long kill cannot
+  mint 100,000 steps on one day. Closed days never change under it. The
+  `GapRecovery` documentation now recommends `'today_capped'` or `'drop'`
+  for apps where a settled day must never change after the fact.
+- The policy application moved out of the engine into
+  `StepGapSplitter.apply()`, pure and JVM-tested for all four values; the
+  engine instrumented tests cover `today_capped`, the recovered share
+  through a rollover, a reset and a re-seed, and the backfill reason.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin

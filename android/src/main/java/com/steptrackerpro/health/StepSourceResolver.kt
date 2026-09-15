@@ -318,7 +318,9 @@ object StepSourceResolver {
             calories = candidate.calories.takeIf { it > 0.0 && !merged }
                 ?: metrics.calories(steps),
             synced = device.synced,
-            syncedRemote = device.syncedRemote
+            syncedRemote = device.syncedRemote,
+            // This device's own figure, whatever answered for the number.
+            recoveredSteps = device.recoveredSteps
         ),
         kind = candidate.kind,
         sourcePackage = candidate.packageName,

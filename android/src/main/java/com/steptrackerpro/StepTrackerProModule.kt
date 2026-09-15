@@ -340,7 +340,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                     "distance" to day.distance,
                     "calories" to day.calories,
                     "synced" to day.synced,
-                    "syncedRemote" to day.syncedRemote
+                    "syncedRemote" to day.syncedRemote,
+                    "recoveredSteps" to day.recoveredSteps
                 )
             })))
         }
@@ -855,6 +856,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             remoteSyncAllowHttp = patch.optBoolean("remoteSyncAllowHttp", current.remoteSyncAllowHttp),
             autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot),
             gapRecovery = patch.optString("gapRecovery", current.gapRecovery) ?: current.gapRecovery,
+            gapRecoveryMaxSteps = patch.optInt("gapRecoveryMaxSteps", current.gapRecoveryMaxSteps),
             watchdogEnabled = patch.optBoolean("watchdogEnabled", current.watchdogEnabled),
             accelerometerFallback = patch.optBoolean(
                 "accelerometerFallback", current.accelerometerFallback
@@ -894,6 +896,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "remoteSyncAllowHttp" to config.remoteSyncAllowHttp,
         "autoStartOnBoot" to config.autoStartOnBoot,
         "gapRecovery" to config.gapRecovery,
+        "gapRecoveryMaxSteps" to config.gapRecoveryMaxSteps,
         "watchdogEnabled" to config.watchdogEnabled,
         "accelerometerFallback" to config.accelerometerFallback,
         "accelerometerWakeLock" to config.accelerometerWakeLock,

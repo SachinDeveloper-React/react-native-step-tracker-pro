@@ -17,6 +17,12 @@ object StepEventBus {
         const val GOAL_PROGRESS_CHANGED = "goalProgressChanged"
         const val TRACKING_STATE_CHANGED = "trackingStateChanged"
         const val DAY_CHANGED = "dayChanged"
+        /**
+         * A past day's stored total grew after the fact - gap recovery placed
+         * steps on it. Fired once per affected day, after the write commits,
+         * so an app that has already settled that day knows to look again.
+         */
+        const val HISTORY_BACKFILLED = "historyBackfilled"
         const val SYNC_COMPLETED = "syncCompleted"
         /** The app now counting for the user changed - watch on, watch off. */
         const val STEP_SOURCE_CHANGED = "stepSourceChanged"
