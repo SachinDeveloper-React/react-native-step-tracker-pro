@@ -231,9 +231,38 @@ a fallback and never a preference. Steps taken while the process is dead are
 lost, as with the detector. Detected steps go through
 `StepCounterEngine.onDetectorSample()` like any other per-step source.
 
+### Motion signature windows
+
+Opt-in (`motionSampling.enabled`). A tick on the sensor thread fires every
+`intervalMinutes`; when tracking is running, not paused, steps have accrued
+since the last window, and the app is either in the foreground (an activity
+on screen — the foreground service alone does not count) or holds the
+battery exemption, the service opens a `MotionWindowSampler` for
+`windowSeconds`. On a phone already counting over the accelerometer the
+sampler listens in on the samples that are arriving; otherwise the
+accelerometer is registered for the window and released with it, and on a
+non-wake-up sensor a partial wake lock with a timeout is held for the same
+span under the same `accelerometerWakeLock` policy as the pedometer. The
+sample that fills the window closes it; a safety post closes one the sensor
+stopped delivering into.
+
+`MotionWindowSampler` keeps only magnitudes and timestamps, at most a
+minute's worth, and reduces them to `MotionFeatures`: a dominant frequency
+by direct Fourier evaluation at the samples' own timestamps between 0.5 and
+6 Hz (so delivery rate and batching do not matter), the variance of the
+mean-removed magnitude, the zero-crossing rate, the share of in-band energy
+at the peak, and the steps the engine counted meanwhile. Below a stillness
+floor every spectral figure is 0, so a phone on a table does not report a
+frequency picked out of noise. The samples are discarded once the features
+are taken; nothing else ever holds them. Features go through the write lane
+into `motion_window`, trimmed to `motionWindowRetention` in the same
+transaction, and out on `motionWindow`. JVM tests feed synthetic walking at
+1.8 Hz and shaking at 4 Hz and assert the two separate on frequency,
+variance, crossing rate and purity, at 20 and 50 Hz alike.
+
 ## Storage
 
-Two Room tables:
+Three Room tables:
 
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
@@ -242,6 +271,10 @@ Two Room tables:
   same values, written in the same transaction as `step_history`, plus the
   recovered share (schema version 3; earlier rows migrate with `0`). Reads
   join it back onto the history row.
+- `motion_window` — `id`, `date`, `startedAt` (indexed), `durationMs`,
+  `sampleCount`, `dominantFrequencyHz`, `variance`, `zeroCrossingRate`,
+  `peakRatio`, `stepsDuringWindow` (schema version 4). Bounded to
+  `motionWindowRetention` rows by the insert transaction.
 
 `saveDay()` refuses to lower an existing day's count. A re-anchored counter can
 briefly report fewer steps than were already committed; ignoring that write is

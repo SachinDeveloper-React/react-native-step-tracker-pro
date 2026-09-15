@@ -359,6 +359,15 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Motion signature windows that opened between the two dates, inclusive, oldest first. */
+    @ReactMethod
+    override fun getMotionWindows(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            val windows = core.motionWindows(startDate, endDate)
+            promise.resolve(Bridge.map(mapOf("windows" to windows.map { it.toMap() })))
+        }
+    }
+
     // ---- writes ----------------------------------------------------------
 
     @ReactMethod
@@ -880,8 +889,24 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             ),
             accelerometerThreshold = patch.optDouble(
                 "accelerometerThreshold", current.accelerometerThreshold
-            )
+            ),
+            // JS groups the three under `motionSampling`; only the keys present
+            // in the object move, like every other patch.
+            motionSamplingEnabled = motion(patch)?.optBoolean("enabled", current.motionSamplingEnabled)
+                ?: current.motionSamplingEnabled,
+            motionWindowSeconds = motion(patch)?.optInt("windowSeconds", current.motionWindowSeconds)
+                ?: current.motionWindowSeconds,
+            motionIntervalMinutes = motion(patch)?.optInt("intervalMinutes", current.motionIntervalMinutes)
+                ?: current.motionIntervalMinutes,
+            motionWindowRetention = patch.optInt("motionWindowRetention", current.motionWindowRetention)
         )
+
+    private fun motion(patch: ReadableMap): ReadableMap? =
+        if (patch.hasKey("motionSampling") && !patch.isNull("motionSampling")) {
+            patch.getMap("motionSampling")
+        } else {
+            null
+        }
 
     private fun configToMap(config: StepTrackerConfig): Map<String, Any?> = mapOf(
         "height" to config.heightCm,
@@ -915,7 +940,13 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "watchdogEnabled" to config.watchdogEnabled,
         "accelerometerFallback" to config.accelerometerFallback,
         "accelerometerWakeLock" to config.accelerometerWakeLock,
-        "accelerometerThreshold" to config.accelerometerThreshold
+        "accelerometerThreshold" to config.accelerometerThreshold,
+        "motionSampling" to mapOf(
+            "enabled" to config.motionSamplingEnabled,
+            "windowSeconds" to config.motionWindowSeconds,
+            "intervalMinutes" to config.motionIntervalMinutes
+        ),
+        "motionWindowRetention" to config.motionWindowRetention
     )
 
     companion object {

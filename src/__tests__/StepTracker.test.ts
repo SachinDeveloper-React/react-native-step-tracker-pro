@@ -117,6 +117,10 @@ describe('initialize()', () => {
     [{ strideLength: 0 }, /strideLength/],
     [{ accelerometerThreshold: 0.1 }, /accelerometerThreshold/],
     [{ gapRecoveryMaxSteps: -1 }, /gapRecoveryMaxSteps/],
+    [{ motionSampling: { enabled: true, windowSeconds: 0 } }, /windowSeconds/],
+    [{ motionSampling: { enabled: true, windowSeconds: 61 } }, /windowSeconds/],
+    [{ motionSampling: { enabled: true, intervalMinutes: 0 } }, /intervalMinutes/],
+    [{ motionWindowRetention: 0 }, /motionWindowRetention/],
     [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
     [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
     [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
@@ -222,6 +226,31 @@ describe('date validation', () => {
       deviceSteps: 7,
     });
     expect(native.calledWith('getVerificationSnapshot')).toEqual([['2026-09-14']]);
+  });
+
+  it('getMotionWindows() validates the range and unwraps the list', async () => {
+    await expect(
+      StepTracker.getMotionWindows('2026-09-10', '2026-09-09')
+    ).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+    });
+    expect(native.calls).toHaveLength(0);
+    native.when('getMotionWindows', {
+      windows: [{ startedAt: 1, dominantFrequencyHz: 1.8 }],
+    });
+    await expect(
+      StepTracker.getMotionWindows('2026-09-09', '2026-09-09')
+    ).resolves.toEqual([{ startedAt: 1, dominantFrequencyHz: 1.8 }]);
+  });
+
+  it('passes motionSampling through as one object', async () => {
+    await StepTracker.initialize({
+      motionSampling: { enabled: true, windowSeconds: 15 },
+    });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      motionSampling: { enabled: true, windowSeconds: 15 },
+    });
+    expect(DEFAULT_CONFIG.motionSampling.enabled).toBe(false);
   });
 
   it('unwraps history records', async () => {
@@ -342,10 +371,12 @@ describe('events', () => {
     StepTracker.addListener('goalReached', () => {});
     StepTracker.addListener('dayChanged', () => {});
     StepTracker.addListener('historyBackfilled', () => {});
+    StepTracker.addListener('motionWindow', () => {});
     StepTracker.removeListener();
     expect(__listenerCount('StepTrackerPro:goalReached')).toBe(0);
     expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(0);
     expect(__listenerCount('StepTrackerPro:historyBackfilled')).toBe(0);
+    expect(__listenerCount('StepTrackerPro:motionWindow')).toBe(0);
   });
 
   it('delivers historyBackfilled with its payload', () => {

@@ -36,7 +36,7 @@ class StepDatabaseMigrationTest {
     )
 
     @Test
-    fun migrate2To3KeepsEveryRowAndReadsRecoveredAsZero() {
+    fun migrate2ToCurrentKeepsEveryRowAndReadsRecoveredAsZero() {
         // Version 2 as it shipped in 1.2 and 1.3: no recoveredSteps column.
         helper.createDatabase(NAME, 2).apply {
             execSQL(
@@ -60,7 +60,11 @@ class StepDatabaseMigrationTest {
 
         // validateDroppedTables = true: nothing may have been recreated by
         // dropping, which is what a destructive fallback would have done.
-        val db = helper.runMigrationsAndValidate(NAME, 3, true, StepDatabase.MIGRATION_2_3)
+        // Run to the current version so the chain is what a 1.3 install
+        // will actually go through.
+        val db = helper.runMigrationsAndValidate(
+            NAME, StepDatabase.VERSION, true, StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4
+        )
 
         db.query("SELECT date, totalSteps, recoveredSteps FROM daily_summary ORDER BY date").use { cursor ->
             assertEquals(2, cursor.count)
@@ -77,6 +81,11 @@ class StepDatabaseMigrationTest {
         db.query("SELECT COUNT(*) FROM step_history").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals(2, cursor.getInt(0))
+        }
+        // The motion table exists and starts empty; nothing invents windows.
+        db.query("SELECT COUNT(*) FROM motion_window").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
         }
         db.close()
     }
@@ -108,6 +117,20 @@ class StepDatabaseMigrationTest {
             // And the new column takes writes.
             room.dailySummaryDao().upsert(summary.copy(recoveredSteps = 300))
             assertEquals(300, room.dailySummaryDao().findByDate("2026-09-03")!!.recoveredSteps)
+            // The motion table takes a row and prunes to the bound.
+            val dao = room.motionWindowDao()
+            repeat(5) { i ->
+                dao.insert(
+                    MotionWindowEntity(
+                        date = "2026-09-03", startedAt = 1_000L + i, durationMs = 10_000L,
+                        sampleCount = 250, dominantFrequencyHz = 1.8, variance = 2.0,
+                        zeroCrossingRate = 3.6, peakRatio = 0.6, stepsDuringWindow = 18
+                    )
+                )
+            }
+            dao.pruneToNewest(3)
+            assertEquals(3, dao.count())
+            assertEquals(listOf(1_002L, 1_003L, 1_004L), dao.findRange(0L, 2_000L).map { it.startedAt })
         } finally {
             room.close()
         }

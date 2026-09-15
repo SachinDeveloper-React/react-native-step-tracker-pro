@@ -133,3 +133,31 @@ interface DailySummaryDao {
     @Query("DELETE FROM daily_summary")
     suspend fun deleteAll()
 }
+
+@Dao
+interface MotionWindowDao {
+
+    @Insert
+    suspend fun insert(entity: MotionWindowEntity): Long
+
+    @Query(
+        "SELECT * FROM motion_window WHERE startedAt BETWEEN :fromMs AND :toMs ORDER BY startedAt ASC"
+    )
+    suspend fun findRange(fromMs: Long, toMs: Long): List<MotionWindowEntity>
+
+    /** Keeps the newest [keep] windows and drops the rest. */
+    @Query(
+        """
+        DELETE FROM motion_window WHERE id NOT IN (
+            SELECT id FROM motion_window ORDER BY startedAt DESC, id DESC LIMIT :keep
+        )
+        """
+    )
+    suspend fun pruneToNewest(keep: Int): Int
+
+    @Query("SELECT COUNT(*) FROM motion_window")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM motion_window")
+    suspend fun deleteAll()
+}

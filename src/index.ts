@@ -28,6 +28,8 @@ export type {
   HealthConnectStatus,
   HealthConnectStatusEvent,
   HistoryBackfilledEvent,
+  MotionSamplingConfig,
+  MotionWindow,
   PermissionStatus,
   RangeOptions,
   RangeStats,

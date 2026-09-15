@@ -198,6 +198,69 @@ export interface StepTrackerConfig {
    * lower it if a gentle walk with the phone in a bag is missed.
    */
   accelerometerThreshold?: number;
+  /**
+   * Motion signature windows. Default disabled. See {@link MotionSamplingConfig}.
+   */
+  motionSampling?: MotionSamplingConfig;
+  /**
+   * How many motion windows to keep on device. Default 288 — a day at
+   * five-minute intervals. Older windows are dropped as new ones are stored,
+   * so the table is bounded by construction.
+   */
+  motionWindowRetention?: number;
+}
+
+/**
+ * Every few minutes while tracking is running and steps have accrued since
+ * the last window, sample the accelerometer for one short window and store a
+ * handful of numbers describing the motion — **features only, never the
+ * samples**: a dominant frequency, a variance, a zero-crossing rate, a peak
+ * ratio and the steps counted meanwhile. Enough for a server to tell a 1.8 Hz
+ * walk from a 4 Hz shake; not enough to reconstruct anything.
+ *
+ * Off by default. On, it is one extra sensor registration per window and, on
+ * a non-wake-up accelerometer with `accelerometerWakeLock` on, a wake lock for
+ * the window's length. Sampling stops while paused, and is skipped while the
+ * app is in the background without the battery-optimisation exemption — a
+ * background sample on a phone the user has not exempted is the cost Doze
+ * exists to prevent. Results arrive on the `motionWindow` event and through
+ * `getMotionWindows()`.
+ */
+export interface MotionSamplingConfig {
+  enabled: boolean;
+  /** Length of one window in seconds. Default 10, at most 60. */
+  windowSeconds?: number;
+  /** Minutes between windows. Default 5, at least 1. */
+  intervalMinutes?: number;
+}
+
+/**
+ * Features of one motion window. The numbers describe how the phone moved
+ * for `durationMs`; the samples they came from were discarded on device.
+ */
+export interface MotionWindow {
+  /** Epoch ms the window opened. */
+  startedAt: number;
+  /** How long it actually ran, ms. */
+  durationMs: number;
+  /** Accelerometer samples it saw. */
+  sampleCount: number;
+  /**
+   * Where the motion's energy sits, Hz. Gait is 1.2–2.5 Hz at the stride; a
+   * hand shake is 3–6 Hz; a still phone reads `0`.
+   */
+  dominantFrequencyHz: number;
+  /** Of the mean-removed acceleration magnitude, (m/s²)². A pocketed walk is a few; a shake is tens. */
+  variance: number;
+  /** Mean crossings per second — about twice the dominant frequency for a clean oscillation. */
+  zeroCrossingRate: number;
+  /**
+   * Share of in-band energy at `dominantFrequencyHz`, 0..1: near 1 for a
+   * metronomic shake, lower for a walk with its harmonics, `0` when still.
+   */
+  peakRatio: number;
+  /** Steps this device counted while the window was open. */
+  stepsDuringWindow: number;
 }
 
 /**
@@ -775,6 +838,8 @@ export interface StepTrackerEventMap {
   trackingStateChanged: TrackingStateEvent;
   dayChanged: DayChangedEvent;
   historyBackfilled: HistoryBackfilledEvent;
+  /** One motion signature window was stored. See {@link MotionWindow}. */
+  motionWindow: MotionWindow;
   syncCompleted: SyncEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;

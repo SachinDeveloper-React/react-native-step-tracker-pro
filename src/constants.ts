@@ -32,6 +32,8 @@ export const DEFAULT_CONFIG: Required<
     | 'accelerometerFallback'
     | 'accelerometerWakeLock'
     | 'accelerometerThreshold'
+    | 'motionSampling'
+    | 'motionWindowRetention'
   >
 > = {
   height: 170,
@@ -61,6 +63,8 @@ export const DEFAULT_CONFIG: Required<
   accelerometerFallback: true,
   accelerometerWakeLock: true,
   accelerometerThreshold: 0.9,
+  motionSampling: { enabled: false, windowSeconds: 10, intervalMinutes: 5 },
+  motionWindowRetention: 288,
 };
 
 /** Stride length = height(cm) * coefficient / 100. */

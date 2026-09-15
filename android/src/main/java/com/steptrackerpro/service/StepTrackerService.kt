@@ -1,6 +1,7 @@
 package com.steptrackerpro.service
 
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -16,10 +17,12 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.steptrackerpro.core.AccelerometerStepDetector
+import com.steptrackerpro.core.MotionWindowSampler
 import com.steptrackerpro.core.SensorSource
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
 import com.steptrackerpro.sync.SyncScheduler
+import com.steptrackerpro.util.BatteryOptimizationHelper
 import com.steptrackerpro.util.PermissionHelper
 import com.steptrackerpro.util.StepEventBus
 
@@ -102,6 +105,40 @@ class StepTrackerService : Service(), SensorEventListener {
     /** Short retries after a failed registration, before the heartbeat takes over. */
     private var registerRetries = 0
 
+    // ---- motion signature windows ----------------------------------------
+    //
+    // All of this state lives on the sensor thread: the tick, the samples and
+    // the close all run there, and the main-thread paths (pause, config,
+    // stop) post to it rather than touching it.
+
+    /** The window being filled, or null between windows. */
+    @Volatile
+    private var motionSampler: MotionWindowSampler? = null
+
+    /** `stepsToday` when the open window started, for `stepsDuringWindow`. */
+    private var motionStepsAtOpen = 0
+
+    /** `stepsToday` and date when the last window closed: no new steps, no new window. */
+    private var motionLastSteps = -1
+    private var motionLastDate: String? = null
+
+    /** Held only while a window is open on a non-wake-up accelerometer; timed, so it cannot leak. */
+    private var motionWakeLock: PowerManager.WakeLock? = null
+
+    private val motionTick = object : Runnable {
+        override fun run() {
+            val config = core.config()
+            // Not rescheduled once disabled; scheduleMotionSampling() starts
+            // it again when config turns it back on.
+            if (!config.motionSamplingEnabled) return
+            maybeOpenMotionWindow(config)
+            sensorHandler?.postDelayed(this, config.motionIntervalMinutes * 60_000L)
+        }
+    }
+
+    /** Closes a window the sensor stopped delivering into, so one can never stay open. */
+    private val motionClose = Runnable { closeMotionWindow(store = true) }
+
     override fun onCreate() {
         super.onCreate()
         isAlive = true
@@ -174,6 +211,7 @@ class StepTrackerService : Service(), SensorEventListener {
                         threshold = core.config().accelerometerThreshold.toFloat()
                     )
                 }
+                scheduleMotionSampling()
                 pushNotification(force = true)
             }
             ServiceCommands.ACTION_REFRESH -> pushNotification(force = true)
@@ -283,6 +321,7 @@ class StepTrackerService : Service(), SensorEventListener {
             if (paused) TrackingState.PAUSED else TrackingState.RUNNING
         SyncScheduler.schedule(this, core.config())
         SyncScheduler.scheduleWatchdog(this, core.config())
+        scheduleMotionSampling()
         pushNotification(force = true)
         core.emitTrackingState(
             when {
@@ -318,6 +357,9 @@ class StepTrackerService : Service(), SensorEventListener {
         // steps that are going to be discarded. Let it go; resume() registers
         // again.
         if (core.state.source == SensorSource.ACCELEROMETER) unregisterSensors()
+        // A paused tracker discards its steps; a signature of them would be
+        // a signature of nothing that counts. Whatever is open is dropped.
+        scheduleMotionSampling()
         pushNotification(force = true)
         core.emitTrackingState("paused")
     }
@@ -327,6 +369,7 @@ class StepTrackerService : Service(), SensorEventListener {
         core.engine.reconcile()
         if (!listening) registerSensors()
         core.state.trackingState = TrackingState.RUNNING
+        scheduleMotionSampling()
         pushNotification(force = true)
         core.emitTrackingState("resumed")
     }
@@ -335,6 +378,7 @@ class StepTrackerService : Service(), SensorEventListener {
         core.state.shouldAutoStart = false
         core.state.trackingState = TrackingState.STOPPED
         core.flush()
+        scheduleMotionSampling()
         unregisterSensors()
         core.emitTrackingState("stopped")
         stopForegroundCompat()
@@ -427,6 +471,10 @@ class StepTrackerService : Service(), SensorEventListener {
     }
 
     private fun unregisterSensors() {
+        // Unregistering the listener takes the window's accelerometer with
+        // it, so the window is dropped rather than left waiting for samples
+        // that will not come.
+        if (motionSampler != null) closeMotionWindow(store = false)
         if (!listening) return
         runCatching { sensorManager?.unregisterListener(this) }
         listening = false
@@ -434,10 +482,132 @@ class StepTrackerService : Service(), SensorEventListener {
         releaseWakeLock()
     }
 
+    // ---- motion signature windows ----------------------------------------
+
+    /**
+     * Arms or disarms the periodic tick from the current config and state.
+     * Posted to the sensor thread, where the tick and the samples live.
+     * Anything already open is dropped: a config change or a pause makes it
+     * a window under rules that no longer apply.
+     */
+    private fun scheduleMotionSampling() {
+        val handler = sensorHandler ?: return
+        handler.post {
+            handler.removeCallbacks(motionTick)
+            closeMotionWindow(store = false)
+            val config = core.config()
+            if (!config.motionSamplingEnabled) return@post
+            if (!core.shouldBeRunning() || core.engine.paused) return@post
+            handler.postDelayed(motionTick, config.motionIntervalMinutes * 60_000L)
+        }
+    }
+
+    /**
+     * Opens a window when there is something worth a signature: tracking is
+     * live, steps have accrued since the last window, and the phone is either
+     * in the foreground or has the battery exemption. A background sample on
+     * a phone the user has not exempted is exactly the kind of cost Doze
+     * exists to stop, so it is not taken.
+     */
+    private fun maybeOpenMotionWindow(config: com.steptrackerpro.core.StepTrackerConfig) {
+        if (motionSampler != null) return
+        if (!listening || core.engine.paused) return
+        val sensor = accelerometerSensor ?: return
+        val manager = sensorManager ?: return
+        val handler = sensorHandler ?: return
+
+        val steps = core.state.stepsToday
+        val date = core.state.activeDate
+        if (steps <= 0) return
+        if (date == motionLastDate && steps <= motionLastSteps) return
+
+        if (!isAppInForeground() && BatteryOptimizationHelper.isOptimizationEnabled(this)) return
+
+        val windowMs = config.motionWindowSeconds * 1_000L
+        // On a phone counting over the accelerometer the samples are already
+        // arriving; the sampler just listens in. Otherwise the accelerometer
+        // is registered for the window and released with it.
+        if (core.state.source != SensorSource.ACCELEROMETER) {
+            val ok = manager.registerListener(
+                this, sensor, ACCELEROMETER_PERIOD_US, ACCELEROMETER_MAX_LATENCY_US, handler
+            )
+            if (!ok) return
+            // Same policy as the fallback pedometer: a non-wake-up sensor
+            // stops delivering when the CPU sleeps, so hold it awake for the
+            // window - and no longer, hence the timeout.
+            if (!sensor.isWakeUpSensor && config.accelerometerWakeLock && wakeLock?.isHeld != true) {
+                acquireMotionWakeLock(windowMs + MOTION_CLOSE_GRACE_MS)
+            }
+        }
+        motionStepsAtOpen = steps
+        motionSampler = MotionWindowSampler(System.currentTimeMillis(), windowMs)
+        handler.postDelayed(motionClose, windowMs + MOTION_CLOSE_GRACE_MS)
+    }
+
+    /**
+     * Ends the open window. With [store], the features are computed and
+     * handed to the core - unless too few samples arrived to say anything,
+     * in which case there is no signature and nothing is stored.
+     */
+    private fun closeMotionWindow(store: Boolean) {
+        val sampler = motionSampler ?: return
+        motionSampler = null
+        sensorHandler?.removeCallbacks(motionClose)
+        if (core.state.source != SensorSource.ACCELEROMETER) {
+            // The sensor-specific overload: the bare one would take the step
+            // counter down with it.
+            accelerometerSensor?.let { runCatching { sensorManager?.unregisterListener(this, it) } }
+        }
+        releaseMotionWakeLock()
+        val steps = core.state.stepsToday
+        motionLastSteps = steps
+        motionLastDate = core.state.activeDate
+        if (!store) return
+        // A rollover inside the window makes the difference negative; that
+        // window's step count is simply unknown, and 0 is the honest floor.
+        val features = sampler.features((steps - motionStepsAtOpen).coerceAtLeast(0))
+        if (features.sampleCount < MotionWindowSampler.MIN_SAMPLES) return
+        core.recordMotionWindow(features)
+    }
+
+    /** Whether an activity of this app is on screen; a foreground *service* alone does not count. */
+    private fun isAppInForeground(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(info)
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
+    private fun acquireMotionWakeLock(timeoutMs: Long) {
+        if (motionWakeLock?.isHeld == true) return
+        val power = getSystemService(POWER_SERVICE) as? PowerManager ?: return
+        motionWakeLock = runCatching {
+            power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, MOTION_WAKE_LOCK_TAG).also {
+                it.setReferenceCounted(false)
+                it.acquire(timeoutMs)
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseMotionWakeLock() {
+        motionWakeLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        motionWakeLock = null
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
         val sensorEvent = event ?: return
         val values = sensorEvent.values
         if (values == null || values.isEmpty()) return
+
+        // An open motion window listens in on whatever accelerometer samples
+        // arrive, whether the sensor is the primary one or was registered for
+        // the window. The sample that fills the window closes it.
+        if (sensorEvent.sensor.type == Sensor.TYPE_ACCELEROMETER && values.size >= 3) {
+            motionSampler?.let { sampler ->
+                if (sampler.add(values[0], values[1], values[2], sensorEvent.timestamp / 1_000_000L)) {
+                    closeMotionWindow(store = true)
+                }
+            }
+        }
 
         val snapshot = when (sensorEvent.sensor.type) {
             Sensor.TYPE_STEP_COUNTER -> core.engine.onCounterSample(values[0], eventTime(sensorEvent))
@@ -619,6 +789,10 @@ class StepTrackerService : Service(), SensorEventListener {
         private const val ACCELEROMETER_MAX_LATENCY_US = 1_000_000
 
         private const val WAKE_LOCK_TAG = "steptrackerpro:accelerometer"
+        private const val MOTION_WAKE_LOCK_TAG = "steptrackerpro:motion"
+
+        /** How long past its length a window may wait for samples before it is closed anyway. */
+        private const val MOTION_CLOSE_GRACE_MS = 3_000L
 
         /** Quick retries after a failed sensor registration; the heartbeat continues after. */
         private val REGISTER_RETRY_DELAYS_MS = longArrayOf(2_000L, 5_000L, 15_000L, 30_000L)

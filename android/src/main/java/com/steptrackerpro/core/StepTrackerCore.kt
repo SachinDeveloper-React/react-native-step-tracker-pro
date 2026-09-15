@@ -548,6 +548,25 @@ class StepTrackerCore private constructor(context: Context) {
         )
     }
 
+    // ---- motion windows --------------------------------------------------
+
+    /**
+     * Stores one window's features and tells JS. On the write lane like every
+     * other table write; the table is trimmed to `motionWindowRetention` in
+     * the same transaction, so it is bounded by construction.
+     */
+    fun recordMotionWindow(features: MotionFeatures) {
+        val retention = config().motionWindowRetention
+        scope.launch(writeLane) {
+            repository.addMotionWindow(features, retention)
+            StepEventBus.emit(StepEventBus.Events.MOTION_WINDOW, features.toMap())
+        }
+    }
+
+    /** Windows that opened on the days between the two keys, inclusive. */
+    suspend fun motionWindows(start: String, end: String): List<MotionFeatures> =
+        repository.motionWindows(DateKeys.startOfDayMillis(start), DateKeys.endOfDayMillis(end))
+
     // ---- continuity ------------------------------------------------------
 
     private fun storedBaseline(): StepContinuity.Baseline? {

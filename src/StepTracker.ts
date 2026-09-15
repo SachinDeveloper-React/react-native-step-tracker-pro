@@ -11,6 +11,7 @@ import type {
   DeviceCapabilities,
   EventSubscription,
   HealthConnectStatus,
+  MotionWindow,
   PermissionStatus,
   RangeOptions,
   RangeStats,
@@ -177,6 +178,29 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
       'accelerometerThreshold must be 0.3–10 m/s²'
     );
   }
+  const motion = config.motionSampling;
+  if (motion != null) {
+    // The sampler holds a minute at 50 Hz and does not resample, and an
+    // interval under a minute is a poll, not a signature.
+    if (
+      motion.windowSeconds != null &&
+      !(motion.windowSeconds >= 1 && motion.windowSeconds <= 60)
+    ) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'motionSampling.windowSeconds must be 1–60'
+      );
+    }
+    if (motion.intervalMinutes != null && !(motion.intervalMinutes >= 1)) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'motionSampling.intervalMinutes must be >= 1'
+      );
+    }
+  }
+  if (config.motionWindowRetention != null && !(config.motionWindowRetention >= 1)) {
+    throw new StepTrackerError('E_INVALID_CONFIG', 'motionWindowRetention must be >= 1');
+  }
   // Only the keys the caller supplied cross the bridge. The native side holds
   // the same defaults and, more importantly, holds whatever the user set last
   // session: spreading DEFAULT_CONFIG here sent `height: 170` on every
@@ -319,6 +343,19 @@ export const StepTracker = {
     return call(() =>
       getNativeModule().getVerificationSnapshot(date)
     ) as Promise<VerificationSnapshot>;
+  },
+
+  /**
+   * Motion signature windows that opened on the days between the two dates,
+   * inclusive, oldest first. Empty unless `motionSampling.enabled`. Features
+   * only — the samples were discarded on device.
+   */
+  async getMotionWindows(startDate: string, endDate: string): Promise<MotionWindow[]> {
+    assertRange(startDate, endDate);
+    const result = (await call(() =>
+      getNativeModule().getMotionWindows(startDate, endDate)
+    )) as { windows: MotionWindow[] };
+    return result.windows;
   },
 
   // ---- writes ----------------------------------------------------------
@@ -622,6 +659,7 @@ export const StepTracker = {
           'trackingStateChanged',
           'dayChanged',
           'historyBackfilled',
+          'motionWindow',
           'syncCompleted',
           'stepSourceChanged',
           'healthConnectStatusChanged',

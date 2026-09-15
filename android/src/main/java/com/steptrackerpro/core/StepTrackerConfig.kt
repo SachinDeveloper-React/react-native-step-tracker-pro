@@ -130,7 +130,21 @@ data class StepTrackerConfig(
      */
     val accelerometerWakeLock: Boolean = true,
     /** Peak linear acceleration, m/s², that counts as a step. */
-    val accelerometerThreshold: Double = AccelerometerStepDetector.DEFAULT_THRESHOLD.toDouble()
+    val accelerometerThreshold: Double = AccelerometerStepDetector.DEFAULT_THRESHOLD.toDouble(),
+    /**
+     * Sample the accelerometer for one short window every few minutes while
+     * steps are accruing, and store a handful of features describing the
+     * motion - never the samples. Off by default: it is an extra sensor
+     * registration and, on a non-wake-up accelerometer, a wake lock for the
+     * window, and only an app that verifies steps server-side has a use for
+     * the result. JS presents these three as `motionSampling: { enabled,
+     * windowSeconds, intervalMinutes }`.
+     */
+    val motionSamplingEnabled: Boolean = false,
+    val motionWindowSeconds: Int = MotionDefaults.WINDOW_SECONDS,
+    val motionIntervalMinutes: Int = MotionDefaults.INTERVAL_MINUTES,
+    /** How many windows to keep. 288 is a day at five-minute intervals. */
+    val motionWindowRetention: Int = MotionDefaults.RETENTION
 ) {
 
     /**
@@ -176,7 +190,12 @@ data class StepTrackerConfig(
             accelerometerThreshold.coerceIn(0.3, 10.0)
         } else {
             AccelerometerStepDetector.DEFAULT_THRESHOLD.toDouble()
-        }
+        },
+        // A window longer than the sampler keeps is pointless; an interval
+        // under a minute is a poll, not a signature.
+        motionWindowSeconds = motionWindowSeconds.coerceIn(1, MotionDefaults.MAX_WINDOW_SECONDS),
+        motionIntervalMinutes = motionIntervalMinutes.coerceAtLeast(1),
+        motionWindowRetention = motionWindowRetention.coerceAtLeast(1)
     )
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -220,6 +239,10 @@ data class StepTrackerConfig(
         put("accelerometerFallback", accelerometerFallback)
         put("accelerometerWakeLock", accelerometerWakeLock)
         put("accelerometerThreshold", accelerometerThreshold)
+        put("motionSamplingEnabled", motionSamplingEnabled)
+        put("motionWindowSeconds", motionWindowSeconds)
+        put("motionIntervalMinutes", motionIntervalMinutes)
+        put("motionWindowRetention", motionWindowRetention)
     }
 
     companion object {
@@ -306,6 +329,16 @@ data class StepTrackerConfig(
                 ),
                 accelerometerThreshold = json.optDouble(
                     "accelerometerThreshold", fallback.accelerometerThreshold
+                ),
+                motionSamplingEnabled = json.optBoolean(
+                    "motionSamplingEnabled", fallback.motionSamplingEnabled
+                ),
+                motionWindowSeconds = json.optInt("motionWindowSeconds", fallback.motionWindowSeconds),
+                motionIntervalMinutes = json.optInt(
+                    "motionIntervalMinutes", fallback.motionIntervalMinutes
+                ),
+                motionWindowRetention = json.optInt(
+                    "motionWindowRetention", fallback.motionWindowRetention
                 )
             )
         }
@@ -352,4 +385,14 @@ class ConfigStore(context: Context) {
         const val PREFS_NAME = "StepTrackerProConfig"
         private const val KEY_CONFIG = "config_json"
     }
+}
+
+/** Defaults for motion signature windows, shared by config and the TypeScript layer's docs. */
+object MotionDefaults {
+    const val WINDOW_SECONDS = 10
+    const val INTERVAL_MINUTES = 5
+    /** A day at five-minute intervals. */
+    const val RETENTION = 288
+    /** The sampler holds a minute at 50 Hz; longer would be resampling, which it does not do. */
+    const val MAX_WINDOW_SECONDS = 60
 }

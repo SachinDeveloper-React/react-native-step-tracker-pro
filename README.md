@@ -101,6 +101,7 @@ getTrackingHealth()
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
 getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date)
+getMotionWindows(from, to)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
@@ -119,8 +120,8 @@ resetToday()                  clearHistory()            pruneHistory(days)
 ```
 
 Events: `stepsChanged`, `goalReached`, `goalProgressChanged`,
-`trackingStateChanged`, `dayChanged`, `historyBackfilled`, `syncCompleted`,
-`stepSourceChanged`, `healthConnectStatusChanged`, `error`.
+`trackingStateChanged`, `dayChanged`, `historyBackfilled`, `motionWindow`,
+`syncCompleted`, `stepSourceChanged`, `healthConnectStatusChanged`, `error`.
 
 ```ts
 const sub = StepTracker.addListener("goalReached", ({ type, goal }) => {});
@@ -260,14 +261,15 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Forty-five Jest tests cover config validation and the flows in the JS
-layer. Eighty-five JVM tests cover step-source resolution, the `auto` merge
+Fifty-one Jest tests cover config validation and the flows in the JS
+layer. Ninety-two JVM tests cover step-source resolution, the `auto` merge
 and its coverage rule, manual-entry exclusion and wearable trust, gap
 splitting under all four policies, the accelerometer pedometer against
-synthetic gait, and the remote payload — chiefly that a phone and a watch
-are never added together, that a phone-side app cannot inflate a covered
-day, that a typed-in number never becomes the day's number, and that a car
-is not a walk. Thirty-one instrumented tests cover the reboot, midnight,
+synthetic gait, motion signatures against a synthetic walk and shake, and
+the remote payload — chiefly that a phone and a watch are never added
+together, that a phone-side app cannot inflate a covered day, that a
+typed-in number never becomes the day's number, and that a car is not a
+walk. Thirty-one instrumented tests cover the reboot, midnight,
 overnight-kill, capped-recovery, sensor-jitter, pause and counter-reset
 paths by feeding samples to the engine directly, plus the Room migration
 against real rows, so they run on an emulator with no step hardware. CI

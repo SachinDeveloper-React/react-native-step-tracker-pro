@@ -23,6 +23,8 @@ object StepEventBus {
          * so an app that has already settled that day knows to look again.
          */
         const val HISTORY_BACKFILLED = "historyBackfilled"
+        /** One motion signature window was stored. Payload is its features, never samples. */
+        const val MOTION_WINDOW = "motionWindow"
         const val SYNC_COMPLETED = "syncCompleted"
         /** The app now counting for the user changed - watch on, watch off. */
         const val STEP_SOURCE_CHANGED = "stepSourceChanged"

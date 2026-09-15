@@ -5,6 +5,7 @@ import androidx.room.withTransaction
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.MetricsCalculator
+import com.steptrackerpro.core.MotionFeatures
 import com.steptrackerpro.core.RangeStats
 import com.steptrackerpro.core.SyncTarget
 
@@ -17,6 +18,7 @@ class StepRepository(context: Context) {
     private val db = StepDatabase.get(context)
     private val history = db.stepHistoryDao()
     private val summaries = db.dailySummaryDao()
+    private val motion = db.motionWindowDao()
 
     /**
      * Writes a day, refusing to lower an existing count. Both tables move in one
@@ -158,7 +160,46 @@ class StepRepository(context: Context) {
     suspend fun clear() {
         history.deleteAll()
         summaries.deleteAll()
+        motion.deleteAll()
     }
+
+    // ---- motion windows ----------------------------------------------------
+
+    /**
+     * Stores one window and trims the table to the newest [retention]. The
+     * two run in one transaction so the table is never over the bound.
+     */
+    suspend fun addMotionWindow(features: MotionFeatures, retention: Int) = db.withTransaction {
+        motion.insert(
+            MotionWindowEntity(
+                date = DateKeys.of(features.startedAt),
+                startedAt = features.startedAt,
+                durationMs = features.durationMs,
+                sampleCount = features.sampleCount,
+                dominantFrequencyHz = features.dominantFrequencyHz,
+                variance = features.variance,
+                zeroCrossingRate = features.zeroCrossingRate,
+                peakRatio = features.peakRatio,
+                stepsDuringWindow = features.stepsDuringWindow
+            )
+        )
+        motion.pruneToNewest(retention.coerceAtLeast(1))
+    }
+
+    /** Windows that opened between the two instants, oldest first. */
+    suspend fun motionWindows(fromMs: Long, toMs: Long): List<MotionFeatures> =
+        motion.findRange(fromMs, toMs).map {
+            MotionFeatures(
+                startedAt = it.startedAt,
+                durationMs = it.durationMs,
+                sampleCount = it.sampleCount,
+                dominantFrequencyHz = it.dominantFrequencyHz,
+                variance = it.variance,
+                zeroCrossingRate = it.zeroCrossingRate,
+                peakRatio = it.peakRatio,
+                stepsDuringWindow = it.stepsDuringWindow
+            )
+        }
 
     private fun StepHistoryEntity.toTotals(summary: DailySummaryEntity?) =
         DayTotals(

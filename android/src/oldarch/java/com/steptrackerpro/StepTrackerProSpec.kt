@@ -32,6 +32,7 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun getYearlyStats(options: ReadableMap, promise: Promise)
     abstract fun getHistory(startDate: String, endDate: String, promise: Promise)
     abstract fun getVerificationSnapshot(date: String, promise: Promise)
+    abstract fun getMotionWindows(startDate: String, endDate: String, promise: Promise)
 
     abstract fun resetToday(promise: Promise)
     abstract fun clearHistory(promise: Promise)

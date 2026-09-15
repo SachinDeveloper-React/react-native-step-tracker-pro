@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer (45 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, remote payload (85 tests, no device)
+npm test                 # Jest, JS layer (51 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload (92 tests, no device)
 npm run test:android:device   # instrumented engine and Room migration tests
 ```
 

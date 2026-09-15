@@ -126,6 +126,27 @@ events, the same remote payload. Everything is opt-in or additive.
   records → same key, one step changed → different key, and the default body
   has exactly the four fields it had in 1.3.
 
+#### Motion signature windows (opt-in)
+
+- `motionSampling: { enabled, windowSeconds?: 10, intervalMinutes?: 5 }`
+  config, default disabled. While tracking is running and steps have accrued
+  since the last window, the service samples the accelerometer for one window
+  and stores **features only — never raw traces**: `dominantFrequencyHz`,
+  `variance`, `zeroCrossingRate`, `peakRatio`, `stepsDuringWindow`,
+  `startedAt`. Enough for a server to tell a 1.8 Hz walk from a 4 Hz shake;
+  not enough to reconstruct anything. The last `motionWindowRetention`
+  (default 288, a day at five-minute intervals) are kept in a new
+  `motion_window` table (Room schema 4, additive migration).
+- `getMotionWindows(startDate, endDate)` and the `motionWindow` event.
+- Sampling stops while paused, is skipped while the app is in the background
+  without the battery exemption, listens in on the pedometer's own samples on
+  an accelerometer-only phone rather than registering twice, and on a
+  non-wake-up accelerometer holds a timed partial wake lock for the window
+  only when `accelerometerWakeLock` allows — the existing wake-lock policy.
+- Seven JVM tests feed synthetic walking and shaking traces and assert the
+  features separate them on frequency, variance, crossing rate and purity,
+  at 20 Hz and 50 Hz alike, and that a still phone reports no frequency.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin

@@ -196,14 +196,27 @@ it as shared, state the recipient, confirm encryption in transit (use HTTPS —
 the worker will happily post to `http://`, and you should not), and offer a
 deletion path.
 
-## 6. Notification content
+## 6. Motion signature windows
+
+With `motionSampling.enabled`, the service samples the accelerometer for a
+few seconds every few minutes while the user is walking and stores a handful
+of derived numbers per window — a dominant frequency, a variance, a
+zero-crossing rate, a peak ratio and the steps counted meanwhile. The raw
+samples are reduced on device and discarded; nothing that could reconstruct
+the movement is kept or sent. The accelerometer needs no permission, but the
+features are sensor-derived data about the user: name them in your privacy
+policy if you enable this, and in the data safety form under fitness info
+if they leave the device through your own endpoint. The package's built-in
+uploader does not include them.
+
+## 7. Notification content
 
 Android 13+ makes notifications a runtime permission. Denying it hides the
 notification but does not stop the service, and `allGranted` in
 `checkPermissions()` reflects that deliberately. Do not block your onboarding on
 `POST_NOTIFICATIONS`.
 
-## 7. Package visibility (`<queries>`)
+## 8. Package visibility (`<queries>`)
 
 The library manifest declares `<queries>` for the Health Connect provider, the
 Play Store, ~25 wearable companion apps and ~20 OEM battery managers. These are
@@ -211,7 +224,7 @@ not permissions and need no declaration; they exist so the package can tell
 whether those apps are installed on Android 11+. Play's *package visibility*
 policy only restricts `QUERY_ALL_PACKAGES`, which the package does not use.
 
-## 8. Pre-launch checklist
+## 9. Pre-launch checklist
 
 - [ ] Picked a [usage mode](USAGE_MODES.md) and removed the manifest entries it does not need
 - [ ] Foreground service declaration submitted, with a video (Modes A, C)

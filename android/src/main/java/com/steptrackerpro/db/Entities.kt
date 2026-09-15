@@ -76,3 +76,29 @@ data class DailySummaryEntity(
     @ColumnInfo(name = "updatedAt")
     val updatedAt: Long = System.currentTimeMillis()
 )
+
+/**
+ * One motion signature window: a handful of features describing how the
+ * phone moved for a few seconds, never the samples themselves. Bounded by
+ * `motionWindowRetention` (default 288, a day at five-minute intervals) and
+ * pruned on every insert, so the table cannot grow past that.
+ */
+@Entity(
+    tableName = "motion_window",
+    indices = [Index(value = ["startedAt"])]
+)
+data class MotionWindowEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    /** yyyy-MM-dd the window opened on, device local. */
+    val date: String,
+    /** Epoch ms the window opened. */
+    val startedAt: Long,
+    val durationMs: Long,
+    val sampleCount: Int,
+    val dominantFrequencyHz: Double,
+    val variance: Double,
+    val zeroCrossingRate: Double,
+    val peakRatio: Double,
+    val stepsDuringWindow: Int
+)

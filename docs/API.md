@@ -261,6 +261,44 @@ A server-side rule set that fits this shape:
 The built-in uploader sends the same per-source detail with
 `remoteSyncPayload: 'full'` — see [Remote sync](#remote-sync).
 
+### `getMotionWindows(startDate, endDate): Promise<MotionWindow[]>`
+
+Motion signature windows that opened on the days between the two dates,
+inclusive, oldest first. Empty unless `motionSampling.enabled`.
+
+With `motionSampling: { enabled: true }`, every `intervalMinutes` (default 5)
+while tracking is running and steps have accrued since the last window, the
+service samples the accelerometer for `windowSeconds` (default 10) and keeps
+**features only — never the samples**:
+
+```ts
+{
+  startedAt: 1757845200000,   // epoch ms the window opened
+  durationMs: 10040,
+  sampleCount: 251,
+  dominantFrequencyHz: 1.8,   // gait 1.2–2.5; a hand shake 3–6; still → 0
+  variance: 2.1,              // (m/s²)² of the mean-removed magnitude; a shake is tens
+  zeroCrossingRate: 3.6,      // ≈ 2 × the frequency for a clean oscillation
+  peakRatio: 0.62,            // share of in-band energy at the peak; a shake is near 1
+  stepsDuringWindow: 18,
+}
+```
+
+Enough for a server to tell a walk from a phone being shaken — a walk at
+1.8 Hz and a shake at 4 Hz are more than 2 Hz, an order of magnitude of
+variance and twice the crossing rate apart — and not enough to reconstruct
+anything about the movement. Each window also arrives on the `motionWindow`
+event. The last `motionWindowRetention` (default 288, a day at five-minute
+intervals) are kept; older ones are dropped as new ones are stored.
+
+Sampling stops while paused, is skipped while the app is in the background
+without the battery-optimisation exemption, and on a non-wake-up
+accelerometer holds a partial wake lock for the window's length only when
+`accelerometerWakeLock` allows — the same policy as the software pedometer.
+On a phone counting over the accelerometer already, the window listens in on
+the samples that are arriving; nothing extra is registered. A window that saw
+too few samples to say anything is discarded rather than stored.
+
 ---
 
 ## Writes
@@ -801,6 +839,7 @@ StepTracker.removeListener();              // everything
 | `stepSourceChanged` | `ResolvedStepSource`. Fires when the app answering for the user's steps flips — a watch coming into range mid-morning, or a pin being changed. |
 | `healthConnectStatusChanged` | `HealthConnectStatus`. Fires after a permission request, a revoke, and on every foreground where the status moved — which is how you notice the user granting or revoking from outside the app. |
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
+| `motionWindow` | `MotionWindow`. One motion signature window was stored — see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Features only. |
 | `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it. Once per affected day, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
 | `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
@@ -854,6 +893,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `accelerometerFallback` | `true` | count over the accelerometer on phones with neither step sensor — see [ARCHITECTURE.md](ARCHITECTURE.md#the-accelerometer-fallback) |
 | `accelerometerWakeLock` | `true` | hold a partial wake lock while sampling a non-wake-up accelerometer, so counting survives the screen going off |
 | `accelerometerThreshold` | `0.9` | m/s² of linear acceleration that counts as a step; raise for vehicle false positives, lower for missed gentle walks |
+| `motionSampling` | `{ enabled: false }` | `{ enabled, windowSeconds?: 10, intervalMinutes?: 5 }` — periodic accelerometer windows reduced to features on device; see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow) |
+| `motionWindowRetention` | 288 | how many motion windows to keep; a day at five-minute intervals |
 
 ---
 
