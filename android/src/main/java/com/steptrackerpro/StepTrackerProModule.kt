@@ -347,6 +347,18 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * One call with everything a server needs to judge a day, nothing
+     * resolved for it. The date is validated in JS; a malformed one that
+     * reaches here fails in DateKeys and rejects like any other bad input.
+     */
+    @ReactMethod
+    override fun getVerificationSnapshot(date: String, promise: Promise) {
+        launchSafely(promise) {
+            promise.resolve(Bridge.map(core.verificationSnapshot(date)))
+        }
+    }
+
     // ---- writes ----------------------------------------------------------
 
     @ReactMethod

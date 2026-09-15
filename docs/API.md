@@ -181,6 +181,86 @@ by days that have not happened yet.
 Raw rows, zero-filled. Use this to draw charts; use `getStatsForRange` when you
 want the aggregates computed for you.
 
+### `getVerificationSnapshot(date: string): Promise<VerificationSnapshot>`
+
+Everything a server needs to judge one day, with **nothing resolved for it**.
+An app that converts steps into anything of value should post this rather
+than `steps`: the server never trusts a single resolved number, it wants the
+phone's own count and every Health Connect origin separately, it wants to
+know which records were typed in by hand, and it wants the recovered share
+split out.
+
+```ts
+{
+  date: '2026-09-14',
+  deviceSteps: 7431,          // this phone's own sensor; never Health Connect
+  recoveredSteps: 800,        // of deviceSteps, credited in one go by gap recovery
+  sensor: 'step_counter',     // 'step_detector' / 'accelerometer' lose steps while dead
+  coverageStartAt: 0,         // epoch ms this device covered the day from; 0 = whole day
+  sources: [                  // every origin, unresolved, self included; [] without a grant
+    { packageName: 'com.example.app', kind: 'self', steps: 7431, manualSteps: 0, ... },
+    { packageName: 'com.fitbit.FitbitMobile', kind: 'watch', steps: 8240,
+      manualSteps: 0, recordingMethods: { active: 0, automatic: 8240, manual: 0, unknown: 0 },
+      isWearable: true, trustedWearable: true, ... },
+    { packageName: 'com.example.other', kind: 'app', steps: 20000,
+      manualSteps: 20000, isWearable: false, trustedWearable: false, ... },
+  ],
+  resolved: { steps: 8240, kind: 'watch', packageName: 'com.fitbit.FitbitMobile',
+              usedExternal: true, merged: false, manualStepsExcluded: 0, ... },
+  capabilities: { hasStepCounter: true, hasStepDetector: true,
+                  manufacturer: 'samsung', model: 'SM-S928B', sdkInt: 35 },
+  health: { recoveryCount: 4, lastRecoveryReason: 'watchdog',
+            batteryOptimizationEnabled: true, aggressiveOem: false },
+  clock: { wallClockMs: 1757845200000, bootId: 1757800000000,
+           timezone: 'Asia/Kolkata', utcOffsetMinutes: 330 },
+}
+```
+
+`resolved` is what the current policy chose, for comparison only. `sources`
+follows the same rules as every other Health Connect read — no provider, no
+grant or `stepSource: 'device'` leaves it empty, never an error — and each
+source carries `manualSteps`, `recordingMethods` and `trustedWearable`.
+`coverageStartAt` is only known for today; a past day reads `0`. `clock`
+puts the wall clock next to a boot id derived from `elapsedRealtime`: a clock
+edit moves both and leaves the uptime behind `bootId` alone, so two snapshots
+from the same boot with different `bootId`s mean the clock was changed
+between them. Rejects with `E_INVALID_CONFIG` before touching native when
+`date` is not `yyyy-MM-dd`.
+
+**Posting it.** Upload the day you are about to pay for, and let the server
+decide:
+
+```ts
+async function settle(date: string) {
+  const snapshot = await StepTracker.getVerificationSnapshot(date);
+  const response = await fetch('https://api.example.com/steps/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ userId, snapshot }),
+  });
+  return (await response.json()) as { creditedSteps: number; reason: string };
+}
+```
+
+A server-side rule set that fits this shape:
+
+- credit `deviceSteps - recoveredSteps` from a `'step_counter'` sensor
+  outright; treat `recoveredSteps` and anything from an `'accelerometer'`
+  as lower-confidence, and `bootId` moving without a reboot as a clock edit;
+- for each source in `sources`, ignore `manualSteps` entirely, and give
+  `steps - manualSteps` full weight only when `trustedWearable` is true;
+  otherwise cap it at what the phone covered
+  (`deviceSteps`, or the part before `coverageStartAt` on an install day);
+- never re-bucket a day already paid: a later snapshot for the same `date`
+  with a higher `deviceSteps` is a `historyBackfilled` recovery, and whether
+  to honour it is policy, not arithmetic — `gapRecovery: 'today_capped'`
+  or `'drop'` stops it happening at all;
+- use `health.recoveryCount` and `aggressiveOem` to explain a low day, not
+  to inflate one.
+
+The built-in uploader sends the same per-source detail with
+`remoteSyncPayload: 'full'` — see [Remote sync](#remote-sync).
+
 ---
 
 ## Writes

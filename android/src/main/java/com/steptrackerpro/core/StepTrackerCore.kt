@@ -473,6 +473,73 @@ class StepTrackerCore private constructor(context: Context) {
      */
     private fun coverageReliable(): Boolean = state.source == SensorSource.STEP_COUNTER
 
+    // ---- verification ----------------------------------------------------
+
+    /**
+     * Everything a server needs to judge one day, with nothing resolved for
+     * it: this phone's own count and recovered share, every Health Connect
+     * origin unresolved and self included, what the current policy would
+     * have said (for comparison only), the sensor and device the count came
+     * from, how often the service has had to be recovered, and the clock. A
+     * server that pays for steps never trusts a single resolved number; this
+     * is the shape it verifies instead of stitching four calls together.
+     *
+     * Health Connect is consulted under the same rules as every other read:
+     * no grant, no provider or the `device` policy leave `sources` empty and
+     * `resolved` on this device, never an error.
+     */
+    suspend fun verificationSnapshot(date: String): Map<String, Any?> {
+        val today = date == DateKeys.today()
+        if (today) engine.reconcile()
+        val device = dayTotals(date)
+        val sources = if (shouldConsultHealthConnect()) stampTrust(sourcesForDay(date)) else emptyList()
+        val resolved = resolveDay(date)
+        val capabilities = com.steptrackerpro.util.PermissionHelper.capabilities(
+            appContext, allowAccelerometer = config().accelerometerFallback
+        )
+        val health = trackingHealth()
+        val zone = DateKeys.zone()
+        val now = System.currentTimeMillis()
+        return mapOf(
+            "date" to date,
+            // This phone's own sensor, before any policy. Never Health Connect.
+            "deviceSteps" to device.steps,
+            "recoveredSteps" to device.recoveredSteps,
+            "sensor" to state.source.jsValue,
+            // Only today's coverage is known; a past day reads 0, which is
+            // also what a day covered from midnight reads.
+            "coverageStartAt" to if (today) {
+                coverageStartForToday().takeIf { it > DateKeys.startOfDayMillis(date) } ?: 0L
+            } else {
+                0L
+            },
+            "sources" to sources.map { it.toMap() },
+            "resolved" to resolved.toMap(),
+            "capabilities" to mapOf(
+                "hasStepCounter" to capabilities["hasStepCounter"],
+                "hasStepDetector" to capabilities["hasStepDetector"],
+                "manufacturer" to capabilities["manufacturer"],
+                "model" to capabilities["model"],
+                "sdkInt" to capabilities["sdkInt"]
+            ),
+            "health" to mapOf(
+                "recoveryCount" to health["recoveryCount"],
+                "lastRecoveryReason" to health["lastRecoveryReason"],
+                "batteryOptimizationEnabled" to health["batteryOptimizationEnabled"],
+                "aggressiveOem" to health["aggressiveOem"]
+            ),
+            // The wall clock next to a boot id derived from elapsedRealtime:
+            // a clock edit moves the first and not the uptime behind the
+            // second, so a server comparing snapshots can see the seam.
+            "clock" to mapOf(
+                "wallClockMs" to now,
+                "bootId" to StepCounterEngine.currentBootId(),
+                "timezone" to zone.id,
+                "utcOffsetMinutes" to zone.rules.getOffset(Instant.ofEpochMilli(now)).totalSeconds / 60
+            )
+        )
+    }
+
     // ---- continuity ------------------------------------------------------
 
     private fun storedBaseline(): StepContinuity.Baseline? {

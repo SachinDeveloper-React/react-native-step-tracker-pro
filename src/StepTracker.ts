@@ -24,6 +24,7 @@ import type {
   SyncEvent,
   TrackingHealth,
   TrackingState,
+  VerificationSnapshot,
 } from './types';
 
 const LINKING_ERROR =
@@ -100,6 +101,12 @@ export function estimateStride(
 }
 
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}$/;
+
+function assertDate(date: string): void {
+  if (!DATE_KEY.test(date)) {
+    throw new StepTrackerError('E_INVALID_CONFIG', 'Dates must be yyyy-MM-dd');
+  }
+}
 
 function assertRange(startDate: string, endDate: string): void {
   if (!DATE_KEY.test(startDate) || !DATE_KEY.test(endDate)) {
@@ -296,6 +303,22 @@ export const StepTracker = {
       getNativeModule().getHistory(startDate, endDate)
     )) as { records: DayRecord[] };
     return result.records;
+  },
+
+  /**
+   * Everything a server needs to judge one day, nothing resolved for it:
+   * this phone's own count and recovered share, every Health Connect origin
+   * unresolved (manual entries marked, wearable trust decided), what the
+   * policy chose for comparison, the sensor, the device, the service's
+   * recovery history and the clock. Post this, not `steps`.
+   *
+   * @param date yyyy-MM-dd
+   */
+  async getVerificationSnapshot(date: string): Promise<VerificationSnapshot> {
+    assertDate(date);
+    return call(() =>
+      getNativeModule().getVerificationSnapshot(date)
+    ) as Promise<VerificationSnapshot>;
   },
 
   // ---- writes ----------------------------------------------------------

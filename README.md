@@ -93,7 +93,7 @@ getTrackingHealth()
 
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
-getStatsForRange(from, to)    getHistory(from, to)
+getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
@@ -112,8 +112,8 @@ resetToday()                  clearHistory()            pruneHistory(days)
 ```
 
 Events: `stepsChanged`, `goalReached`, `goalProgressChanged`,
-`trackingStateChanged`, `dayChanged`, `syncCompleted`, `stepSourceChanged`,
-`healthConnectStatusChanged`, `error`.
+`trackingStateChanged`, `dayChanged`, `historyBackfilled`, `syncCompleted`,
+`stepSourceChanged`, `healthConnectStatusChanged`, `error`.
 
 ```ts
 const sub = StepTracker.addListener("goalReached", ({ type, goal }) => {});

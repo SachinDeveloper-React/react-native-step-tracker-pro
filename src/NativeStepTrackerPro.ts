@@ -29,6 +29,7 @@ export interface Spec extends TurboModule {
   getMonthlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getYearlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getHistory(startDate: string, endDate: string): Promise<UnsafeObject>;
+  getVerificationSnapshot(date: string): Promise<UnsafeObject>;
 
   // ---- writes ----------------------------------------------------------
   resetToday(): Promise<boolean>;

@@ -206,6 +206,24 @@ describe('date validation', () => {
     expect(native.calls).toHaveLength(0);
   });
 
+  it('getVerificationSnapshot() rejects a malformed date before touching native', async () => {
+    for (const bad of ['2026-9-1', '20260901', 'today', '']) {
+      await expect(StepTracker.getVerificationSnapshot(bad)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+        message: expect.stringMatching(/yyyy-MM-dd/),
+      });
+    }
+    expect(native.calls).toHaveLength(0);
+
+    native.when('getVerificationSnapshot', { date: '2026-09-14', deviceSteps: 7 });
+    await expect(
+      StepTracker.getVerificationSnapshot('2026-09-14')
+    ).resolves.toMatchObject({
+      deviceSteps: 7,
+    });
+    expect(native.calledWith('getVerificationSnapshot')).toEqual([['2026-09-14']]);
+  });
+
   it('unwraps history records', async () => {
     native.when('getHistory', { records: [{ date: '2026-09-09', steps: 1 }] });
     await expect(StepTracker.getHistory('2026-09-01', '2026-09-09')).resolves.toEqual([

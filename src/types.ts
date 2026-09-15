@@ -291,6 +291,64 @@ export interface RangeStats {
   goalProgress?: number;
 }
 
+/**
+ * Everything a server needs to judge one day, with nothing resolved for it.
+ * An app that converts steps into anything of value should post this rather
+ * than a single number: the phone's own count and every Health Connect origin
+ * arrive separately, typed-in records are marked, the recovered share is
+ * split out, and the clock is there to spot edits. `resolved` is what the
+ * current policy chose, for comparison only.
+ */
+export interface VerificationSnapshot {
+  /** yyyy-MM-dd in the device timezone. */
+  date: string;
+  /** What this phone's own sensor counted. Never includes Health Connect. */
+  deviceSteps: number;
+  /** Of `deviceSteps`, how many gap recovery credited in one go. See {@link DayRecord.recoveredSteps}. */
+  recoveredSteps: number;
+  /** This device's sensor. `'accelerometer'` and `'step_detector'` lose steps while the process is dead. */
+  sensor: SensorSource;
+  /**
+   * Epoch ms from which this device covered the day; 0 = whole day. Only
+   * set on an install day, and only known for today — a past day reads 0.
+   */
+  coverageStartAt: number;
+  /**
+   * Every Health Connect origin for the day, unresolved, including `self`
+   * (this app's own mirror). Empty when Health Connect is unavailable,
+   * reads are not granted, or `stepSource` is `'device'`. Each carries
+   * `manualSteps`, `recordingMethods` and `trustedWearable`.
+   */
+  sources: StepSource[];
+  /** What the current policy resolved to, for comparison only. */
+  resolved: ResolvedStepSource;
+  capabilities: Pick<
+    DeviceCapabilities,
+    'hasStepCounter' | 'hasStepDetector' | 'manufacturer' | 'model' | 'sdkInt'
+  >;
+  health: Pick<
+    TrackingHealth,
+    | 'recoveryCount'
+    | 'lastRecoveryReason'
+    | 'batteryOptimizationEnabled'
+    | 'aggressiveOem'
+  >;
+  /**
+   * Wall clock next to a boot id derived from `elapsedRealtime`. A clock
+   * edit moves `wallClockMs` and `bootId` together and leaves the uptime
+   * behind the boot id alone, so a server comparing two snapshots from the
+   * same boot can see the seam.
+   */
+  clock: {
+    wallClockMs: number;
+    /** Approximate epoch ms of the device's boot; constant for one boot unless the clock is edited. */
+    bootId: number;
+    /** IANA zone id, e.g. `Asia/Kolkata`. */
+    timezone: string;
+    utcOffsetMinutes: number;
+  };
+}
+
 export interface RangeOptions {
   /**
    * 'calendar' snaps to the current week (Mon–Sun), month or year.

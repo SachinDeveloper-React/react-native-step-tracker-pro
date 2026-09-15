@@ -95,6 +95,21 @@ events, the same remote payload. Everything is opt-in or additive.
   engine instrumented tests cover `today_capped`, the recovered share
   through a rollover, a reset and a re-seed, and the backfill reason.
 
+#### One verification snapshot for server-side ingest
+
+- `getVerificationSnapshot(date)`: everything a server needs to judge a day,
+  with nothing resolved for it — this phone's own `deviceSteps` and
+  `recoveredSteps`, the `sensor`, `coverageStartAt`, every Health Connect
+  origin unresolved and `self` included (each with `manualSteps`,
+  `recordingMethods` and `trustedWearable`), what the policy `resolved` for
+  comparison, the device `capabilities`, the service's recovery `health`,
+  and a `clock` block that puts the wall clock next to an
+  `elapsedRealtime`-derived boot id so a server can spot clock edits. Apps
+  that verify server-side were stitching this together from four calls.
+  The JS wrapper rejects a malformed date with `E_INVALID_CONFIG` before
+  touching native, like the range reads. [API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot)
+  has a worked example of posting it and a rule set for the other end.
+
 ### Project hygiene
 
 - The published tarball no longer carries `android/.kotlin/`. The Kotlin
