@@ -301,8 +301,27 @@ export interface FraudDetectionConfig {
 
 export type IntegrityMode = 'flag' | 'exclude';
 
+/** A Health Connect data type this package reads and writes. */
+export type HealthConnectDataType = 'steps' | 'distance' | 'totalCalories';
+
 /** A record type `healthConnectReadTypes` can name. */
-export type HealthConnectReadType = 'steps' | 'distance' | 'totalCalories';
+export type HealthConnectReadType = HealthConnectDataType;
+
+/**
+ * Where a distance figure came from, so a server can tell a measured
+ * distance from an estimate before checking it against the steps:
+ *
+ * - `'health_connect'`: the source's own distance records.
+ * - `'derived'`: estimated from the step count and stride - this phone's
+ *   count, this app's own records read back, or a resolved day filling in
+ *   for a source that gave no distance.
+ * - `'none'`: read, but the source wrote no distance; the figure is 0.
+ * - `'not_read'`: distance is not in `healthConnectReadTypes`, or the user
+ *   did not allow it on the sheet; the figure is 0.
+ *
+ * Check distance against steps on `'health_connect'` figures only.
+ */
+export type DistanceSource = 'health_connect' | 'derived' | 'none' | 'not_read';
 
 /**
  * What a flag says about a stretch of the day.
@@ -1030,10 +1049,31 @@ export interface HealthConnectStatus {
   readRequired: boolean;
   /** Writes are part of what this app asks for (`healthConnectWriteEnabled`). */
   writeRequired: boolean;
-  /** Reads are permitted. Enough to display a watch's steps. */
+  /** Every read type in `healthConnectReadTypes` is granted. */
   canRead: boolean;
-  /** Writes are permitted. Enough to mirror this device's steps. */
+  /** All three write permissions are granted. */
   canWrite: boolean;
+  /*
+   * The four below are always sent from 2.1.1. They are optional in the
+   * type only so status objects built by hand for 2.1.0 still type-check.
+   */
+  /**
+   * `READ_STEPS` is granted - all that reading a watch's steps needs. The
+   * sheet lets the user untick any single permission; with steps allowed
+   * and distance refused, the watch's steps are still used and its distance
+   * is derived from stride. Decide whether to show Health Connect data on
+   * this, not on `canRead`.
+   */
+  canReadSteps?: boolean;
+  /**
+   * Of `healthConnectReadTypes`, the ones the user granted. Compare with the
+   * config to offer "also allow distance".
+   */
+  grantedReadTypes?: HealthConnectDataType[];
+  /** `WRITE_STEPS` is granted - all mirroring needs; distance and calories go along when granted. */
+  canWriteSteps?: boolean;
+  /** The types the user allowed writing. */
+  grantedWriteTypes?: HealthConnectDataType[];
   backgroundReadGranted: boolean;
   historyReadGranted: boolean;
   grantedPermissions: string[];
@@ -1215,6 +1255,11 @@ export interface StepSource {
    * aggregate reads.
    */
   activeCalories: number;
+  /**
+   * Where `distance` came from; see {@link DistanceSource}. Always sent from
+   * 2.1.1, optional in the type for sources built by hand.
+   */
+  distanceSource?: DistanceSource;
 }
 
 /** The outcome of picking a source for one day. */
@@ -1255,6 +1300,13 @@ export interface ResolvedStepSource {
    * the count after the exclusion.
    */
   suspectStepsExcluded: number;
+  /**
+   * Where the day's distance came from: `'health_connect'` when it is the
+   * winning source's own distance, `'derived'` when it was estimated from
+   * the steps shown. Always sent from 2.1.1, optional in the type for
+   * objects built by hand.
+   */
+  distanceSource?: 'health_connect' | 'derived';
 }
 
 export interface CurrentStepSource extends ResolvedStepSource {

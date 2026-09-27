@@ -361,13 +361,16 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.1.0** — signs the evidence
-behind a day's totals with them (`getVerificationSnapshot(date, { include })`:
-minutes, motion windows, raw Health Connect records), keeps background upload
-failures for `getSyncStatus()`, lets an app read steps alone from Health
-Connect (`healthConnectReadTypes`), adds distance to the raw records and
-change tracking, and adds `prepareIntegrity()` with retryable Play error
-codes. **2.0.1** fixed `updateConfig()` (validation, and weekly and monthly
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.1.1** — a user who allows
+steps but unticks distance or calories on the Health Connect sheet keeps their
+watch's steps and the mirror (before, either stopped silently), the status
+says type by type what was allowed, and distances say whether they were
+measured or derived. **2.1.0** signed the evidence behind a day's totals
+with them (`getVerificationSnapshot(date, { include })`: minutes, motion
+windows, raw Health Connect records), kept background upload failures for
+`getSyncStatus()`, let an app read steps alone from Health Connect
+(`healthConnectReadTypes`), added distance to the raw records and change
+tracking, and added `prepareIntegrity()` with retryable Play error codes. **2.0.1** fixed `updateConfig()` (validation, and weekly and monthly
 goals following a new daily goal). **2.0.0** brought current toolchains
 (AGP 9 with or without built-in Kotlin, Kotlin 2.2, compileSdk 37, React
 Native 0.82+ as new-architecture-only), a minimal manifest that declares only

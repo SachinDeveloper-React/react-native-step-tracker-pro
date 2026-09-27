@@ -823,8 +823,12 @@ the next foreground until nothing is left. Guidance text per manufacturer:
   granted: false,              // everything *this config* needs
   readRequired: true,          // healthConnectReadEnabled
   writeRequired: true,         // healthConnectWriteEnabled
-  canRead: false,              // enough to display a watch's steps
-  canWrite: false,             // enough to mirror this device's steps
+  canRead: false,              // every type in healthConnectReadTypes granted
+  canWrite: false,             // all three write permissions granted
+  canReadSteps: true,          // READ_STEPS: enough to use a watch's steps (2.1.1)
+  grantedReadTypes: ['steps'], // of healthConnectReadTypes, what the user allowed
+  canWriteSteps: true,         // WRITE_STEPS: enough to mirror this device
+  grantedWriteTypes: ['steps'],
   backgroundReadGranted: false,
   historyReadGranted: false,
   grantedPermissions: [],
@@ -841,6 +845,17 @@ nothing to offer the user; the other two failure states are both fixed by
 manifest is missing entries config asks for; requesting rejects with
 `E_HEALTH_CONNECT_NOT_DECLARED` until they are added
 ([PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add)).
+
+**Partial grants.** The sheet lets the user untick any single permission.
+Steps alone are enough: with `READ_STEPS` a watch's steps are used and its
+distance and calories are derived when those were refused, and with
+`WRITE_STEPS` this device's count is mirrored, distance and calories going
+along only when allowed. Decide whether to show Health Connect data on
+`canReadSteps`, not on `canRead`. `granted` still means everything config
+asks for, so `enableHealthConnect()` asks again for what is missing, and a
+UI can compare `grantedReadTypes` with `healthConnectReadTypes` to offer
+"also allow distance". Before 2.1.1 a single unticked type turned Health
+Connect off - no watch steps and no mirror - without an error.
 
 ### `enableHealthConnect(options?): Promise<HealthConnectStatus>`
 
@@ -1097,6 +1112,7 @@ Every app that published steps over the range, with what each contributed.
       lateWrittenSteps: 0,  // of `steps`, from records modified over a day after they ended
       hourlySteps: [0, 0, 0, 0, 0, 0, 0, 312, 1180, /* … 24 entries */],
       activeCalories: -1,   // kcal, with healthConnectReadActiveCalories; -1 otherwise
+      distanceSource: 'health_connect', // | 'derived' | 'none' | 'not_read' (2.1.1)
     },
   ],
   hasWearable: true,
@@ -1116,6 +1132,16 @@ a watch that counted all day against a phone-side app that added 10,000 at
 when not computed. `activeCalories` is the source's active-calorie records,
 read only with `healthConnectReadActiveCalories` on and granted; `-1`
 otherwise.
+
+`distanceSource` says where `distance` came from (2.1.1): `'health_connect'`
+is the source's own distance records; `'derived'` is this app's own entry,
+whose distance was written from stride; `'none'` means distance was read and
+the source wrote none; `'not_read'` means `distance` is not in
+`healthConnectReadTypes` or the user did not allow it. Only
+`'health_connect'` is a measurement - check distance against steps on those
+alone. The resolved day says the same on `ResolvedStepSource.distanceSource`:
+`'health_connect'` when its distance is the winning source's own, `'derived'`
+when it was estimated from the steps shown.
 
 `manualSteps`, `unknownMethodSteps` and `recordingMethods` split `steps` by
 Health Connect's `recordingMethod`, which the writing app stamps on every
@@ -1169,6 +1195,7 @@ Which source is answering for today, and what the alternatives counted.
   baselineSteps: 0,     // the external lead when the baseline was taken
   manualStepsExcluded: 0, // typed-in steps left out under healthConnectIgnoreManualEntries
   suspectStepsExcluded: 0, // flagged steps taken out of deviceSteps under fraudDetection 'exclude'
+  distanceSource: 'derived', // | 'health_connect': the winning source's own distance (2.1.1)
   policy: 'auto',
   preferredPackage: null,
 }

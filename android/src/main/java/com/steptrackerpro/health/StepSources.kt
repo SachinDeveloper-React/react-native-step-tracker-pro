@@ -184,7 +184,14 @@ data class StepSource(
      * `healthConnectReadActiveCalories` is on and granted; -1 otherwise, and
      * on aggregate reads.
      */
-    val activeCalories: Double = -1.0
+    val activeCalories: Double = -1.0,
+    /**
+     * Where [distance] came from - one of [DistanceSource]. A server checking
+     * distance against steps applies that check to `health_connect` only:
+     * `derived` is this app's own stride estimate, and `none` and
+     * `not_read` mean [distance] is 0 because nothing was there to read.
+     */
+    val distanceSource: String = DistanceSource.NONE
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
@@ -215,7 +222,9 @@ data class StepSource(
             steps = kept,
             distance = 0.0,
             calories = 0.0,
-            stepsBeforeCoverage = before
+            stepsBeforeCoverage = before,
+            // Re-derived by the resolver, which says so on the resolution.
+            distanceSource = DistanceSource.NONE
         )
     }
 
@@ -236,8 +245,43 @@ data class StepSource(
         "trustedWearable" to trustedWearable,
         "lateWrittenSteps" to lateWrittenSteps,
         "hourlySteps" to hourlySteps,
-        "activeCalories" to activeCalories
+        "activeCalories" to activeCalories,
+        "distanceSource" to distanceSource
     )
+}
+
+/**
+ * Where a distance figure came from, so a server can tell a measured
+ * distance from an estimate before checking it against the steps.
+ */
+object DistanceSource {
+    /** The origin's own `DistanceRecord`s in Health Connect. */
+    const val HEALTH_CONNECT = "health_connect"
+
+    /**
+     * Estimated from the step count and stride: this phone's own count, this
+     * app's own records read back, or a resolved day filling in for a
+     * source that gave no distance.
+     */
+    const val DERIVED = "derived"
+
+    /** Read, but the origin wrote no distance for the range; the figure is 0. */
+    const val NONE = "none"
+
+    /**
+     * Not read: `distance` is not in `healthConnectReadTypes`, or the user
+     * did not grant `READ_DISTANCE`. The figure is 0.
+     */
+    const val NOT_READ = "not_read"
+
+    /** One origin's source, from whether distance was read and any record of it seen. */
+    fun of(read: Boolean, seen: Boolean, isSelf: Boolean): String = when {
+        !read -> NOT_READ
+        !seen -> NONE
+        // This app wrote those records itself, from stride.
+        isSelf -> DERIVED
+        else -> HEALTH_CONNECT
+    }
 }
 
 /**

@@ -239,6 +239,17 @@ class IntegrityPipelineTest {
     }
 
     @Test
+    fun theStatusReportsGrantsTypeByType() = runBlocking {
+        // No grants in this test app: nothing to read or write, each type reported.
+        val status = core.healthConnect.status(core.permissionScope())
+        assertEquals(false, status["canReadSteps"])
+        assertEquals(emptyList<String>(), status["grantedReadTypes"])
+        assertEquals(false, status["canWriteSteps"])
+        assertEquals(emptyList<String>(), status["grantedWriteTypes"])
+        assertFalse(core.healthConnect.canReadSteps())
+    }
+
+    @Test
     fun withDetectionOffNothingIsRecordedOrChanged() = runBlocking {
         core.updateConfig(StepTrackerConfig())
         val today = DateKeys.today()

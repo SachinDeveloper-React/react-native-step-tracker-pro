@@ -260,6 +260,15 @@ is granted; `canRead` / `canWrite` report the capability whether or not
 config turns reads or writes on - `canRead` against the types in
 `healthConnectReadTypes`.
 
+**The user can untick any one permission** on the sheet. From 2.1.1 steps
+alone are enough: `READ_STEPS` lets a watch's steps be used, with distance
+and calories derived when those were refused, and `WRITE_STEPS` lets this
+device's count be mirrored, with distance and calories written only when
+allowed. `canReadSteps`, `grantedReadTypes`, `canWriteSteps` and
+`grantedWriteTypes` say what the user actually allowed, so the UI can ask
+for the rest without treating a partial grant as a refusal. Before 2.1.1 one
+unticked type turned reading or writing off entirely, silently.
+
 **Reading steps alone** (2.1). Distance and calories are two more
 permissions to declare and justify, and one more reason for a user to refuse
 the sheet. An app that shows steps only can drop them:

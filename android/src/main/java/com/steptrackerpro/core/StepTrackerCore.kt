@@ -90,6 +90,13 @@ class StepTrackerCore private constructor(context: Context) {
     private val syncMutex = Mutex()
     private val sourceCache = SourceCache()
 
+    init {
+        // Sources cached under the old grants would carry the old answer -
+        // no distance after the user allowed it, say - for up to ten minutes
+        // on a past day. Dropped the moment a fresh read sees a change.
+        healthConnect.onGrantsChanged = { sourceCache.invalidate() }
+    }
+
     fun config(): StepTrackerConfig = configStore.get()
 
     fun updateConfig(config: StepTrackerConfig): StepTrackerConfig {
@@ -542,7 +549,9 @@ class StepTrackerCore private constructor(context: Context) {
         if (!config.healthConnectEnabled || !config.healthConnectReadEnabled) return false
         if (sourcePolicy() == StepSourcePolicy.DEVICE) return false
         if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return false
-        return healthConnect.canRead()
+        // Steps alone: a user who unticked distance or calories on the sheet
+        // still gets their watch's steps, with those derived instead.
+        return healthConnect.canReadSteps()
     }
 
     /**
@@ -968,7 +977,7 @@ class StepTrackerCore private constructor(context: Context) {
         val config = config()
         if (config.healthConnectEnabled && config.healthConnectReadEnabled &&
             healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
-            healthConnect.canRead()
+            healthConnect.canReadSteps()
         ) {
             return runCatching {
                 withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
@@ -1148,10 +1157,12 @@ class StepTrackerCore private constructor(context: Context) {
         }
         // Only the write grants matter here. Requiring the read grants too meant
         // a user who allowed writing but refused reading got no mirror at all,
-        // even though every call this method makes was permitted.
-        if (!healthConnect.canWrite()) {
+        // even though every call this method makes was permitted. And only
+        // steps: distance and calories are written when granted, skipped when
+        // the user unticked them.
+        if (!healthConnect.canWriteSteps()) {
             return@withLock syncResult(
-                "health_connect", 0, 0, false, "Health Connect write permission not granted"
+                "health_connect", 0, 0, false, "Health Connect permission to write steps not granted"
             )
         }
 

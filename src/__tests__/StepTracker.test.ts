@@ -11,6 +11,8 @@ import React from 'react';
 import TestRenderer from 'react-test-renderer';
 import type { ReactTestRenderer } from 'react-test-renderer';
 import { useStepTracker } from '../hooks/useStepTracker';
+import { useHealthConnect } from '../hooks/useHealthConnect';
+import type { UseHealthConnectResult } from '../hooks/useHealthConnect';
 import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
 import type { HealthConnectStatus, StepTrackerConfig } from '../types';
@@ -979,5 +981,64 @@ describe('useStepTracker()', () => {
     // Initialised once, however often config changed.
     expect(native.calledWith('initialize')).toHaveLength(1);
     await TestRenderer.act(async () => renderer!.unmount());
+  });
+});
+
+describe('useHealthConnect()', () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  async function render(): Promise<UseHealthConnectResult> {
+    let result: UseHealthConnectResult | undefined;
+    function Probe() {
+      result = useHealthConnect({ refreshOnForeground: false });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe));
+    });
+    await TestRenderer.act(async () => renderer!.unmount());
+    return result!;
+  }
+
+  const watch = { packageName: 'com.fitbit.FitbitMobile', steps: 8000 };
+
+  beforeEach(() => {
+    native.when('getInstalledCompanionApps', { apps: [] });
+    native.when('getCurrentStepSource', { steps: 8000 });
+    native.when('getStepSources', { sources: [watch], hasWearable: true });
+  });
+
+  it('loads sources when steps are granted though distance was refused', async () => {
+    // The sheet lets the user untick distance alone: canRead is false, but
+    // steps are enough to read a watch.
+    native.when('getHealthConnectStatus', {
+      ...baseStatus,
+      canRead: false,
+      canReadSteps: true,
+      grantedReadTypes: ['steps'],
+    });
+    const result = await render();
+    expect(native.calledWith('getStepSources')).toHaveLength(1);
+    expect(result.sources).toEqual([watch]);
+    expect(result.hasWearable).toBe(true);
+  });
+
+  it('skips the sources read without the steps grant', async () => {
+    native.when('getHealthConnectStatus', {
+      ...baseStatus,
+      canRead: false,
+      canReadSteps: false,
+      grantedReadTypes: ['distance'],
+    });
+    const result = await render();
+    expect(native.calledWith('getStepSources')).toHaveLength(0);
+    expect(result.sources).toEqual([]);
+  });
+
+  it('falls back to canRead against a native side older than 2.1.1', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, canRead: true });
+    await render();
+    expect(native.calledWith('getStepSources')).toHaveLength(1);
   });
 });
