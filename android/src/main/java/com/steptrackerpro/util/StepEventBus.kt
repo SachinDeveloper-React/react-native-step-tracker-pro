@@ -17,7 +17,27 @@ object StepEventBus {
         const val GOAL_PROGRESS_CHANGED = "goalProgressChanged"
         const val TRACKING_STATE_CHANGED = "trackingStateChanged"
         const val DAY_CHANGED = "dayChanged"
+        /**
+         * A past day's stored total grew after the fact - gap recovery placed
+         * steps on it. Fired once per affected day, after the write commits,
+         * so an app that has already settled that day knows to look again.
+         */
+        const val HISTORY_BACKFILLED = "historyBackfilled"
+        /** One motion signature window was stored. Payload is its features, never samples. */
+        const val MOTION_WINDOW = "motionWindow"
+        /**
+         * The integrity checks found something they had not reported for
+         * this day before. Payload is the new flags, the day's device count
+         * and its suspect steps.
+         */
+        const val SUSPICIOUS_ACTIVITY = "suspiciousActivity"
         const val SYNC_COMPLETED = "syncCompleted"
+        /**
+         * The remote endpoint refused the upload - 401 or 403 - or signature
+         * auth has no key to sign with. Not retried: the app refreshes its
+         * token through `updateConfig`, or calls `attestDevice`, then syncs.
+         */
+        const val SYNC_AUTH_FAILED = "syncAuthFailed"
         /** The app now counting for the user changed - watch on, watch off. */
         const val STEP_SOURCE_CHANGED = "stepSourceChanged"
         /** Health Connect was installed, updated, granted or revoked. */

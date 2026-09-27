@@ -16,36 +16,15 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!--
-      Only needed if you call requestDisableBatteryOptimization(). Remove this
-      line and use openBatteryOptimizationSettings() instead if you do not have
-      an eligible Play Console use case. See docs/PLAY_STORE_COMPLIANCE.md.
+      That is everything sensor-only counting needs, and all this library
+      merges into your app from 2.0. Health Connect permissions and
+      REQUEST_IGNORE_BATTERY_OPTIMIZATIONS are yours to declare, only if you
+      use them - each is one more thing Play asks you to justify. The snippets
+      are in docs/PERMISSIONS.md; the Expo config plugin adds them for you.
+      Without them, requestHealthConnectPermissions() rejects with
+      E_HEALTH_CONNECT_NOT_DECLARED and requestDisableBatteryOptimization()
+      opens the settings list instead of the direct dialog.
     -->
-    <uses-permission
-        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
-        tools:node="merge" />
-
-    <!-- Health Connect. Remove the pairs you do not use. -->
-    <uses-permission android:name="android.permission.health.READ_STEPS" />
-    <uses-permission android:name="android.permission.health.WRITE_STEPS" />
-    <uses-permission android:name="android.permission.health.READ_DISTANCE" />
-    <uses-permission android:name="android.permission.health.WRITE_DISTANCE" />
-    <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
-    <uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
-
-    <!--
-      Optional Health Connect grants, only requested when the matching config
-      flag is on (healthConnectBackgroundRead / healthConnectHistoryRead).
-      Declaring one you never request is harmless; requesting one you have not
-      declared is silently dropped by the provider.
-
-      READ_HEALTH_DATA_IN_BACKGROUND lets a WorkManager sync read a watch's
-      steps while the app is closed. Without it every background read returns
-      empty, so a wearable-sourced widget goes stale until the user opens
-      the app.
-    -->
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
-    <!-- Reads older than 30 days. Needed for yearly stats off Health Connect. -->
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
 
     <uses-feature
         android:name="android.hardware.sensor.stepcounter"
@@ -131,7 +110,7 @@
             android:enabled="true"
             android:exported="true"
             android:directBootAware="false">
-            <intent-filter android:priority="1000">
+            <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
@@ -140,6 +119,17 @@
 
         <receiver
             android:name="com.steptrackerpro.service.NotificationActionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!--
+          Activity Recognition transitions for the integrity checks. Only ever
+          fired by Play Services through an explicit PendingIntent this package
+          creates, and only when the host app ships play-services-location and
+          turns on fraudDetection.activityRecognition.
+        -->
+        <receiver
+            android:name="com.steptrackerpro.integrity.ActivityTransitionReceiver"
             android:enabled="true"
             android:exported="false" />
 

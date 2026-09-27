@@ -1,6 +1,7 @@
 package com.steptrackerpro.health
 
 import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.ActivityResultLauncher
@@ -25,8 +26,14 @@ class HealthPermissionActivity : ComponentActivity() {
         launcher = registerForActivityResult(HealthConnectManager.permissionContract()) { granted ->
             Callbacks.deliver(granted)
             setResult(Activity.RESULT_OK)
-            finish()
-            overridePendingTransition(0, 0)
+            if (Build.VERSION.SDK_INT >= 34) {
+                overrideActivityTransition(Activity.OVERRIDE_TRANSITION_CLOSE, 0, 0)
+                finish()
+            } else {
+                finish()
+                @Suppress("DEPRECATION")
+                overridePendingTransition(0, 0)
+            }
         }
         // Only launch on a fresh start. After a configuration change or a
         // process restart the contract is already in flight and relaunching

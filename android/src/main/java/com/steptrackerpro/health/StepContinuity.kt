@@ -105,7 +105,9 @@ object StepContinuity {
                 distance = metrics.distance(merged),
                 calories = metrics.calories(merged),
                 synced = raw.totals.synced,
-                syncedRemote = raw.totals.syncedRemote
+                syncedRemote = raw.totals.syncedRemote,
+                recoveredSteps = raw.totals.recoveredSteps,
+                suspectSteps = raw.totals.suspectSteps
             ),
             kind = baseline.kind,
             sourcePackage = baseline.packageName,
@@ -114,7 +116,9 @@ object StepContinuity {
             externalSteps = raw.externalSteps,
             usedExternal = true,
             merged = true,
-            baselineSteps = baseline.offset
+            baselineSteps = baseline.offset,
+            manualStepsExcluded = raw.manualStepsExcluded,
+            suspectStepsExcluded = raw.suspectStepsExcluded
         )
     }
 }

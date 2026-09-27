@@ -17,8 +17,12 @@
  ┌───────▼──────┐ ┌─────▼──────┐ ┌─────▼───────┐ ┌─────▼─────────┐
  │ StepCounter  │ │StepRepo/   │ │HealthConnect│ │  StepEventBus │
  │   Engine     │ │  Room      │ │   Manager   │ │               │
- └───────▲──────┘ └────────────┘ └─────────────┘ └───────────────┘
-         │
+ └───────▲──────┘ └─────▲──────┘ └─────────────┘ └───────────────┘
+         │ onObserved   │
+         │       ┌──────┴────────────┐   ┌───────────────────┐
+         │       │ IntegrityMonitor  │◄──│ IntegritySignals  │ charging, clock,
+         │       │ timeline, detector│   │ (in the service)  │ Activity Recognition
+         │       └───────────────────┘   └───────────────────┘
  ┌───────┴────────────────┐        ┌──────────────┐
  │  StepTrackerService    │◄───────│ BootReceiver │
  │  (foreground, health)  │        └──────────────┘
@@ -87,13 +91,45 @@ from `lastEventAt`, the time of the last reading:
 | inside one day | any | all to today |
 | across midnight | `'split'` (default) | spread across the days in proportion to time: killed at 23:00, revived at 09:00 → 10% to yesterday, 90% to today |
 | across midnight | `'today'` | all to today |
+| across midnight | `'today_capped'` | all to today, up to `gapRecoveryMaxSteps` (20,000); the rest is dropped, not moved |
 | across midnight | `'drop'` | discarded — for an app where an over-credit costs money |
 
+The policy is applied by `StepGapSplitter.apply()`, which is pure and
+tested on the JVM for all four; the engine only supplies the dates and the
+cap. `'today_capped'` exists for the week-long kill: the first sample back
+carries every step since the last reading, and a counter glitch on top of
+that could hand one day a hundred thousand steps. The cap applies to what a
+recovery credits, not to the day — counting continues past it — and it also
+bounds the one case the splitter cannot place, a last reading that is in the
+future because the clock was set back.
+
 Shares for days other than the active one go out through
-`StepCounterEngine.onBackfill`, and `StepTrackerCore` adds them to the stored
-rows (re-queuing them for sync). The rollover deliberately preserves
-`lastEventAt`: stamping "now" there erased the evidence of when the gap
-started and put every overnight step into the new day.
+`StepCounterEngine.onBackfill` with a reason (`gap`, or `reboot` when the
+counter provably restarted), and `StepTrackerCore` adds them to the stored
+rows (re-queuing them for sync) and then emits `historyBackfilled` once per
+day, after the write has committed. Only `'split'` ever produces one: the
+other three leave closed days alone, which is why `'today_capped'` and
+`'drop'` are the recommendation for an app that has already paid for a day.
+The rollover deliberately preserves `lastEventAt`: stamping "now" there
+erased the evidence of when the gap started and put every overnight step
+into the new day.
+
+### The recovered share
+
+Every step a recovery credits — today's share of a gap, a reboot's since-boot
+steps, an install's since-boot claim — was apportioned, not observed. The
+engine keeps a running `recoveredToday` in `StepStateStore`, written in the
+same atomic edit as the counter state so the two cannot drift, zeroed with
+the total at rollover and reset, and restored with it when the date moves
+backwards. It is committed to `daily_summary.recoveredSteps` with every
+write; `StepRepository.addToDay()` grows it by exactly what it added to a
+past day, and `upsertKeepingRecovered` refuses to let a stale snapshot of the
+live day lower it under a backfill. `DayRecord.recoveredSteps` and
+`StepSnapshot.recoveredSteps` report it, and the verification snapshot and
+the `'full'` remote payload carry it, so a server can weigh a recovered share
+differently from steps it knows were watched. Days stored before the column
+existed read `0`: the only honest value for a day whose split was never
+recorded.
 
 Before 1.3 these steps were dropped, which is what "I walked to work and the
 app shows zero" looked like on phones that kill services overnight.
@@ -199,15 +235,146 @@ a fallback and never a preference. Steps taken while the process is dead are
 lost, as with the detector. Detected steps go through
 `StepCounterEngine.onDetectorSample()` like any other per-step source.
 
+### Motion signature windows
+
+Opt-in (`motionSampling.enabled`). A tick on the sensor thread fires every
+`intervalMinutes`; when tracking is running, not paused, steps have accrued
+since the last window, and the app is either in the foreground (an activity
+on screen — the foreground service alone does not count) or holds the
+battery exemption, the service opens a `MotionWindowSampler` for
+`windowSeconds`. On a phone already counting over the accelerometer the
+sampler listens in on the samples that are arriving; otherwise the
+accelerometer is registered for the window and released with it, and on a
+non-wake-up sensor a partial wake lock with a timeout is held for the same
+span under the same `accelerometerWakeLock` policy as the pedometer. The
+sample that fills the window closes it; a safety post closes one the sensor
+stopped delivering into.
+
+`MotionWindowSampler` keeps only magnitudes and timestamps, at most a
+minute's worth, and reduces them to `MotionFeatures`: a dominant frequency
+by direct Fourier evaluation at the samples' own timestamps between 0.5 and
+6 Hz (so delivery rate and batching do not matter), the variance of the
+mean-removed magnitude, the zero-crossing rate, the share of in-band energy
+at the peak, and the steps the engine counted meanwhile. Below a stillness
+floor every spectral figure is 0, so a phone on a table does not report a
+frequency picked out of noise. The samples are discarded once the features
+are taken; nothing else ever holds them. Features go through the write lane
+into `motion_window`, trimmed to `motionWindowRetention` in the same
+transaction, and out on `motionWindow`. JVM tests feed synthetic walking at
+1.8 Hz and shaking at 4 Hz and assert the two separate on frequency,
+variance, crossing rate and purity, at 20 and 50 Hz alike.
+
+### Integrity checks
+
+Opt-in (`fraudDetection.enabled`). Four parts, each small, and none of them
+ever changes a count.
+
+**Minute buckets.** The engine reports every delta it *watched* — never one
+gap recovery credited in one go, never a paused one — through
+`onObserved(from, to, steps)`, where `from` and `to` are the previous and
+current samples' event times. `MinuteAttribution` places it: a delta after up
+to a minute of silence is split across the minutes it overlaps, in
+proportion, with cumulative rounding so the shares always sum back; a few
+steps after a longer silence are a walk starting and belong to the arrival
+minute; more than 20 after a longer silence is a lump — a hub FIFO that
+overflowed with the screen off, or the first sample after a dead process —
+and is parked as `untimedSteps` at the arrival minute. A lump is never spread
+across its gap: that would fabricate a perfectly steady cadence for the
+detector to find. Each share is tagged with whether the phone was charging
+and what Activity Recognition last said. `StepTimeline` holds the increments
+in memory, bounded, until the write lane drains them into `step_minute` on
+the next commit, where they are added to what each minute already holds.
+
+**The detector.** `FraudDetector.evaluate(minutes, windows, rules, zone)` is
+pure and JVM-tested with synthetic days. It flags minutes over the cadence
+cap; unbroken runs of active minutes (40+ timed steps, nothing untimed) whose
+count never moves by more than one step minute to minute for
+`steadyCadenceMinutes`; the excess of runs past `maxContinuousMinutes`;
+charging and vehicle tags grouped into runs; long walks starting in the small
+hours; and motion windows that read as a hand shake (3.3 Hz or faster,
+variance over 20, `peakRatio` at least 0.25 — the purity floor keeps a
+runner's harmonics out) or a swing (a near-pure tone between 0.8 and 2.6 Hz).
+`peakRatio` tops out near 0.5 for a pure tone at the sampler's 0.05 Hz bins
+over a 10-second window, and a smooth synthetic walk reads 0.46, so `swing`
+is weak — evidence, not a verdict. The union of the strong flags' minutes,
+each counted once, is the day's `flaggedSteps`; `suspectSteps` adds whatever
+the rest of the device count exceeds `maxDailySteps` by, computed at read
+time so a backfill that grows a day is judged against its new total.
+
+**Evaluation.** `IntegrityMonitor` re-judges today at most once a minute —
+from the sensor path while steps arrive and from the service heartbeat after
+they stop — on the write lane, after flushing, so a verdict always sees every
+minute flushed before it. The verdict is stored in `integrity_day`, replaced
+whole, and any flag not in the previous verdict is announced on
+`suspiciousActivity`, so an event fires once per flag across process
+restarts. A closing day gets a final verdict at rollover. Today's flagged
+total is also held in memory for the paths that cannot suspend — the sensor
+callback and the notification.
+
+**Exclude mode.** `mode: 'exclude'` takes `suspectSteps` out of this
+device's `DayTotals` *before* the resolver sees them, in `resolveDay`,
+`resolveFromCache` and `resolvedStats`, and in what goes to Health Connect
+and the remote endpoint. Doing it at the resolver's input rather than its
+output keeps every policy, pin and continuity baseline working on one
+consistent device count; a watch can still win the day. A change of mode
+clears the continuity baseline, like a policy change. The engine's own count,
+`step_history` and `deviceSteps` stay raw.
+
+**Signals and the log.** While the service runs with the checks on,
+`IntegritySignals` holds dynamic, unexported receivers for power
+connected/disconnected (the sticky battery broadcast seeds the state), clock
+and zone changes (the jump is measured as the boot id's move, since a clock
+edit moves the wall clock and not uptime), and — when the host app ships
+`play-services-location` — Activity Recognition transitions through an
+explicit mutable `PendingIntent` to an unexported receiver. Play Services is
+compile-only: `ActivityRecognitionBridge` probes for the class before any
+reference to it runs, and consumer ProGuard rules keep R8's missing-class
+check quiet for apps without it. Reboots are logged by `BootReceiver`,
+resets, clears and config changes by the core, sensor changes and recoveries
+by the service. The log lives in `integrity_event`, bounded to 2,000 rows and
+to retention, and survives `clearHistory()`.
+
+**Attestation and signing.** `DeviceAttestation` keeps one EC P-256 key in
+the Android Keystore under a fixed alias. `attestDevice(challenge)` replaces
+it with one generated with `setAttestationChallenge`, falling back to an
+unattested key on hardware that refuses, and returns the certificate chain
+for a server to verify. A signed snapshot is serialised once to JSON, signed
+with `SHA256withECDSA`, and returned with that exact text as
+`signedPayload`, so the server verifies bytes it did not have to rebuild.
+Asked for with `include`, the day's minute buckets, motion windows and raw
+Health Connect records go into that same text before it is signed, so the
+evidence a server scores carries the signature the totals do, and a Play
+Integrity token bound to `payloadSha256` covers it too.
+Remote uploads are signed over the exact body bytes once a key exists.
+
 ## Storage
 
-Two Room tables:
+Six Room tables:
 
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
 - `daily_summary` — `date` (PK), `totalSteps`, `totalDistance`,
-  `totalCalories`, `updatedAt`. Rolled-up mirror of the same values, written in
-  the same transaction as `step_history`.
+  `totalCalories`, `recoveredSteps`, `updatedAt`. Rolled-up mirror of the
+  same values, written in the same transaction as `step_history`, plus the
+  recovered share (schema version 3; earlier rows migrate with `0`). Reads
+  join it back onto the history row.
+- `motion_window` — `id`, `date`, `startedAt` (indexed), `durationMs`,
+  `sampleCount`, `dominantFrequencyHz`, `variance`, `zeroCrossingRate`,
+  `peakRatio`, `stepsDuringWindow` (schema version 4). Bounded to
+  `motionWindowRetention` rows by the insert transaction.
+- `step_minute` — `minuteStart` (PK), `date` (indexed), `steps`,
+  `untimedSteps`, `chargingSteps`, `stillSteps`, `vehicleSteps` (schema
+  version 5). Only minutes with steps; increments are added to a row, never
+  replace it, in a read-then-write transaction because API 26's SQLite
+  predates `ON CONFLICT DO UPDATE`. Pruned at `historyRetentionDays`.
+- `integrity_day` — `date` (PK), `flaggedSteps`, `flagsJson`, `evaluatedAt`
+  (schema version 5). The detector's last verdict per day, replaced whole.
+- `integrity_event` — `id`, `at` (indexed), `date`, `type`, `detailJson`
+  (schema version 5). Bounded to 2,000 rows and to retention; kept by
+  `clearHistory()`.
+
+`MIGRATION_4_5` creates the three integrity tables and touches nothing else;
+they start empty rather than being back-filled from history nobody timed.
 
 `saveDay()` refuses to lower an existing day's count. A re-anchored counter can
 briefly report fewer steps than were already committed; ignoring that write is
@@ -292,6 +459,19 @@ listening, it keeps writing to storage either way.
 `stepsChanged` is throttled by `eventThrottleMs`. `goalProgressChanged` fires
 only when the whole-percent bucket moves. `goalReached` is keyed on the period's
 start date, so it fires once per day/week/month and rearms by itself.
+`suspiciousActivity` fires once per flag, keyed on the flag's type and start,
+compared against the day's stored verdict.
+
+The module hands each event to a generated `emitOn…` method. On the new
+architecture codegen generates them from the spec's `EventEmitter`
+properties, and they reach JS through the TurboModule's typed emitter; JS
+subscribes with `NativeStepTrackerPro.onStepsChanged(handler)` and so on. On
+the old architecture there is no typed emitter, so the old-architecture spec
+shim implements the same thirteen methods over `RCTDeviceEventEmitter` under
+the `StepTrackerPro:` prefix, and JS falls back to `NativeEventEmitter`. The
+module's code is identical on both; `StepTracker.addListener` picks the path
+by whether the typed emitter exists, and keeps its own registry of
+subscriptions so `removeAllListeners()` works on either.
 
 ## Sync
 
@@ -317,6 +497,62 @@ parallel count of the same walk leaves every other reader with two copies of it.
 Marking it done rather than leaving it queued matters too: nothing about that day
 will ever make it writable, so a pending row would be retried for as long as it
 stays in retention.
+
+Remote uploads classify the response: 2xx marks the rows uploaded; 401 and
+403 raise `syncAuthFailed` and end the attempt without a retry, because the
+same credentials would be refused again; anything else, or no response, is
+retried with backoff. Every outcome is also written to `StepStateStore`, filed
+under the moment the attempt read its credentials, because the worker
+usually runs with no JS to hear the event. `getSyncStatus()` reads it back;
+`authFailed` holds until the URL, headers, auth mode or key change after that
+moment, or an upload is accepted. `remoteSyncHeaders` live sealed in SharedPreferences -
+AES-GCM with a Keystore key (`SecretVault`) - and are opened when config is
+read. Under `remoteSyncAuth: 'signature'` none are sent and the request
+authenticates with the `Step-Tracker-Signature` header alone.
+
+## Build
+
+`android/build.gradle` adapts to the app it is built into rather than
+assuming one toolchain:
+
+- **React Native version.** Read from the nearest
+  `node_modules/react-native/package.json` above the Gradle root, which finds
+  it in a plain app, a hoisted monorepo and this repository alike. From 0.82
+  the new architecture is the only one, so the new-architecture sources and
+  codegen are used whatever `newArchEnabled` says; below 0.82 the property
+  decides. With neither known - no `react-native` package where it is looked
+  for, and no property - the new architecture is assumed, since it has been
+  the default since 0.76 and guessing old on 0.82+ builds code that release
+  cannot run.
+- **Kotlin mode.** On AGP 9 with `android.builtInKotlin` not set to `false`,
+  AGP compiles Kotlin itself and refuses the Kotlin Android and Kotlin kapt
+  plugins. The script then applies `com.android.legacy-kapt` instead, and -
+  because that plugin lives in `com.android.tools.build:gradle-kotlin`, which
+  React Native apps do not put on the classpath - adds that artifact to its
+  own buildscript classpath at the host's AGP version, found by reflection
+  (the buildscript block is compiled before that classpath exists) through
+  whichever class loader sees it: the script's own, the root buildscript's,
+  or the thread's. On AGP 8, or with built-in Kotlin off, it is
+  the Kotlin Android plugin and its kapt, as in 1.x. The architecture shim
+  directories are registered as Kotlin sources as well as Java ones, because
+  built-in Kotlin compiles only `kotlin` source directories and the defaults.
+- **Compiler options** go through `kotlin { compilerOptions { } }`, which
+  works from Kotlin 2.0 under both modes. Room needs real JVM default methods
+  in the DAO interfaces: Kotlin 2.2's typed `jvmDefault` option where it
+  exists, the `-Xjvm-default=all` flag before it.
+- **Health Connect client** follows `compileSdkVersion`: 1.1.0 from 36, the
+  1.1.0-beta01 that builds against 35 below.
+- **minSdk** is declared as at least 26 whatever the app says, so an app
+  below it fails the manifest merge naming this package.
+- **`BuildConfig.LIBRARY_VERSION`** is the npm version from `package.json`,
+  compiled in for the verification snapshot.
+- **Standalone builds.** Only when the module is the root of the build - CI
+  and development - does its buildscript add AGP and the Kotlin plugin; inside
+  an app it adds nothing of its own, so it never puts a second AGP next to
+  the host's.
+
+The combinations this is checked against are in the README's compatibility
+table, built on every push by the `compat` CI job.
 
 ## Step source resolution
 
@@ -403,6 +639,18 @@ sensors, and Samsung Health, which runs as a system app and is not killed,
 has genuinely seen more. This is what stops an aggregator that sums two origins
 from doubling the display, and a phone-side algorithm that counts 5% high
 from creeping the total up sync after sync.
+
+What makes a source "a wearable" for that trust is the `wearableTrust`
+rule, decided in one place (`StepSourceTrust`) so the resolver's choice and
+the `trustedWearable` flag on each source cannot disagree. `metadata`, the
+default, goes by the `Device` stamp; `catalog` requires the package to be in
+`StepSourceCatalog.KNOWN` with a wearable kind or on the app's
+`wearableAllowlist`, and treats everything else as phone-side for the
+coverage rule while leaving its display `kind` alone. With
+`healthConnectIgnoreManualEntries` on, each source competes on its counted
+steps only: `StepSource.excludingManual()` takes the manual-entry bucket out
+of the total and out of the pre-coverage share, and the resolution reports
+what it removed as `manualStepsExcluded`.
 
 Only `auto` merges. `wearable` and `health_connect` promise the other app's
 exact number and keep it. The phone's raw count is what is written to Health

@@ -14,7 +14,7 @@ jobs:
     name: TypeScript, lint, unit tests, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -28,20 +28,24 @@ jobs:
       - name: Pack and inspect what would be published
         run: |
           npm pack --dry-run 2>&1 | tee pack.txt
-          # Tests, mocks and build output must never ship.
-          ! grep -E '__tests__|__mocks__|android/build/' pack.txt
+          # Tests, mocks, build output and the Kotlin daemon's logs must never ship.
+          ! grep -E '__tests__|__mocks__|android/build/|android/\.kotlin' pack.txt
+          # What the changelog, the Jest mock and the Expo plugin point at must.
+          for f in SECURITY.md CONTRIBUTING.md app.plugin.js plugin/manifest.js jest/index.js lib/commonjs/jestMock.js; do
+            grep -q " $f$" pack.txt || { echo "missing from the package: $f"; exit 1; }
+          done
 
   android:
     name: Kotlin compile, JVM tests, lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: android-actions/setup-android@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Compile, test, lint
         working-directory: android
         run: ./gradlew --no-daemon assembleDebug testDebugUnitTest lintDebug compileDebugAndroidTestKotlin
@@ -50,7 +54,7 @@ jobs:
         run: |
           ! grep -q 'severity="Error"' build/reports/lint-results-debug.xml
           ! grep -q 'severity="Fatal"' build/reports/lint-results-debug.xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: android-reports
@@ -59,18 +63,95 @@ jobs:
             android/build/test-results/
           if-no-files-found: ignore
 
+  compat:
+    # Builds the packed library inside real React Native apps made from the
+    # official template, so what an app actually gets - the published files,
+    # the app's own AGP, Gradle, Kotlin and compileSdk, codegen on the new
+    # architecture - is what is tested. 0.77 is the floor; 0.87 is AGP 9.
+    name: Builds in RN ${{ matrix.rn }} (newArch=${{ matrix.newArch }}, builtInKotlin=${{ matrix.builtInKotlin }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rn: 0.77.3
+            newArch: true
+            builtInKotlin: false
+          # The old architecture: RN 0.77-0.81 can still turn the new one
+          # off, and events take a different path there.
+          - rn: 0.77.3
+            newArch: false
+            builtInKotlin: false
+          - rn: 0.87.2
+            newArch: true
+            builtInKotlin: false
+          - rn: 0.87.2
+            newArch: true
+            builtInKotlin: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+      - name: Pack the library as npm would publish it
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Create an app from the React Native template
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm pack "@react-native-community/template@${{ matrix.rn }}"
+          mkdir tpl && tar xzf react-native-community-template-*.tgz -C tpl
+          cp -R tpl/package/template app
+          cd app
+          npm install --no-audit --no-fund
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/react-native-step-tracker-pro-*.tgz
+          # The package needs minSdk 26; the template starts at 24.
+          sed -i 's/minSdkVersion = 24/minSdkVersion = 26/' android/build.gradle
+      - name: Turn the new architecture off
+        if: ${{ !matrix.newArch }}
+        working-directory: ${{ runner.temp }}/app
+        run: sed -i 's/^newArchEnabled=true/newArchEnabled=false/' android/gradle.properties
+      - name: Switch the app to AGP 9's built-in Kotlin
+        if: matrix.builtInKotlin
+        working-directory: ${{ runner.temp }}/app
+        run: |
+          # The template's other native library still applies the Kotlin
+          # Android plugin, which built-in Kotlin refuses.
+          npm uninstall --no-audit --no-fund react-native-safe-area-context
+          sed -i 's/^android.builtInKotlin=false/android.builtInKotlin=true/' android/gradle.properties
+          sed -i '/apply plugin: "org.jetbrains.kotlin.android"/d' android/app/build.gradle
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Build the library and merge the app manifest
+        working-directory: ${{ runner.temp }}/app/android
+        run: ./gradlew --no-daemon :react-native-step-tracker-pro:assembleDebug :app:processDebugMainManifest
+      - name: The merged manifest carries no opt-in permissions
+        working-directory: ${{ runner.temp }}/app/android
+        run: |
+          merged=app/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml
+          # Declared permissions only: the library manifest's comment naming
+          # them is carried into the merged file and must not trip this.
+          ! grep -E '<uses-permission[^>]*android:name="android\.permission\.(health\.|REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)' "$merged"
+
   android-instrumented:
     name: Engine tests on an emulator
     runs-on: ubuntu-latest
     # Emulator runs are slow; keep them off pull requests from forks.
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -83,7 +164,7 @@ jobs:
           profile: pixel_6
           working-directory: android
           script: ./gradlew --no-daemon connectedDebugAndroidTest
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: instrumented-results

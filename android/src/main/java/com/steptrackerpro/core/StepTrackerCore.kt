@@ -8,6 +8,10 @@ import com.steptrackerpro.health.StepSource
 import com.steptrackerpro.health.StepSourceKind
 import com.steptrackerpro.health.StepSourcePolicy
 import com.steptrackerpro.health.StepSourceResolver
+import com.steptrackerpro.health.StepSourceTrust
+import com.steptrackerpro.health.WearableTrust
+import com.steptrackerpro.integrity.DeviceAttestation
+import com.steptrackerpro.integrity.IntegrityMonitor
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.StepEventBus
 import kotlinx.coroutines.CoroutineDispatcher
@@ -49,12 +53,35 @@ class StepTrackerCore private constructor(context: Context) {
     val metrics = MetricsCalculator(configStore.get())
     val repository = StepRepository(appContext)
     val goals = GoalTracker(appContext)
-    val healthConnect = HealthConnectManager(appContext, state)
+    val healthConnect = HealthConnectManager(appContext, state).apply {
+        readActiveCalories = configStore.get().healthConnectReadActiveCalories
+        readTypes = HealthConnectManager.ReadType.parse(configStore.get().healthConnectReadTypes)
+    }
+
+    /** Per-minute buckets, the detector, the event log and suspect-step arithmetic. */
+    val integrity = IntegrityMonitor(
+        appContext, repository, scope, writeLane, ::config
+    ) { date -> dayTotals(date).steps }
 
     val engine = StepCounterEngine(state, metrics).apply {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
-        onBackfill = { shares -> handleBackfill(shares) }
+        onBackfill = { shares, reason -> handleBackfill(shares, reason) }
+        onObserved = { from, to, steps -> integrity.onObserved(from, to, steps) }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
+        gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
+    }
+
+    init {
+        // Exclude mode: a verdict that moved today's flagged total moved the
+        // shown number too, and JS hears about it without waiting for a step.
+        integrity.onLiveChanged = {
+            val live = engine.snapshot()
+            val resolution = resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+            StepEventBus.emit(
+                StepEventBus.Events.STEPS_CHANGED,
+                com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, resolution), resolution)
+            )
+        }
     }
 
     private val lastEventAt = AtomicLong(0L)
@@ -69,19 +96,58 @@ class StepTrackerCore private constructor(context: Context) {
         val previous = configStore.get()
         val saved = configStore.save(config)
         metrics.config = saved
+        healthConnect.readActiveCalories = saved.healthConnectReadActiveCalories
+        healthConnect.readTypes = HealthConnectManager.ReadType.parse(saved.healthConnectReadTypes)
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
+        engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
         // A different policy or pin changes what the baseline means, so it is
-        // taken again from the next read rather than carried across.
+        // taken again from the next read rather than carried across. So does
+        // the manual-entry rule: a baseline taken from a typed-in total would
+        // otherwise survive until midnight after the app turned the flag on.
         if (previous.stepSource != saved.stepSource ||
             previous.preferredStepSourcePackage != saved.preferredStepSourcePackage ||
             previous.healthConnectEnabled != saved.healthConnectEnabled ||
-            previous.healthConnectReadEnabled != saved.healthConnectReadEnabled
+            previous.healthConnectReadEnabled != saved.healthConnectReadEnabled ||
+            previous.healthConnectIgnoreManualEntries != saved.healthConnectIgnoreManualEntries ||
+            previous.wearableTrust != saved.wearableTrust ||
+            previous.wearableAllowlist != saved.wearableAllowlist ||
+            // Exclude mode lowers the device count the baseline was measured against.
+            previous.excludeSuspect != saved.excludeSuspect ||
+            // Cached sources were read without (or with) active calories,
+            // or with a different set of types.
+            previous.healthConnectReadActiveCalories != saved.healthConnectReadActiveCalories ||
+            previous.healthConnectReadTypes != saved.healthConnectReadTypes
         ) {
             state.clearContinuity()
             sourceCache.invalidate()
         }
+        // What `getSyncStatus().remote.authFailed` measures against: new
+        // credentials clear a refusal until they are refused in turn.
+        if (previous.remoteSyncUrl != saved.remoteSyncUrl ||
+            previous.remoteSyncHeaders != saved.remoteSyncHeaders ||
+            previous.remoteSyncAuth != saved.remoteSyncAuth
+        ) {
+            state.recordRemoteCredentialsChanged()
+        }
+        val changed = integrityRelevantChanges(previous, saved)
+        if (changed.isNotEmpty()) {
+            // Turning detection off is logged too, though nothing else is
+            // logged while it is off: it is the change a server most needs.
+            integrity.log(
+                IntegrityEvent.CONFIG_CHANGED,
+                mapOf("keys" to changed),
+                force = previous.fraudDetectionEnabled && !saved.fraudDetectionEnabled
+            )
+        }
         SyncScheduler.schedule(appContext, saved)
         return saved
+    }
+
+    /** Config keys whose change moves a count or a verdict, for the event log. */
+    private fun integrityRelevantChanges(previous: StepTrackerConfig, saved: StepTrackerConfig): List<String> {
+        val before = previous.toJson()
+        val after = saved.toJson()
+        return INTEGRITY_CONFIG_KEYS.filter { key -> before.opt(key)?.toString() != after.opt(key)?.toString() }
     }
 
     fun isInitialized(): Boolean = configStore.isInitialized()
@@ -96,7 +162,9 @@ class StepTrackerCore private constructor(context: Context) {
             read = config.healthConnectReadEnabled,
             write = config.healthConnectWriteEnabled,
             backgroundRead = backgroundRead ?: config.healthConnectBackgroundRead,
-            historyRead = historyRead ?: config.healthConnectHistoryRead
+            historyRead = historyRead ?: config.healthConnectHistoryRead,
+            activeCalories = config.healthConnectReadActiveCalories,
+            readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes)
         )
     }
 
@@ -211,9 +279,11 @@ class StepTrackerCore private constructor(context: Context) {
             val totals = engine.consumeCommit()
             scope.launch(writeLane) {
                 repository.saveDay(totals)
+                runCatching { integrity.flush() }
                 checkPeriodGoals(totals)
             }
         }
+        integrity.maybeEvaluate()
     }
 
     private fun emitGoalReached(reached: GoalTracker.Reached, date: String) {
@@ -256,15 +326,30 @@ class StepTrackerCore private constructor(context: Context) {
     /**
      * Steps the engine recovered for days other than the active one - the part
      * of an overnight gap that fell before midnight. Added on top of whatever
-     * those days already have, then re-queued for sync.
+     * those days already have, then re-queued for sync, and announced per day
+     * through `historyBackfilled` once the write has committed: an app that
+     * has already settled that day - paid for it, shown it, uploaded it -
+     * needs to know its number moved, and nothing else tells it.
      */
-    private fun handleBackfill(shares: Map<String, Int>) {
+    private fun handleBackfill(
+        shares: Map<String, Int>,
+        reason: StepCounterEngine.BackfillReason
+    ) {
         val retention = config().historyRetentionDays
         val cutoff = DateKeys.minusDays(DateKeys.today(), retention)
         scope.launch(writeLane) {
             shares.forEach { (date, steps) ->
                 if (date < cutoff || steps <= 0) return@forEach
-                repository.addToDay(date, steps, metrics)
+                val stored = repository.addToDay(date, steps, metrics) ?: return@forEach
+                StepEventBus.emit(
+                    StepEventBus.Events.HISTORY_BACKFILLED,
+                    mapOf(
+                        "date" to date,
+                        "addedSteps" to steps,
+                        "totalSteps" to stored.steps,
+                        "reason" to reason.jsValue
+                    )
+                )
             }
             sourceCache.invalidate()
         }
@@ -276,12 +361,15 @@ class StepTrackerCore private constructor(context: Context) {
         sourceCache.invalidate()
         scope.launch(writeLane) {
             repository.saveDay(closing)
+            // The closing day's final verdict, from everything flushed for it.
+            runCatching { integrity.onDayClosed(closing.date) }
             // The local date can also move backwards - travelling west across
             // the date line - in which case the day being adopted is one that
             // already has steps against it. Restore them so the user does not
             // land to a counter reading zero halfway through their day.
             if (newDate < closing.date) {
-                engine.seedActiveDay(newDate, repository.getDay(newDate).steps)
+                val stored = repository.getDay(newDate)
+                engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps)
             }
             repository.prune(config().historyRetentionDays)
             StepEventBus.emit(
@@ -307,10 +395,16 @@ class StepTrackerCore private constructor(context: Context) {
         sourceCache.invalidate()
         // Deliberate write: saveDay() refuses to lower a day, which would
         // leave history and the live counter permanently disagreeing.
-        repository.overwriteDay(liveToday())
+        val today = liveToday()
+        repository.overwriteDay(today)
+        // Logged, and today's minutes go with the count they described.
+        runCatching { integrity.onReset(today.date) }
     }
 
-    suspend fun clearHistory() = withContext(writeLane) { repository.clear() }
+    suspend fun clearHistory() = withContext(writeLane) {
+        repository.clear()
+        integrity.onHistoryCleared()
+    }
 
     suspend fun pruneHistory(retentionDays: Int): Int =
         withContext(writeLane) { repository.prune(retentionDays) }
@@ -318,7 +412,10 @@ class StepTrackerCore private constructor(context: Context) {
     /** Writes whatever is in memory to the database. Called before shutdown. */
     fun flush(): DayTotals {
         val totals = engine.consumeCommit()
-        scope.launch(writeLane) { repository.saveDay(totals) }
+        scope.launch(writeLane) {
+            repository.saveDay(totals)
+            runCatching { integrity.flush() }
+        }
         return totals
     }
 
@@ -344,7 +441,8 @@ class StepTrackerCore private constructor(context: Context) {
             snapshot.steps,
             snapshot.distance,
             snapshot.calories,
-            false
+            false,
+            recoveredSteps = snapshot.recoveredSteps
         )
     }
 
@@ -357,9 +455,72 @@ class StepTrackerCore private constructor(context: Context) {
     suspend fun dayTotals(date: String): DayTotals =
         if (date == DateKeys.today()) liveToday() else repository.getDay(date)
 
+    /** Stored rows for a range, as they are, with each day's suspect steps stamped on. */
+    suspend fun history(start: String, end: String): List<DayTotals> {
+        val days = repository.getRange(start, end)
+        val suspects = integrity.suspects(days)
+        if (suspects.isEmpty()) return days
+        return days.map { it.copy(suspectSteps = suspects[it.date] ?: 0) }
+    }
+
+    // ---- integrity ---------------------------------------------------------
+
+    /**
+     * [day] as the resolver should see it: [excluded] flagged steps taken out
+     * and distance and calories re-derived, and the day's suspect figure
+     * stamped either way so every record can report it.
+     */
+    private fun adjusted(day: DayTotals, suspect: Int, excluded: Int): DayTotals {
+        if (excluded <= 0) return if (day.suspectSteps == suspect) day else day.copy(suspectSteps = suspect)
+        val kept = (day.steps - excluded).coerceAtLeast(0)
+        return day.copy(
+            steps = kept,
+            distance = metrics.distance(kept),
+            calories = metrics.calories(kept),
+            recoveredSteps = day.recoveredSteps.coerceAtMost(kept),
+            suspectSteps = suspect
+        )
+    }
+
+    /** Carries the day's suspect figure onto whichever source won, and says how much was taken out. */
+    private fun stamp(
+        resolution: StepSourceResolver.Resolution,
+        suspect: Int,
+        excluded: Int
+    ): StepSourceResolver.Resolution {
+        if (suspect == 0 && excluded == 0) return resolution
+        return resolution.copy(
+            totals = resolution.totals.copy(suspectSteps = suspect),
+            suspectStepsExcluded = excluded
+        )
+    }
+
+    /**
+     * What goes into Health Connect for a day: this device's own count, less
+     * the flagged steps under exclude mode, so a shaken phone's steps are not
+     * handed on to every other app reading Health Connect.
+     */
+    suspend fun mirrorTotals(day: DayTotals): DayTotals {
+        val suspect = integrity.suspect(day.date, day.steps)
+        val excluded = integrity.excluded(suspect)
+        return if (excluded > 0) adjusted(day, suspect, excluded) else day
+    }
+
     // ---- step source resolution -----------------------------------------
 
     fun sourcePolicy(): StepSourcePolicy = StepSourcePolicy.from(config().stepSource)
+
+    fun wearableTrust(): WearableTrust = WearableTrust.from(config().wearableTrust)
+
+    fun wearableAllowlist(): Set<String> = config().wearableAllowlist.toSet()
+
+    /**
+     * Sources as JS should see them, with `trustedWearable` decided under the
+     * current trust rule. Stamped on the way out rather than when read, so a
+     * cached list never carries a decision made under a previous config.
+     */
+    fun stampTrust(sources: List<StepSource>): List<StepSource> =
+        StepSourceTrust.stamp(sources, wearableTrust(), wearableAllowlist())
 
     /** A config pin wins; otherwise whatever the user last chose at runtime. */
     fun preferredSourcePackage(): String? =
@@ -392,7 +553,13 @@ class StepTrackerCore private constructor(context: Context) {
      * a valid answer, just possibly a low one.
      */
     suspend fun resolveDay(date: String): StepSourceResolver.Resolution {
-        val device = dayTotals(date)
+        val raw = dayTotals(date)
+        val suspect = integrity.suspect(date, raw.steps)
+        val excluded = integrity.excluded(suspect)
+        return stamp(resolveWith(date, adjusted(raw, suspect, excluded)), suspect, excluded)
+    }
+
+    private suspend fun resolveWith(date: String, device: DayTotals): StepSourceResolver.Resolution {
         val policy = sourcePolicy()
         val today = date == DateKeys.today()
         if (!shouldConsultHealthConnect()) {
@@ -413,7 +580,10 @@ class StepTrackerCore private constructor(context: Context) {
         }
         val raw = StepSourceResolver.resolve(
             policy, device, sourcesForDay(date), preferredSourcePackage(), metrics,
-            deviceCoverageReliable = coverageReliable()
+            deviceCoverageReliable = coverageReliable(),
+            ignoreManualEntries = config().healthConnectIgnoreManualEntries,
+            wearableTrust = wearableTrust(),
+            wearableAllowlist = wearableAllowlist()
         )
         if (policy != StepSourcePolicy.AUTO || !today) return raw
         // Past days are closed: max() is the right answer and nothing is
@@ -431,6 +601,185 @@ class StepTrackerCore private constructor(context: Context) {
      * has genuinely seen more, and is trusted for its whole margin.
      */
     private fun coverageReliable(): Boolean = state.source == SensorSource.STEP_COUNTER
+
+    // ---- verification ----------------------------------------------------
+
+    /**
+     * Every Health Connect origin for one day, unresolved, self included,
+     * with `trustedWearable` stamped - or nothing, under the same rules that
+     * keep every other read off Health Connect when it cannot be consulted.
+     */
+    suspend fun unresolvedSources(date: String): List<StepSource> =
+        if (shouldConsultHealthConnect()) stampTrust(sourcesForDay(date)) else emptyList()
+
+    /**
+     * Everything a server needs to judge one day, with nothing resolved for
+     * it: this phone's own count and recovered share, every Health Connect
+     * origin unresolved and self included, what the current policy would
+     * have said (for comparison only), the sensor and device the count came
+     * from, how often the service has had to be recovered, and the clock. A
+     * server that pays for steps never trusts a single resolved number; this
+     * is the shape it verifies instead of stitching four calls together.
+     *
+     * Health Connect is consulted under the same rules as every other read:
+     * no grant, no provider or the `device` policy leave `sources` empty and
+     * `resolved` on this device, never an error.
+     */
+    suspend fun verificationSnapshot(
+        date: String,
+        sign: Boolean = false,
+        nonce: String? = null,
+        include: Set<SnapshotPart> = emptySet(),
+        recordTypes: Set<HealthConnectManager.RecordType> = setOf(HealthConnectManager.RecordType.STEPS)
+    ): Map<String, Any?> {
+        val today = date == DateKeys.today()
+        if (today) engine.reconcile()
+        val device = dayTotals(date)
+        val report = integrity.report(date)
+        val sources = unresolvedSources(date)
+        val resolved = resolveDay(date)
+        val capabilities = com.steptrackerpro.util.PermissionHelper.capabilities(
+            appContext, allowAccelerometer = config().accelerometerFallback
+        )
+        val health = trackingHealth()
+        val zone = DateKeys.zone()
+        val now = System.currentTimeMillis()
+        val snapshot = linkedMapOf<String, Any?>(
+            // First, so a server can pick a parser before reading anything else.
+            "schemaVersion" to SNAPSHOT_SCHEMA_VERSION,
+            "libraryVersion" to com.steptrackerpro.BuildConfig.LIBRARY_VERSION,
+            "date" to date,
+            // This phone's own sensor, before any policy. Never Health Connect.
+            "deviceSteps" to device.steps,
+            "recoveredSteps" to device.recoveredSteps,
+            "sensor" to state.source.jsValue,
+            // Only today's coverage is known; a past day reads 0, which is
+            // also what a day covered from midnight reads.
+            "coverageStartAt" to if (today) {
+                coverageStartForToday().takeIf { it > DateKeys.startOfDayMillis(date) } ?: 0L
+            } else {
+                0L
+            },
+            "sources" to sources.map { it.toMap() },
+            "resolved" to resolved.toMap(),
+            "capabilities" to mapOf(
+                "hasStepCounter" to capabilities["hasStepCounter"],
+                "hasStepDetector" to capabilities["hasStepDetector"],
+                "manufacturer" to capabilities["manufacturer"],
+                "model" to capabilities["model"],
+                "sdkInt" to capabilities["sdkInt"]
+            ),
+            "health" to mapOf(
+                "recoveryCount" to health["recoveryCount"],
+                "lastRecoveryReason" to health["lastRecoveryReason"],
+                "batteryOptimizationEnabled" to health["batteryOptimizationEnabled"],
+                "aggressiveOem" to health["aggressiveOem"]
+            ),
+            // The wall clock next to a boot id derived from elapsedRealtime:
+            // a clock edit moves the first and not the uptime behind the
+            // second, so a server comparing snapshots can see the seam.
+            "clock" to mapOf(
+                "wallClockMs" to now,
+                "bootId" to StepCounterEngine.currentBootId(),
+                "timezone" to zone.id,
+                "utcOffsetMinutes" to zone.rules.getOffset(Instant.ofEpochMilli(now)).totalSeconds / 60
+            ),
+            // Of deviceSteps, what the integrity checks flagged; and the
+            // flags, events and device hints behind it.
+            "suspectSteps" to report["suspectSteps"],
+            "integrity" to report
+        )
+        // The evidence behind the totals, when asked for. Inside the signed
+        // body, so one signature - and one Play Integrity requestHash - covers
+        // the minutes, the motion windows and the records a server scores,
+        // not only the totals built from them.
+        if (include.isNotEmpty()) {
+            // Echoed like the nonce, so "asked for and empty" is told apart
+            // from "never asked for".
+            snapshot["include"] = SnapshotPart.entries.filter { it in include }.map { it.jsValue }
+        }
+        if (SnapshotPart.MINUTES in include) {
+            integrity.flush()
+            snapshot["minutes"] = repository.minutes(date, date).map { it.toMap() }
+        }
+        if (SnapshotPart.MOTION_WINDOWS in include) {
+            snapshot["motionWindows"] = motionWindows(date, date).map { it.toMap() }
+        }
+        if (SnapshotPart.HEALTH_CONNECT_RECORDS in include) {
+            snapshot["healthConnectRecords"] = snapshotRecords(date, recordTypes)
+        }
+        if (nonce != null) snapshot["nonce"] = nonce
+        if (!sign) return snapshot
+        return signed(snapshot, now)
+    }
+
+    /**
+     * One day's raw Health Connect records for a snapshot, and whether they
+     * could be read. An explicit ask, so unlike `sources` it does not follow
+     * the step-source policy - only the provider, the grants for [types] and
+     * `healthConnectEnabled` decide. Never throws: a snapshot is still worth
+     * signing without the records, and `status` says why they are missing.
+     */
+    private suspend fun snapshotRecords(
+        date: String,
+        types: Set<HealthConnectManager.RecordType>
+    ): Map<String, Any?> {
+        val names = types.map { it.jsValue }
+        fun result(status: String, records: Any? = emptyList<Any>(), truncated: Any? = false) =
+            linkedMapOf("status" to status, "recordTypes" to names, "records" to records, "truncated" to truncated)
+
+        if (!config().healthConnectEnabled) return result("disabled")
+        if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return result("unavailable")
+        if (!healthConnect.canReadRecords(types)) return result("not_granted")
+        val start = DateKeys.startOfDayInstant(date)
+        val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
+        if (!end.isAfter(start)) return result("read")
+        val read = try {
+            withTimeoutOrNull(HC_RECORDS_TIMEOUT_MS) { healthConnect.readRecords(start, end, types) }
+                ?: return result("timeout")
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return result("failed")
+        }
+        return result("read", read["records"], read["truncated"])
+    }
+
+    /**
+     * The snapshot with a `signature` block over its exact JSON text. The
+     * text itself travels as `signedPayload`, so a server verifies the
+     * signature over those bytes and then parses them - it never has to
+     * re-serialise anything the same way this side did.
+     */
+    private fun signed(snapshot: Map<String, Any?>, now: Long): Map<String, Any?> {
+        val body = LinkedHashMap(snapshot).apply { put("signedAt", now) }
+        val payload = JsonMaps.toJson(body)
+        val bytes = payload.toByteArray(Charsets.UTF_8)
+        val signature = DeviceAttestation.sign(appContext, bytes) + mapOf(
+            "signedPayload" to payload,
+            "payloadSha256" to DeviceAttestation.sha256Hex(bytes)
+        )
+        return body + ("signature" to signature)
+    }
+
+    // ---- motion windows --------------------------------------------------
+
+    /**
+     * Stores one window's features and tells JS. On the write lane like every
+     * other table write; the table is trimmed to `motionWindowRetention` in
+     * the same transaction, so it is bounded by construction.
+     */
+    fun recordMotionWindow(features: MotionFeatures) {
+        val retention = config().motionWindowRetention
+        scope.launch(writeLane) {
+            repository.addMotionWindow(features, retention)
+            StepEventBus.emit(StepEventBus.Events.MOTION_WINDOW, features.toMap())
+        }
+    }
+
+    /** Windows that opened on the days between the two keys, inclusive. */
+    suspend fun motionWindows(start: String, end: String): List<MotionFeatures> =
+        repository.motionWindows(DateKeys.startOfDayMillis(start), DateKeys.endOfDayMillis(end))
 
     // ---- continuity ------------------------------------------------------
 
@@ -511,18 +860,29 @@ class StepTrackerCore private constructor(context: Context) {
      * is thirty.
      */
     suspend fun resolvedStats(start: String, end: String, goal: Int?): RangeStats {
-        val base = stats(start, end, goal)
+        val stored = stats(start, end, goal)
+        // Each day's suspect figure stamped on, and under exclude mode taken
+        // out before any source competes - the same order resolveDay() uses.
+        val suspects = integrity.suspects(stored.days)
+        val base = if (suspects.isEmpty()) {
+            stored
+        } else {
+            stored.copy(days = stored.days.map { day ->
+                val suspect = suspects[day.date] ?: 0
+                adjusted(day, suspect, integrity.excluded(suspect))
+            })
+        }
         if (!shouldConsultHealthConnect()) {
             // Same rule as resolveDay(): today's baseline still applies.
             val baseline = if (sourcePolicy() == StepSourcePolicy.AUTO) storedBaseline() else null
-            if (baseline == null) return base
+            if (baseline == null) return if (base === stored) stored else recomputeStats(base, base.days, goal)
             val today = DateKeys.today()
             val days = base.days.map { day ->
                 if (day.date != today) return@map day
                 val raw = StepSourceResolver.resolve(
                     StepSourcePolicy.DEVICE, day, emptyList(), null, metrics
                 )
-                StepContinuity.apply(raw, baseline, metrics).totals
+                StepContinuity.apply(raw, baseline, metrics).totals.copy(suspectSteps = day.suspectSteps)
             }
             return recomputeStats(base, days, goal)
         }
@@ -542,16 +902,23 @@ class StepTrackerCore private constructor(context: Context) {
         val today = DateKeys.today()
         val baseline = if (policy == StepSourcePolicy.AUTO) storedBaseline() else null
         val reliable = coverageReliable()
+        val ignoreManual = config().healthConnectIgnoreManualEntries
+        val trust = wearableTrust()
+        val allowlist = wearableAllowlist()
         val resolved = base.days.map { day ->
             val raw = StepSourceResolver.resolve(
                 policy, day, byDate[day.date].orEmpty(), preferred, metrics,
-                deviceCoverageReliable = reliable
+                deviceCoverageReliable = reliable,
+                ignoreManualEntries = ignoreManual,
+                wearableTrust = trust,
+                wearableAllowlist = allowlist
             )
-            if (day.date == today && baseline != null) {
+            val totals = if (day.date == today && baseline != null) {
                 StepContinuity.apply(raw, baseline, metrics).totals
             } else {
                 raw.totals
             }
+            if (totals.suspectSteps == day.suspectSteps) totals else totals.copy(suspectSteps = day.suspectSteps)
         }
         return recomputeStats(base, resolved, goal)
     }
@@ -610,7 +977,7 @@ class StepTrackerCore private constructor(context: Context) {
                         minOf(DateKeys.endOfDayInstant(end), Instant.now())
                     )
                 }
-            }.getOrNull() ?: emptyList()
+            }.getOrNull()?.let { stampTrust(it) } ?: emptyList()
         }
         return emptyList()
     }
@@ -626,6 +993,12 @@ class StepTrackerCore private constructor(context: Context) {
      * afford to, and by every Health Connect sync.
      */
     fun resolveFromCache(totals: DayTotals): StepSourceResolver.Resolution {
+        val suspect = integrity.liveSuspect(totals.date, totals.steps)
+        val excluded = integrity.excluded(suspect)
+        return stamp(resolveCachedWith(adjusted(totals, suspect, excluded)), suspect, excluded)
+    }
+
+    private fun resolveCachedWith(totals: DayTotals): StepSourceResolver.Resolution {
         val deviceOnly = {
             StepSourceResolver.resolve(
                 StepSourcePolicy.DEVICE, totals, emptyList(), null, metrics
@@ -644,7 +1017,10 @@ class StepTrackerCore private constructor(context: Context) {
         } else {
             StepSourceResolver.resolve(
                 policy, totals, cached, preferredSourcePackage(), metrics,
-                deviceCoverageReliable = coverageReliable()
+                deviceCoverageReliable = coverageReliable(),
+                ignoreManualEntries = config.healthConnectIgnoreManualEntries,
+                wearableTrust = wearableTrust(),
+                wearableAllowlist = wearableAllowlist()
             )
         }
         if (policy != StepSourcePolicy.AUTO) return raw
@@ -669,14 +1045,19 @@ class StepTrackerCore private constructor(context: Context) {
         base: StepSnapshot,
         resolution: StepSourceResolver.Resolution
     ): StepSnapshot {
-        if (!resolution.usedExternal) return base
         val totals = resolution.totals
+        // Swapped when another source won, and when exclude mode took
+        // flagged steps out of this device's own count.
+        if (!resolution.usedExternal && totals.steps == base.steps) {
+            return if (base.suspectSteps == totals.suspectSteps) base else base.copy(suspectSteps = totals.suspectSteps)
+        }
         return base.copy(
             steps = totals.steps,
             distance = totals.distance,
             calories = totals.calories,
             goalProgress = metrics.goalProgress(totals.steps, base.dailyGoal),
-            goalReached = base.dailyGoal > 0 && totals.steps >= base.dailyGoal
+            goalReached = base.dailyGoal > 0 && totals.steps >= base.dailyGoal,
+            suspectSteps = totals.suspectSteps
         )
     }
 
@@ -799,7 +1180,7 @@ class StepTrackerCore private constructor(context: Context) {
                 if (day.date != today.date) syncedDates.add(day.date)
                 continue
             }
-            if (healthConnect.writeDay(day)) {
+            if (healthConnect.writeDay(mirrorTotals(day))) {
                 succeeded++
                 // Today stays unsynced: it is still moving.
                 if (day.date != today.date) syncedDates.add(day.date)
@@ -851,6 +1232,26 @@ class StepTrackerCore private constructor(context: Context) {
     )
 
     companion object {
+        /**
+         * The verification snapshot's shape. Bumped whenever a field is
+         * removed, renamed or changes meaning; adding a field does not bump
+         * it. First sent by 2.0, as 2. No 1.x release sent it: a 1.5
+         * snapshot is recognisable by `integrity`, a 1.4 one by its absence,
+         * and both are version 2 with fields missing - nothing was removed
+         * or renamed between them.
+         */
+        const val SNAPSHOT_SCHEMA_VERSION = 2
+
+        /** Config keys whose change is logged as an integrity event. */
+        private val INTEGRITY_CONFIG_KEYS = listOf(
+            "fraudDetectionEnabled", "fraudMode", "fraudMaxCadenceSpm", "fraudSteadyCadenceMinutes",
+            "fraudMaxContinuousMinutes", "fraudMaxDailySteps", "fraudFlagWhileCharging",
+            "fraudActivityRecognition", "gapRecovery", "gapRecoveryMaxSteps", "stepSource",
+            "preferredStepSourcePackage", "healthConnectIgnoreManualEntries", "wearableTrust",
+            "wearableAllowlist", "accelerometerFallback", "accelerometerThreshold",
+            "motionSamplingEnabled"
+        )
+
         /** Stands in for "this device" in [StepStateStore.lastResolvedSource]. */
         const val SELF_SOURCE_KEY = "__self__"
 
@@ -863,6 +1264,9 @@ class StepTrackerCore private constructor(context: Context) {
          * phone's own count is the answer, and the read is retried next time.
          */
         const val HC_READ_TIMEOUT_MS = 4_000L
+
+        /** A snapshot's raw records: up to 10,000 per type, so longer than a total's read. */
+        const val HC_RECORDS_TIMEOUT_MS = 20_000L
 
         /**
          * The service stamps [StepStateStore.lastHeartbeatAt] this often even

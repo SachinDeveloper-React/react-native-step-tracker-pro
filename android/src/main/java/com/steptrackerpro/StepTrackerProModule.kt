@@ -7,17 +7,22 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
-import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.SnapshotPart
+import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
 import com.steptrackerpro.health.HealthConnectManager
 import com.steptrackerpro.health.HealthPermissionActivity
+import com.steptrackerpro.core.IntegrityEvent
+import com.steptrackerpro.integrity.DeviceAttestation
+import com.steptrackerpro.integrity.PlayIntegrityBridge
 import com.steptrackerpro.service.ServiceCommands
+import com.steptrackerpro.service.StepTrackerService
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.Bridge
 import com.steptrackerpro.util.optBoolean
@@ -25,6 +30,8 @@ import com.steptrackerpro.util.optDouble
 import com.steptrackerpro.util.optInt
 import com.steptrackerpro.util.optLong
 import com.steptrackerpro.util.optString
+import com.steptrackerpro.util.optStringList
+import com.steptrackerpro.util.toStringList
 import com.steptrackerpro.util.BatteryOptimizationHelper
 import com.steptrackerpro.util.PermissionHelper
 import com.steptrackerpro.util.StepEventBus
@@ -123,12 +130,33 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         listenerCount = (listenerCount - count.toInt()).coerceAtLeast(0)
     }
 
+    /**
+     * Every event goes out through the codegen-typed emitters (`onStepsChanged`
+     * and so on) on the new architecture; the old-architecture shim
+     * implements the same `emitOn…` methods over `RCTDeviceEventEmitter` with
+     * the `StepTrackerPro:` prefix, which is what the JS side subscribes to
+     * there.
+     */
     private fun emit(name: String, payload: Map<String, Any?>) {
         if (!reactContext.hasActiveReactInstance()) return
         runCatching {
-            reactContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit("$EVENT_PREFIX$name", Bridge.map(payload))
+            val value = Bridge.map(payload)
+            when (name) {
+                StepEventBus.Events.STEPS_CHANGED -> emitOnStepsChanged(value)
+                StepEventBus.Events.GOAL_REACHED -> emitOnGoalReached(value)
+                StepEventBus.Events.GOAL_PROGRESS_CHANGED -> emitOnGoalProgressChanged(value)
+                StepEventBus.Events.TRACKING_STATE_CHANGED -> emitOnTrackingStateChanged(value)
+                StepEventBus.Events.DAY_CHANGED -> emitOnDayChanged(value)
+                StepEventBus.Events.HISTORY_BACKFILLED -> emitOnHistoryBackfilled(value)
+                StepEventBus.Events.MOTION_WINDOW -> emitOnMotionWindow(value)
+                StepEventBus.Events.SUSPICIOUS_ACTIVITY -> emitOnSuspiciousActivity(value)
+                StepEventBus.Events.SYNC_COMPLETED -> emitOnSyncCompleted(value)
+                StepEventBus.Events.SYNC_AUTH_FAILED -> emitOnSyncAuthFailed(value)
+                StepEventBus.Events.STEP_SOURCE_CHANGED -> emitOnStepSourceChanged(value)
+                StepEventBus.Events.HEALTH_CONNECT_STATUS_CHANGED -> emitOnHealthConnectStatusChanged(value)
+                StepEventBus.Events.ERROR -> emitOnError(value)
+                else -> Unit
+            }
         }
     }
 
@@ -137,9 +165,16 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun initialize(config: ReadableMap, promise: Promise) {
         runSafely(promise) {
-            val merged = mergeConfig(core.config(), config)
-            core.updateConfig(merged)
+            val before = core.config()
+            val merged = mergeConfig(before, config)
+            val saved = core.updateConfig(merged)
             core.engine.reconcile()
+            // A live service picks up what changed - receivers for the
+            // integrity checks, the motion schedule - without waiting for a
+            // restart. Only on a real change: this runs on every app launch.
+            if (saved != before && StepTrackerService.isAlive) {
+                sendIfTracking(ServiceCommands.ACTION_CONFIG_CHANGED)
+            }
             if (core.serviceLooksDead() && PermissionHelper.canStartTracking(reactContext)) {
                 // The service may have been killed while JS was gone. This has
                 // to be START: every other command starts the service without
@@ -331,7 +366,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getHistory(startDate: String, endDate: String, promise: Promise) {
         launchSafely(promise) {
-            val days = core.repository.getRange(startDate, endDate)
+            val days = core.history(startDate, endDate)
             promise.resolve(Bridge.map(mapOf("records" to days.map { day ->
                 mapOf(
                     "date" to day.date,
@@ -339,9 +374,214 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                     "distance" to day.distance,
                     "calories" to day.calories,
                     "synced" to day.synced,
-                    "syncedRemote" to day.syncedRemote
+                    "syncedRemote" to day.syncedRemote,
+                    "recoveredSteps" to day.recoveredSteps,
+                    "suspectSteps" to day.suspectSteps
                 )
             })))
+        }
+    }
+
+    /**
+     * One call with everything a server needs to judge a day, nothing
+     * resolved for it. The date is validated in JS; a malformed one that
+     * reaches here fails in DateKeys and rejects like any other bad input.
+     */
+    @ReactMethod
+    override fun getVerificationSnapshot(date: String, options: ReadableMap, promise: Promise) {
+        launchSafely(promise) {
+            val sign = options.optBoolean("sign", false)
+            val nonce = options.optString("nonce", null)?.takeIf { it.isNotEmpty() }
+            val include = SnapshotPart.parse(options.optStringList("include").orEmpty())
+            val typeNames = options.optStringList("healthConnectRecordTypes")
+            val recordTypes = if (typeNames == null) {
+                setOf(HealthConnectManager.RecordType.STEPS)
+            } else {
+                HealthConnectManager.RecordType.parse(typeNames)
+            }
+            if (include == null || recordTypes == null) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "include takes minutes, motionWindows and healthConnectRecords; " +
+                        "healthConnectRecordTypes takes steps and distance"
+                )
+                return@launchSafely
+            }
+            promise.resolve(Bridge.map(core.verificationSnapshot(date, sign, nonce, include, recordTypes)))
+        }
+    }
+
+    /** What the integrity checks found for one day: flags, events, per-minute totals, device hints. */
+    @ReactMethod
+    override fun getIntegrityReport(date: String, promise: Promise) {
+        launchSafely(promise) {
+            promise.resolve(Bridge.map(core.integrity.report(date)))
+        }
+    }
+
+    /** The integrity event log between two dates, inclusive, oldest first. */
+    @ReactMethod
+    override fun getIntegrityEvents(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            val events = core.repository.events(
+                DateKeys.startOfDayMillis(startDate), DateKeys.endOfDayMillis(endDate)
+            )
+            promise.resolve(Bridge.map(mapOf("events" to events.map { it.toMap() })))
+        }
+    }
+
+    /** Per-minute step buckets between two dates, inclusive, oldest first. Only minutes with steps. */
+    @ReactMethod
+    override fun getStepMinutes(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            // Whatever is still in memory goes to storage first, so the read is current.
+            core.integrity.flush()
+            val minutes = core.repository.minutes(startDate, endDate)
+            promise.resolve(Bridge.map(mapOf("minutes" to minutes.map { it.toMap() })))
+        }
+    }
+
+    /**
+     * A Play Integrity token bound to [options].requestHash - normally a
+     * signed snapshot's `payloadSha256` - for the cloud project in
+     * [options].cloudProjectNumber. Needs the app to ship
+     * `com.google.android.play:integrity`.
+     */
+    @ReactMethod
+    override fun requestIntegrityToken(options: ReadableMap, promise: Promise) {
+        launchSafely(promise) {
+            val hash = options.optString("requestHash", null).orEmpty()
+            val project = if (options.hasKey("cloudProjectNumber") && !options.isNull("cloudProjectNumber")) {
+                options.getDouble("cloudProjectNumber").toLong()
+            } else {
+                0L
+            }
+            if (hash.isEmpty() || hash.length > PlayIntegrityBridge.MAX_REQUEST_HASH || project <= 0L) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "requestHash must be 1-${PlayIntegrityBridge.MAX_REQUEST_HASH} characters and cloudProjectNumber a positive number"
+                )
+                return@launchSafely
+            }
+            if (!PlayIntegrityBridge.isAvailable()) {
+                promise.reject(
+                    "E_INTEGRITY_UNAVAILABLE",
+                    "Add com.google.android.play:integrity to your app's dependencies to use Play Integrity"
+                )
+                return@launchSafely
+            }
+            try {
+                val token = PlayIntegrityBridge.requestToken(reactContext, project, hash)
+                promise.resolve(Bridge.map(mapOf("token" to token, "requestHash" to hash)))
+            } catch (failure: PlayIntegrityBridge.Failure) {
+                rejectIntegrity(promise, failure)
+            }
+        }
+    }
+
+    /**
+     * Prepares the Play Integrity token provider for a cloud project ahead
+     * of the first [requestIntegrityToken], which otherwise pays for it.
+     * Idempotent: a provider already prepared is reused.
+     */
+    @ReactMethod
+    override fun prepareIntegrity(cloudProjectNumber: Double, promise: Promise) {
+        launchSafely(promise) {
+            val project = cloudProjectNumber.toLong()
+            if (project <= 0L || project.toDouble() != cloudProjectNumber) {
+                promise.reject("E_INVALID_CONFIG", "cloudProjectNumber must be a positive integer")
+                return@launchSafely
+            }
+            if (!PlayIntegrityBridge.isAvailable()) {
+                promise.reject(
+                    "E_INTEGRITY_UNAVAILABLE",
+                    "Add com.google.android.play:integrity to your app's dependencies to use Play Integrity"
+                )
+                return@launchSafely
+            }
+            try {
+                PlayIntegrityBridge.prepare(reactContext, project)
+                promise.resolve(true)
+            } catch (failure: PlayIntegrityBridge.Failure) {
+                rejectIntegrity(promise, failure)
+            }
+        }
+    }
+
+    /**
+     * `E_INTEGRITY_FAILED` with Play's code in the message and, for code,
+     * in `userInfo`: `playErrorCode`, `playError` (Play's name for it) and
+     * `retryable` - whether backing off and calling again can succeed.
+     */
+    private fun rejectIntegrity(promise: Promise, failure: PlayIntegrityBridge.Failure) {
+        promise.reject(
+            "E_INTEGRITY_FAILED",
+            "Play Integrity failed" +
+                (failure.errorCode?.let { " (error $it ${failure.errorName})" } ?: "") +
+                ": ${failure.message}",
+            failure,
+            Bridge.map(
+                mapOf(
+                    "playErrorCode" to failure.errorCode,
+                    "playError" to failure.errorName,
+                    "retryable" to failure.retryable
+                )
+            )
+        )
+    }
+
+    /** Whether the install already has a signing key, so an app attests once rather than every launch. */
+    @ReactMethod
+    override fun hasAttestationKey(promise: Promise) {
+        launchSafely(promise) { promise.resolve(DeviceAttestation.hasKey()) }
+    }
+
+    /**
+     * The current key's id, public key, chain and security level without
+     * replacing it - null when there is none. The chain still carries the
+     * challenge it was generated with.
+     */
+    @ReactMethod
+    override fun getAttestationKeyInfo(promise: Promise) {
+        launchSafely(promise) {
+            promise.resolve(DeviceAttestation.describe(reactContext)?.let { Bridge.map(it) })
+        }
+    }
+
+    /**
+     * Generates a fresh Keystore key bound to the server's challenge and
+     * returns its attestation chain. Every later signed snapshot and upload
+     * uses this key. The challenge is validated in JS; a bad one reaching
+     * here is rejected by the Keystore wrapper like any other bad input.
+     */
+    @ReactMethod
+    override fun attestDevice(challenge: String, promise: Promise) {
+        launchSafely(promise) {
+            val bytes = challenge.toByteArray(Charsets.UTF_8)
+            if (bytes.isEmpty() || bytes.size > DeviceAttestation.MAX_CHALLENGE_BYTES) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "challenge must be 1-${DeviceAttestation.MAX_CHALLENGE_BYTES} bytes of UTF-8"
+                )
+                return@launchSafely
+            }
+            val attestation = DeviceAttestation.attest(reactContext, bytes)
+            // A new key: a signature-auth refusal is no longer the current state.
+            core.state.recordRemoteCredentialsChanged()
+            core.integrity.log(
+                IntegrityEvent.DEVICE_ATTESTED,
+                mapOf("keyId" to attestation["keyId"], "attested" to attestation["attested"])
+            )
+            promise.resolve(Bridge.map(attestation))
+        }
+    }
+
+    /** Motion signature windows that opened between the two dates, inclusive, oldest first. */
+    @ReactMethod
+    override fun getMotionWindows(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            val windows = core.motionWindows(startDate, endDate)
+            promise.resolve(Bridge.map(mapOf("windows" to windows.map { it.toMap() })))
         }
     }
 
@@ -380,7 +620,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun requestPermissions(promise: Promise) {
-        val activity = getCurrentActivity()
+        val activity = reactContext.currentActivity
         if (activity !is PermissionAwareActivity) {
             promise.reject("E_NO_ACTIVITY", "No foreground activity to attach the dialog to")
             return
@@ -430,7 +670,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun requestDisableBatteryOptimization(promise: Promise) {
         runSafely(promise) {
-            val host = getCurrentActivity() ?: reactContext
+            val host = reactContext.currentActivity ?: reactContext
             promise.resolve(BatteryOptimizationHelper.requestExemption(host))
         }
     }
@@ -438,7 +678,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun openBatteryOptimizationSettings(promise: Promise) {
         runSafely(promise) {
-            promise.resolve(BatteryOptimizationHelper.openSettings(getCurrentActivity() ?: reactContext))
+            promise.resolve(BatteryOptimizationHelper.openSettings(reactContext.currentActivity ?: reactContext))
         }
     }
 
@@ -446,7 +686,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun openManufacturerAutoStartSettings(promise: Promise) {
         runSafely(promise) {
             promise.resolve(
-                BatteryOptimizationHelper.openAutoStartSettings(getCurrentActivity() ?: reactContext)
+                BatteryOptimizationHelper.openAutoStartSettings(reactContext.currentActivity ?: reactContext)
             )
         }
     }
@@ -492,7 +732,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             promise.reject(code, "Health Connect is ${availability.jsValue} on this device")
             return
         }
-        val activity: Activity? = getCurrentActivity()
+        val activity: Activity? = reactContext.currentActivity
         if (activity == null) {
             promise.reject("E_NO_ACTIVITY", "No foreground activity to launch the request from")
             return
@@ -508,6 +748,18 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             )
         )
         val permissions = core.healthConnect.permissionsFor(permissionScope)
+        // From 2.0 the app declares its Health Connect permissions itself.
+        // One it asks for but never declared would be left off the sheet
+        // without a word, which looks exactly like the user refusing.
+        val undeclared = core.healthConnect.undeclaredPermissions(permissionScope)
+        if (undeclared.isNotEmpty()) {
+            promise.reject(
+                "E_HEALTH_CONNECT_NOT_DECLARED",
+                "Declare these in your app's AndroidManifest.xml (see docs/PERMISSIONS.md): " +
+                    undeclared.sorted().joinToString(", ")
+            )
+            return
+        }
         if (permissions.isEmpty()) {
             // Reads and writes both disabled in config: there is nothing to
             // ask for, and launching an empty request would show nothing.
@@ -575,7 +827,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun installHealthConnect(promise: Promise) {
         runSafely(promise) {
             runCatching {
-                (getCurrentActivity() ?: reactContext)
+                (reactContext.currentActivity ?: reactContext)
                     .startActivity(core.healthConnect.installIntent())
                 promise.resolve(true)
             }.onFailure { promise.resolve(false) }
@@ -620,7 +872,12 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                                 "distance" to day.distance,
                                 "calories" to day.calories,
                                 "synced" to true,
-                                "syncedRemote" to false
+                                "syncedRemote" to false,
+                                // An aggregate of other apps' records has no
+                                // recovered share; the field is there so the
+                                // row is a DayRecord like every other.
+                                "recoveredSteps" to 0,
+                                "suspectSteps" to 0
                             )
                         }
                     )
@@ -629,10 +886,85 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Every record of the asked-for types in the window, as Health Connect stores it. */
+    @ReactMethod
+    override fun getHealthConnectRecords(startIso: String, endIso: String, options: ReadableMap, promise: Promise) {
+        launchSafely(promise) {
+            val types = recordTypes(options, promise) ?: return@launchSafely
+            if (!requireHealthConnectRead(promise, types)) return@launchSafely
+            healthConnectRead(promise) {
+                Bridge.map(core.healthConnect.readRecords(Instant.parse(startIso), Instant.parse(endIso), types))
+            }
+        }
+    }
+
+    /** A change-tracking cursor for the asked-for record types, starting now. */
+    @ReactMethod
+    override fun getHealthConnectChangesToken(options: ReadableMap, promise: Promise) {
+        launchSafely(promise) {
+            val types = recordTypes(options, promise) ?: return@launchSafely
+            if (!requireHealthConnectRead(promise, types)) return@launchSafely
+            healthConnectRead(promise) { core.healthConnect.changesToken(types) }
+        }
+    }
+
+    /** Records inserted, updated and deleted since a cursor, and the next cursor. */
+    @ReactMethod
+    override fun getHealthConnectChanges(token: String, promise: Promise) {
+        launchSafely(promise) {
+            // The token knows its types; steps are in every one this package hands out.
+            if (!requireHealthConnectRead(promise, setOf(HealthConnectManager.RecordType.STEPS))) return@launchSafely
+            healthConnectRead(promise) { Bridge.map(core.healthConnect.changes(token)) }
+        }
+    }
+
+    /** `recordTypes` from [options], steps when absent; rejects and returns null on an unknown one. */
+    private fun recordTypes(options: ReadableMap, promise: Promise): Set<HealthConnectManager.RecordType>? {
+        val names = options.optStringList("recordTypes") ?: return setOf(HealthConnectManager.RecordType.STEPS)
+        return HealthConnectManager.RecordType.parse(names) ?: run {
+            promise.reject("E_INVALID_CONFIG", "recordTypes takes steps and distance")
+            null
+        }
+    }
+
+    /**
+     * Rejects, and returns false, when raw Health Connect reads of [types]
+     * cannot work: no provider, or a read grant missing. The aggregated
+     * reads fall back to this device quietly; a raw read asked for
+     * specifically says why it cannot.
+     */
+    private suspend fun requireHealthConnectRead(
+        promise: Promise,
+        types: Set<HealthConnectManager.RecordType>
+    ): Boolean {
+        if (core.healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) {
+            promise.reject("E_HEALTH_CONNECT_UNAVAILABLE", "Health Connect is not available on this device")
+            return false
+        }
+        if (!core.healthConnect.canReadRecords(types)) {
+            promise.reject(
+                "E_HEALTH_CONNECT_DENIED",
+                "Health Connect read permission is not granted: " +
+                    types.joinToString(", ") { it.permission }
+            )
+            return false
+        }
+        return true
+    }
+
+    /** A grant revoked between the check and the read rejects as denied, not as unknown. */
+    private suspend fun healthConnectRead(promise: Promise, read: suspend () -> Any?) {
+        try {
+            promise.resolve(read())
+        } catch (denied: SecurityException) {
+            promise.reject("E_HEALTH_CONNECT_DENIED", denied.message ?: "Health Connect read permission is not granted", denied)
+        }
+    }
+
     @ReactMethod
     override fun writeHealthConnectSteps(date: String, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(core.healthConnect.writeDay(core.dayTotals(date)))
+            promise.resolve(core.healthConnect.writeDay(core.mirrorTotals(core.dayTotals(date))))
         }
     }
 
@@ -709,6 +1041,24 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     }
 
     // ---- sync ------------------------------------------------------------
+
+    /**
+     * What remote uploads last did, kept across process deaths: when, whether
+     * they were accepted, the last failure and whether it was the
+     * credentials. A background upload's refusal usually happens with no JS
+     * to hear `syncAuthFailed`; this is where the app finds it.
+     */
+    @ReactMethod
+    override fun getSyncStatus(promise: Promise) {
+        launchSafely(promise) {
+            val config = core.config()
+            val remote = core.state.remoteSyncStatus().toMap(
+                configured = !config.remoteSyncUrl.isNullOrEmpty(),
+                pendingRecords = core.repository.countUnsynced(SyncTarget.REMOTE)
+            )
+            promise.resolve(Bridge.map(mapOf("remote" to remote)))
+        }
+    }
 
     @ReactMethod
     override fun getPendingSyncCount(promise: Promise) {
@@ -830,10 +1180,28 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectHistoryRead = patch.optBoolean(
                 "healthConnectHistoryRead", current.healthConnectHistoryRead
             ),
+            healthConnectIgnoreManualEntries = patch.optBoolean(
+                "healthConnectIgnoreManualEntries", current.healthConnectIgnoreManualEntries
+            ),
+            healthConnectReadActiveCalories = patch.optBoolean(
+                "healthConnectReadActiveCalories", current.healthConnectReadActiveCalories
+            ),
+            healthConnectReadTypes = if (patch.hasKey("healthConnectReadTypes") && !patch.isNull("healthConnectReadTypes")) {
+                patch.getArray("healthConnectReadTypes")?.toStringList() ?: current.healthConnectReadTypes
+            } else {
+                current.healthConnectReadTypes
+            },
             stepSource = patch.optString("stepSource", current.stepSource) ?: current.stepSource,
             preferredStepSourcePackage = patch.optString(
                 "preferredStepSourcePackage", current.preferredStepSourcePackage
             ),
+            wearableTrust = patch.optString("wearableTrust", current.wearableTrust)
+                ?: current.wearableTrust,
+            wearableAllowlist = if (patch.hasKey("wearableAllowlist") && !patch.isNull("wearableAllowlist")) {
+                patch.getArray("wearableAllowlist")?.toStringList() ?: emptyList()
+            } else {
+                current.wearableAllowlist
+            },
             privacyPolicyUrl = patch.optString("privacyPolicyUrl", current.privacyPolicyUrl),
             remoteSyncUrl = patch.optString("remoteSyncUrl", current.remoteSyncUrl),
             remoteSyncHeaders = if (patch.hasKey("remoteSyncHeaders")) {
@@ -842,8 +1210,13 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 current.remoteSyncHeaders
             },
             remoteSyncAllowHttp = patch.optBoolean("remoteSyncAllowHttp", current.remoteSyncAllowHttp),
+            remoteSyncPayload = patch.optString("remoteSyncPayload", current.remoteSyncPayload)
+                ?: current.remoteSyncPayload,
+            remoteSyncAuth = patch.optString("remoteSyncAuth", current.remoteSyncAuth)
+                ?: current.remoteSyncAuth,
             autoStartOnBoot = patch.optBoolean("autoStartOnBoot", current.autoStartOnBoot),
             gapRecovery = patch.optString("gapRecovery", current.gapRecovery) ?: current.gapRecovery,
+            gapRecoveryMaxSteps = patch.optInt("gapRecoveryMaxSteps", current.gapRecoveryMaxSteps),
             watchdogEnabled = patch.optBoolean("watchdogEnabled", current.watchdogEnabled),
             accelerometerFallback = patch.optBoolean(
                 "accelerometerFallback", current.accelerometerFallback
@@ -853,8 +1226,51 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             ),
             accelerometerThreshold = patch.optDouble(
                 "accelerometerThreshold", current.accelerometerThreshold
-            )
+            ),
+            // JS groups the three under `motionSampling`; only the keys present
+            // in the object move, like every other patch.
+            motionSamplingEnabled = motion(patch)?.optBoolean("enabled", current.motionSamplingEnabled)
+                ?: current.motionSamplingEnabled,
+            motionWindowSeconds = motion(patch)?.optInt("windowSeconds", current.motionWindowSeconds)
+                ?: current.motionWindowSeconds,
+            motionIntervalMinutes = motion(patch)?.optInt("intervalMinutes", current.motionIntervalMinutes)
+                ?: current.motionIntervalMinutes,
+            motionWindowRetention = patch.optInt("motionWindowRetention", current.motionWindowRetention),
+            // JS groups these under `fraudDetection`, patched key by key like motionSampling.
+            fraudDetectionEnabled = fraud(patch)?.optBoolean("enabled", current.fraudDetectionEnabled)
+                ?: current.fraudDetectionEnabled,
+            fraudMode = fraud(patch)?.optString("mode", current.fraudMode) ?: current.fraudMode,
+            fraudMaxCadenceSpm = fraud(patch)?.optInt("maxCadenceSpm", current.fraudMaxCadenceSpm)
+                ?: current.fraudMaxCadenceSpm,
+            fraudSteadyCadenceMinutes = fraud(patch)
+                ?.optInt("steadyCadenceMinutes", current.fraudSteadyCadenceMinutes)
+                ?: current.fraudSteadyCadenceMinutes,
+            fraudMaxContinuousMinutes = fraud(patch)
+                ?.optInt("maxContinuousMinutes", current.fraudMaxContinuousMinutes)
+                ?: current.fraudMaxContinuousMinutes,
+            fraudMaxDailySteps = fraud(patch)?.optInt("maxDailySteps", current.fraudMaxDailySteps)
+                ?: current.fraudMaxDailySteps,
+            fraudFlagWhileCharging = fraud(patch)
+                ?.optBoolean("flagWhileCharging", current.fraudFlagWhileCharging)
+                ?: current.fraudFlagWhileCharging,
+            fraudActivityRecognition = fraud(patch)
+                ?.optBoolean("activityRecognition", current.fraudActivityRecognition)
+                ?: current.fraudActivityRecognition
         )
+
+    private fun fraud(patch: ReadableMap): ReadableMap? =
+        if (patch.hasKey("fraudDetection") && !patch.isNull("fraudDetection")) {
+            patch.getMap("fraudDetection")
+        } else {
+            null
+        }
+
+    private fun motion(patch: ReadableMap): ReadableMap? =
+        if (patch.hasKey("motionSampling") && !patch.isNull("motionSampling")) {
+            patch.getMap("motionSampling")
+        } else {
+            null
+        }
 
     private fun configToMap(config: StepTrackerConfig): Map<String, Any?> = mapOf(
         "height" to config.heightCm,
@@ -873,17 +1289,41 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "healthConnectWriteEnabled" to config.healthConnectWriteEnabled,
         "healthConnectBackgroundRead" to config.healthConnectBackgroundRead,
         "healthConnectHistoryRead" to config.healthConnectHistoryRead,
+        "healthConnectIgnoreManualEntries" to config.healthConnectIgnoreManualEntries,
+        "healthConnectReadActiveCalories" to config.healthConnectReadActiveCalories,
+        "healthConnectReadTypes" to config.healthConnectReadTypes,
         "stepSource" to config.stepSource,
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
+        "wearableTrust" to config.wearableTrust,
+        "wearableAllowlist" to config.wearableAllowlist,
         "privacyPolicyUrl" to config.privacyPolicyUrl,
         "remoteSyncUrl" to config.remoteSyncUrl,
         "remoteSyncAllowHttp" to config.remoteSyncAllowHttp,
+        "remoteSyncPayload" to config.remoteSyncPayload,
+        "remoteSyncAuth" to config.remoteSyncAuth,
         "autoStartOnBoot" to config.autoStartOnBoot,
         "gapRecovery" to config.gapRecovery,
+        "gapRecoveryMaxSteps" to config.gapRecoveryMaxSteps,
         "watchdogEnabled" to config.watchdogEnabled,
         "accelerometerFallback" to config.accelerometerFallback,
         "accelerometerWakeLock" to config.accelerometerWakeLock,
-        "accelerometerThreshold" to config.accelerometerThreshold
+        "accelerometerThreshold" to config.accelerometerThreshold,
+        "motionSampling" to mapOf(
+            "enabled" to config.motionSamplingEnabled,
+            "windowSeconds" to config.motionWindowSeconds,
+            "intervalMinutes" to config.motionIntervalMinutes
+        ),
+        "motionWindowRetention" to config.motionWindowRetention,
+        "fraudDetection" to mapOf(
+            "enabled" to config.fraudDetectionEnabled,
+            "mode" to config.fraudMode,
+            "maxCadenceSpm" to config.fraudMaxCadenceSpm,
+            "steadyCadenceMinutes" to config.fraudSteadyCadenceMinutes,
+            "maxContinuousMinutes" to config.fraudMaxContinuousMinutes,
+            "maxDailySteps" to config.fraudMaxDailySteps,
+            "flagWhileCharging" to config.fraudFlagWhileCharging,
+            "activityRecognition" to config.fraudActivityRecognition
+        )
     )
 
     companion object {

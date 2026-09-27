@@ -11,13 +11,14 @@ depends on your [usage mode](USAGE_MODES.md):
 | Health apps declaration | no | **yes** (reads) | **yes** (reads + writes) |
 | Privacy policy naming health data types | no | **yes** | **yes** |
 | Rationale activity in manifest | no (remove) | **yes** | **yes** |
-| Battery exemption permission | optional, justified | remove | optional, justified |
+| Battery exemption permission | optional, add and justify | leave out | optional, add and justify |
 | Data safety: fitness info | yes | yes | yes |
 
-The library manifest declares everything Mode C needs. For A or B, remove
-what you do not use with `tools:node="remove"` — every declared permission is
-one Play asks you to justify, and an unjustified one is a rejection.
-[USAGE_MODES.md](USAGE_MODES.md) has the exact manifest blocks.
+From 2.0 the library manifest declares only what Mode A needs. Health Connect
+permissions and the battery-exemption permission are added by your app, and
+only the ones you use - every declared permission is one Play asks you to
+justify, and an unjustified one is a rejection.
+[USAGE_MODES.md](USAGE_MODES.md) has the exact manifest blocks per mode.
 
 ## 1. Foreground service type
 
@@ -65,12 +66,12 @@ Requirements:
   opens your `privacyPolicyUrl` — set that in `initialize()`, or override the
   activity with your own (see
   [INSTALLATION.md](INSTALLATION.md#health-connect-rationale-screen)).
-- The two optional permissions (`READ_HEALTH_DATA_IN_BACKGROUND`,
-  `READ_HEALTH_DATA_HISTORY`) are declared in the merged manifest even when the
-  config flags are off, so either justify them on the form or `tools:node="remove"`
-  them. Background reads in particular get extra scrutiny; the justification
-  that fits this package is *"keeps the step count shown in the ongoing
-  notification in sync with a paired watch while the app is not open"*.
+- Declare the optional permissions (`READ_HEALTH_DATA_IN_BACKGROUND`,
+  `READ_HEALTH_DATA_HISTORY`, `READ_ACTIVE_CALORIES_BURNED`) only when their
+  config flag is on, and justify each on the form. Background reads in
+  particular get extra scrutiny; the justification that fits this package is
+  *"keeps the step count shown in the ongoing notification in sync with a
+  paired watch while the app is not open"*.
 - No advertising, no selling health data, and no sharing it with third parties
   for anything unrelated to the feature the user asked for.
 - Data deletion must be possible from inside your app. `clearHistory()` covers
@@ -113,6 +114,23 @@ own origin is recognised by the package (`isPlatform: true`, `kind: 'phone'`,
 "This phone (Android)"); other origins you do not recognise — OEM health apps
 write under their own package names — are just another source.
 
+### On manual entries
+
+Health Connect lets a user type steps in by hand, in its own UI or in any
+app that offers it, and stamps such records `RECORDING_METHOD_MANUAL_ENTRY`.
+There is no separate permission for them: `READ_STEPS` returns typed-in
+records alongside counted ones, so this package always *reads* them and
+always lists them — `getStepSources()` reports `manualSteps` and a
+`recordingMethods` split per source. What it does with them is config:
+by default a manual entry is ordinary data, and with
+`healthConnectIgnoreManualEntries: true` it is left out of the resolved
+number, which is the right setting for any app that converts steps into
+currency, rewards or a leaderboard position. Say which in your privacy
+policy if you rely on the distinction, and note that the stamp is the
+writing app's own statement — every mainstream app labels its manual
+entries honestly, but a purpose-built app can lie, which is why a rewards
+app still verifies server-side (see [SECURITY.md](../SECURITY.md)).
+
 ### On reporting a watch's steps as your own
 
 When a wearable owns the day, the number your UI shows was measured by hardware
@@ -133,7 +151,7 @@ function that Doze and OEM battery managers do break, so a step tracker
 qualifies — **provided the app's main purpose is step tracking**. A game or a
 shopping app with a step widget does not.
 
-If you keep it:
+The library no longer declares it. If you add it:
 
 - Ask in context, never on first launch: after tracking is on, and ideally
   after `getTrackingHealth().recoveryCount` shows the service being killed.
@@ -143,16 +161,10 @@ If you keep it:
   are usually automated and pass for fitness apps; when they do not, the
   usual fix is a clearer in-app explanation, not removal.
 
-If you would rather not:
-
-```xml
-<uses-permission
-    android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
-    tools:node="remove" />
-```
-
-and call `requestBackgroundPermissions({ directPrompt: false })`, which opens
-the system list instead. That path needs no justification. Note that on
+If you would rather not, leave it out: `requestDisableBatteryOptimization()`
+and `requestBackgroundPermissions()` then open the system list instead of the
+dialog, and `getBackgroundRestrictionStatus().directPromptAvailable` is
+`false`. That path needs no justification. Note that on
 Android 12+ the exemption — however it was granted — is also what allows the
 watchdog to restart a killed service from the background; without it,
 recovery waits for the user to open the app.
@@ -179,14 +191,52 @@ it as shared, state the recipient, confirm encryption in transit (use HTTPS —
 the worker will happily post to `http://`, and you should not), and offer a
 deletion path.
 
-## 6. Notification content
+## 6. Motion signature windows
+
+With `motionSampling.enabled`, the service samples the accelerometer for a
+few seconds every few minutes while the user is walking and stores a handful
+of derived numbers per window — a dominant frequency, a variance, a
+zero-crossing rate, a peak ratio and the steps counted meanwhile. The raw
+samples are reduced on device and discarded; nothing that could reconstruct
+the movement is kept or sent. The accelerometer needs no permission, but the
+features are sensor-derived data about the user: name them in your privacy
+policy if you enable this, and in the data safety form under fitness info
+if they leave the device through your own endpoint. The package's built-in
+uploader does not include them.
+
+## 7. Integrity checks
+
+With `fraudDetection.enabled`, the package keeps per-minute step counts, the
+detector's verdicts and a log of device events (clock changes, reboots,
+charging, resets). It reads no location and needs no new permission.
+
+- **Fitness info.** Per-minute counts are more granular fitness data than
+  daily totals. Name them in your privacy policy, and in the data safety
+  form if they leave the device through your own endpoint or through
+  `remoteSyncPayload: 'full'`, which then carries each day's integrity
+  report.
+- **Device or other IDs.** `attestDevice()` makes a per-install Keystore key
+  and hands your server its public key and certificate chain, and the
+  integrity report includes device hints (emulator, root indicators, ADB).
+  If you send these to your server, declare them under "Device or other
+  IDs" for fraud prevention and security.
+- **Activity Recognition.** `activityRecognition: true` uses Google's
+  Activity Recognition API through Play Services, which your app adds. It
+  runs under the `ACTIVITY_RECOGNITION` permission the package already needs
+  (section 4); say in your privacy policy that activity types are used to
+  check step counts.
+- **Fraud prevention is a stated purpose.** The data safety form lets you
+  mark data as collected for "Fraud prevention, security, and compliance";
+  use it for the integrity data rather than "App functionality" alone.
+
+## 8. Notification content
 
 Android 13+ makes notifications a runtime permission. Denying it hides the
 notification but does not stop the service, and `allGranted` in
 `checkPermissions()` reflects that deliberately. Do not block your onboarding on
 `POST_NOTIFICATIONS`.
 
-## 7. Package visibility (`<queries>`)
+## 9. Package visibility (`<queries>`)
 
 The library manifest declares `<queries>` for the Health Connect provider, the
 Play Store, ~25 wearable companion apps and ~20 OEM battery managers. These are
@@ -194,7 +244,7 @@ not permissions and need no declaration; they exist so the package can tell
 whether those apps are installed on Android 11+. Play's *package visibility*
 policy only restricts `QUERY_ALL_PACKAGES`, which the package does not use.
 
-## 8. Pre-launch checklist
+## 10. Pre-launch checklist
 
 - [ ] Picked a [usage mode](USAGE_MODES.md) and removed the manifest entries it does not need
 - [ ] Foreground service declaration submitted, with a video (Modes A, C)
@@ -202,8 +252,9 @@ policy only restricts `QUERY_ALL_PACKAGES`, which the package does not use.
 - [ ] Privacy policy names each Health Connect data type read and/or written, and is set as `privacyPolicyUrl`
 - [ ] `ACTION_SHOW_PERMISSIONS_RATIONALE` filter and `VIEW_PERMISSION_USAGE` alias present (Modes B, C) or removed (Mode A)
 - [ ] `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` removed, or asked for in context with an explanation on screen
-- [ ] Unused `android.permission.health.*` entries removed with `tools:node="remove"`
+- [ ] Only the `android.permission.health.*` entries your config uses are declared (the library declares none from 2.0)
 - [ ] Data safety form matches whether `remoteSyncUrl` is configured
+- [ ] With the integrity checks on: privacy policy and data safety form cover per-minute counts, device hints and attestation (section 7)
 - [ ] `ACTIVITY_RECOGNITION` requested in context, with an explanation on screen
 - [ ] In-app data deletion available
 - [ ] Tested on a Xiaomi/Redmi or Oppo/Realme device: force-stop, walk, reopen — steps present, `recoveryCount` moved

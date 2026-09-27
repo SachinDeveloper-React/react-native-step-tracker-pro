@@ -4,12 +4,16 @@
 
 | | |
 |---|---|
-| React Native | ≥ 0.77 (old and new architecture both supported) |
-| `minSdkVersion` | 26 — `java.time` and the Health Connect client both need it |
-| `compileSdkVersion` / `targetSdkVersion` | 35 |
+| React Native | ≥ 0.77 (old and new architecture both supported; the new one only from 0.82, where it is the only one) |
+| `minSdkVersion` | 26 — `java.time` and the Health Connect client both need it. React Native's template starts at 24: raise it |
+| `compileSdkVersion` / `targetSdkVersion` | 35 or higher |
+| Android Gradle Plugin | 8.x, or 9.x with built-in Kotlin on or off |
 | Java | 17 |
-| Kotlin | 2.0.21 by default (follows the host app's `kotlinVersion`); see below |
-| Health Connect client | `1.1.0-beta01` by default; `1.1.0-alpha10` is the minimum |
+| Kotlin | follows the host app's `kotlinVersion`; 2.0.21 when none is set; see below |
+| Health Connect client | `1.1.0` on compileSdk 36+, `1.1.0-beta01` below; `1.1.0-alpha10` is the minimum |
+
+The combinations CI builds on every push are in the
+[compatibility table](../README.md#compatibility).
 
 Before wiring anything up, pick a [usage mode](USAGE_MODES.md) — native
 sensor only, Health Connect only, or both. It decides which manifest entries
@@ -55,16 +59,15 @@ buildscript {
 }
 ```
 
-Other overridable properties: `healthConnectVersion` (default `1.1.0-beta01`),
-`workVersion` (default `2.9.1`).
+Other overridable properties: `healthConnectVersion` and `workVersion`
+(default `2.9.1`).
 
-`healthConnectVersion` is held at `1.1.0-beta01` on purpose: `1.1.0` stable
-requires `compileSdk 36` and Android Gradle Plugin 8.9.1+, which React Native
-did not ship until well after 0.76, so depending on it would fail
-`checkDebugAarMetadata` in every app inside the `react-native >= 0.77` range
-this package claims to support. `1.1.0-beta01` is the newest release that still
-builds against `compileSdk 35` and exposes the same `Metadata` API. If your app
-is already on `compileSdk 36` and AGP 8.9.1+, opt up with:
+The Health Connect client follows your `compileSdkVersion`: `1.1.0` stable when
+it is 36 or higher, `1.1.0-beta01` below. `1.1.0` requires `compileSdk 36` and
+AGP 8.9.1+, which React Native did not ship until 0.81, so depending on it
+unconditionally would fail `checkDebugAarMetadata` for every app on 0.77-0.80.
+`1.1.0-beta01` is the newest release that builds against `compileSdk 35` with
+the same `Metadata` API. Pin either yourself with:
 
 ```groovy
 ext {
@@ -92,16 +95,29 @@ ext {
 }
 ```
 
+### Android Gradle Plugin 9
+
+Nothing to configure. The library reads which AGP and Kotlin mode your app
+runs: with `android.builtInKotlin=false` - React Native 0.87's template
+default - it applies the Kotlin Android plugin and its kapt as always; with
+built-in Kotlin on (AGP 9's own default) it applies AGP's
+`com.android.legacy-kapt` instead, and adds the `gradle-kotlin` artifact that
+provides it at your AGP's version. It also detects React Native 0.82+ as
+new-architecture-only, whatever `newArchEnabled` says.
+
 ## 4. Manifest entries
 
-The library manifest already merges in the service, the boot receiver, the
-sensor permissions, the Health Connect permissions, the rationale activity and
-the `<queries>` for companion apps and OEM battery managers. Nothing is
-required in your app for the default (both sensor and Health Connect) setup.
+The library manifest merges in the service, the boot receiver, the rationale
+activity, the `<queries>` for companion apps and OEM battery managers, and
+the permissions sensor-only counting needs. **From 2.0 it declares no Health
+Connect permission and not `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`**: add the
+ones your config uses. The snippets are in
+[PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add);
+per mode in [USAGE_MODES.md](USAGE_MODES.md). A config that asks for one you
+did not declare rejects with `E_HEALTH_CONNECT_NOT_DECLARED`. Upgrading an app
+that relied on 1.x declaring them: [MIGRATING.md](MIGRATING.md).
 
-What you *remove* depends on the mode — the exact blocks for native-only and
-Health-Connect-only are in [USAGE_MODES.md](USAGE_MODES.md). The rest of this
-section covers the entries you may want to customise:
+The rest of this section covers the entries you may want to customise:
 
 ### Health Connect rationale screen
 
@@ -154,43 +170,42 @@ the library's, so exactly one activity answers each:
 
 ### Optional Health Connect permissions
 
-Two permissions are declared but never requested unless you opt in, because
-Health Connect shows one sheet for the whole set and asking for something you do
-not need risks the grants you do:
+These are requested only when you opt in, because Health Connect shows one
+sheet for the whole set and asking for something you do not need risks the
+grants you do. Declare each one you turn on:
 
 | Permission | Config flag | Needed for |
 |---|---|---|
 | `READ_HEALTH_DATA_IN_BACKGROUND` | `healthConnectBackgroundRead` | the background sync worker seeing a watch's steps while the app is closed — without it every background read returns empty |
 | `READ_HEALTH_DATA_HISTORY` | `healthConnectHistoryRead` | reading further back than 30 days, which yearly stats need |
+| `READ_ACTIVE_CALORIES_BURNED` | `healthConnectReadActiveCalories` | `StepSource.activeCalories` |
 
-Remove the ones you will not use, the same way as any other:
+### Expo
 
-```xml
-<uses-permission
-    android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
-    tools:node="remove" />
+Expo apps need a development build (`npx expo prebuild`); Expo Go has no
+custom native code. The package ships a config plugin that declares the
+opt-in permissions and raises `android.minSdkVersion` to 26:
+
+```json
+{
+  "expo": {
+    "plugins": [
+      ["react-native-step-tracker-pro", {
+        "healthConnect": { "read": true, "write": true, "backgroundRead": true },
+        "batteryOptimizationPrompt": false
+      }]
+    ]
+  }
+}
 ```
 
-### Trimming permissions you do not use
-
-The library declares read and write for steps, distance and calories. Remove
-any pair you will not use — Play asks you to justify every declared health
-permission:
-
-```xml
-<uses-permission
-    android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED"
-    tools:node="remove" />
-```
-
-Same for `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` if you only ever call
-`openBatteryOptimizationSettings()`:
-
-```xml
-<uses-permission
-    android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
-    tools:node="remove" />
-```
+`healthConnect` takes `true` for the default read and write sets, or an object
+with `read`, `write` (both default `true`), `readTypes`, `backgroundRead`,
+`historyRead` and `activeCalories`. `readTypes` matches the
+`healthConnectReadTypes` config option - `["steps"]` declares `READ_STEPS`
+alone - so pass the same list to both. Leave `healthConnect` out for
+sensor-only counting.
+`batteryOptimizationPrompt: true` adds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
 
 ## 5. Custom notification icon (recommended)
 

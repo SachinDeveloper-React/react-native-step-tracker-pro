@@ -62,4 +62,70 @@ class StepGapSplitterTest {
     fun `zero steps is empty`() {
         assertTrue(StepGapSplitter.split(at("2026-09-10", 22), at("2026-09-11", 8), 0, zone).isEmpty())
     }
+
+    // ---- the four policies, applied ------------------------------------------
+
+    private fun apply(
+        policy: StepCounterEngine.GapRecovery,
+        steps: Int,
+        maxSteps: Int = StepCounterEngine.DEFAULT_GAP_RECOVERY_MAX_STEPS
+    ) = StepGapSplitter.apply(
+        policy, at("2026-09-10", 22), at("2026-09-11", 8), steps, "2026-09-11", maxSteps, zone
+    )
+
+    @Test
+    fun `split policy spreads across midnight`() {
+        assertEquals(
+            mapOf("2026-09-10" to 200, "2026-09-11" to 800),
+            apply(StepCounterEngine.GapRecovery.SPLIT, 1000)
+        )
+    }
+
+    @Test
+    fun `today policy credits everything to the active day`() {
+        assertEquals(mapOf("2026-09-11" to 1000), apply(StepCounterEngine.GapRecovery.TODAY, 1000))
+    }
+
+    @Test
+    fun `drop policy keeps nothing from a gap that started on another day`() {
+        assertTrue(apply(StepCounterEngine.GapRecovery.DROP, 1000).isEmpty())
+        // ...and everything from one inside the active day.
+        assertEquals(
+            mapOf("2026-09-11" to 1000),
+            StepGapSplitter.apply(
+                StepCounterEngine.GapRecovery.DROP, at("2026-09-11", 2), at("2026-09-11", 8),
+                1000, "2026-09-11", zone = zone
+            )
+        )
+    }
+
+    @Test
+    fun `today_capped behaves like today under the cap`() {
+        assertEquals(
+            apply(StepCounterEngine.GapRecovery.TODAY, 1000),
+            apply(StepCounterEngine.GapRecovery.TODAY_CAPPED, 1000)
+        )
+        assertEquals(
+            mapOf("2026-09-11" to 20_000),
+            apply(StepCounterEngine.GapRecovery.TODAY_CAPPED, 20_000)
+        )
+    }
+
+    @Test
+    fun `today_capped drops everything over the cap rather than moving it`() {
+        // A week-long kill and a counter glitch: 100,000 on the counter.
+        val shares = apply(StepCounterEngine.GapRecovery.TODAY_CAPPED, 100_000)
+        assertEquals(mapOf("2026-09-11" to 20_000), shares)
+        // Nothing lands on yesterday - a closed day never changes.
+        assertEquals(setOf("2026-09-11"), shares.keys)
+        // A custom cap is honoured, and a zero cap credits nothing.
+        assertEquals(mapOf("2026-09-11" to 600), apply(StepCounterEngine.GapRecovery.TODAY_CAPPED, 1000, 600))
+        assertEquals(mapOf("2026-09-11" to 0), apply(StepCounterEngine.GapRecovery.TODAY_CAPPED, 1000, 0))
+    }
+
+    @Test
+    fun `the policy string parses and unknown falls back to split`() {
+        assertEquals(StepCounterEngine.GapRecovery.TODAY_CAPPED, StepCounterEngine.GapRecovery.from("today_capped"))
+        assertEquals(StepCounterEngine.GapRecovery.SPLIT, StepCounterEngine.GapRecovery.from("nonsense"))
+    }
 }

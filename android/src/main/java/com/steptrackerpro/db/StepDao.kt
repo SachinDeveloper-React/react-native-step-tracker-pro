@@ -27,6 +27,12 @@ interface StepHistoryDao {
     @Query("SELECT COUNT(*) FROM step_history WHERE synced = 0 OR syncedRemote = 0")
     suspend fun countUnsynced(): Int
 
+    @Query("SELECT COUNT(*) FROM step_history WHERE syncedRemote = 0")
+    suspend fun countUnsyncedRemote(): Int
+
+    @Query("SELECT COUNT(*) FROM step_history WHERE synced = 0")
+    suspend fun countUnsyncedHealth(): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: StepHistoryEntity): Long
 
@@ -110,9 +116,146 @@ interface DailySummaryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: DailySummaryEntity)
 
+    /**
+     * Upsert that never lets the recovered share go backwards. A snapshot
+     * written for the live day carries the engine's running figure, which
+     * only grows within a day; a stale write racing a backfill for the same
+     * row must not undo the backfill's increment. Mirrors [StepHistoryDao.upsert]'s
+     * refusal to lower the step count.
+     */
+    @Transaction
+    suspend fun upsertKeepingRecovered(entity: DailySummaryEntity) {
+        val existing = findByDate(entity.date)
+        if (existing != null && entity.recoveredSteps < existing.recoveredSteps) {
+            upsert(entity.copy(recoveredSteps = existing.recoveredSteps))
+        } else {
+            upsert(entity)
+        }
+    }
+
     @Query("DELETE FROM daily_summary WHERE date < :cutoff")
     suspend fun deleteOlderThan(cutoff: String): Int
 
     @Query("DELETE FROM daily_summary")
     suspend fun deleteAll()
+}
+
+@Dao
+interface MotionWindowDao {
+
+    @Insert
+    suspend fun insert(entity: MotionWindowEntity): Long
+
+    @Query(
+        "SELECT * FROM motion_window WHERE startedAt BETWEEN :fromMs AND :toMs ORDER BY startedAt ASC"
+    )
+    suspend fun findRange(fromMs: Long, toMs: Long): List<MotionWindowEntity>
+
+    /** Keeps the newest [keep] windows and drops the rest. */
+    @Query(
+        """
+        DELETE FROM motion_window WHERE id NOT IN (
+            SELECT id FROM motion_window ORDER BY startedAt DESC, id DESC LIMIT :keep
+        )
+        """
+    )
+    suspend fun pruneToNewest(keep: Int): Int
+
+    @Query("SELECT COUNT(*) FROM motion_window")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM motion_window")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface StepMinuteDao {
+
+    @Query("SELECT * FROM step_minute WHERE minuteStart = :minuteStart LIMIT 1")
+    suspend fun find(minuteStart: Long): StepMinuteEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun put(entity: StepMinuteEntity)
+
+    /**
+     * Adds increments on top of whatever each minute already holds. A plain
+     * upsert would let the second flush of a minute overwrite the first.
+     * Read-then-write in one transaction rather than `ON CONFLICT DO UPDATE`,
+     * which needs SQLite 3.24 and API 26 ships 3.18.
+     */
+    @Transaction
+    suspend fun addAll(rows: List<StepMinuteEntity>) {
+        for (row in rows) {
+            val existing = find(row.minuteStart)
+            put(
+                if (existing == null) {
+                    row
+                } else {
+                    existing.copy(
+                        steps = existing.steps + row.steps,
+                        untimedSteps = existing.untimedSteps + row.untimedSteps,
+                        chargingSteps = existing.chargingSteps + row.chargingSteps,
+                        stillSteps = existing.stillSteps + row.stillSteps,
+                        vehicleSteps = existing.vehicleSteps + row.vehicleSteps
+                    )
+                }
+            )
+        }
+    }
+
+    @Query("SELECT * FROM step_minute WHERE date BETWEEN :start AND :end ORDER BY minuteStart ASC")
+    suspend fun findRange(start: String, end: String): List<StepMinuteEntity>
+
+    @Query("DELETE FROM step_minute WHERE date < :cutoff")
+    suspend fun deleteOlderThan(cutoff: String): Int
+
+    @Query("DELETE FROM step_minute WHERE date = :date")
+    suspend fun deleteDate(date: String): Int
+
+    @Query("DELETE FROM step_minute")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface IntegrityDao {
+
+    @Query("SELECT * FROM integrity_day WHERE date = :date LIMIT 1")
+    suspend fun findDay(date: String): IntegrityDayEntity?
+
+    @Query("SELECT * FROM integrity_day WHERE date BETWEEN :start AND :end ORDER BY date ASC")
+    suspend fun findDays(start: String, end: String): List<IntegrityDayEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putDay(entity: IntegrityDayEntity)
+
+    @Query("DELETE FROM integrity_day WHERE date < :cutoff")
+    suspend fun deleteDaysOlderThan(cutoff: String): Int
+
+    @Query("DELETE FROM integrity_day WHERE date = :date")
+    suspend fun deleteDay(date: String): Int
+
+    @Query("DELETE FROM integrity_day")
+    suspend fun deleteAllDays()
+
+    @Insert
+    suspend fun insertEvent(entity: IntegrityEventEntity): Long
+
+    @Query("SELECT * FROM integrity_event WHERE at BETWEEN :fromMs AND :toMs ORDER BY at ASC, id ASC")
+    suspend fun findEvents(fromMs: Long, toMs: Long): List<IntegrityEventEntity>
+
+    /** Keeps the newest [keep] events and drops the rest. */
+    @Query(
+        """
+        DELETE FROM integrity_event WHERE id NOT IN (
+            SELECT id FROM integrity_event ORDER BY at DESC, id DESC LIMIT :keep
+        )
+        """
+    )
+    suspend fun pruneEventsToNewest(keep: Int): Int
+
+    @Query("DELETE FROM integrity_event WHERE date < :cutoff")
+    suspend fun deleteEventsOlderThan(cutoff: String): Int
+
+    @Query("SELECT COUNT(*) FROM integrity_event")
+    suspend fun countEvents(): Int
 }

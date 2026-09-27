@@ -5,6 +5,7 @@ import com.steptrackerpro.core.MetricsCalculator
 import com.steptrackerpro.core.StepTrackerConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -27,15 +28,30 @@ class StepSourceResolverTest {
         distance: Double = 0.0,
         calories: Double = 0.0,
         isSelf: Boolean = false,
-        stepsBeforeCoverage: Int = -1
-    ) = StepSource(pkg, pkg, kind, steps, distance, calories, 0L, isSelf, stepsBeforeCoverage)
+        stepsBeforeCoverage: Int = -1,
+        manualSteps: Int = -1,
+        manualStepsBeforeCoverage: Int = -1
+    ) = StepSource(
+        pkg, pkg, kind, steps, distance, calories, 0L, isSelf, stepsBeforeCoverage,
+        manualSteps = manualSteps,
+        unknownMethodSteps = if (manualSteps >= 0) 0 else -1,
+        recordingMethods = if (manualSteps >= 0) {
+            RecordingMethods(active = 0, automatic = steps - manualSteps, manual = manualSteps, unknown = 0)
+        } else {
+            null
+        },
+        manualStepsBeforeCoverage = manualStepsBeforeCoverage
+    )
 
     private fun resolve(
         policy: StepSourcePolicy,
         device: DayTotals,
         sources: List<StepSource>,
-        preferred: String? = null
-    ) = StepSourceResolver.resolve(policy, device, sources, preferred, metrics)
+        preferred: String? = null,
+        ignoreManualEntries: Boolean = false
+    ) = StepSourceResolver.resolve(
+        policy, device, sources, preferred, metrics, ignoreManualEntries = ignoreManualEntries
+    )
 
     @Test
     fun `never sums the phone and a watch covering the same day`() {
@@ -310,5 +326,278 @@ class StepSourceResolverTest {
         assertEquals(4_000, result.totals.steps)
         assertTrue(result.usedExternal)
         assertFalse(result.merged)
+    }
+
+    // ---- manual entries (healthConnectIgnoreManualEntries) -------------------
+
+    @Test
+    fun `a source that is entirely typed in wins under auto with the flag off and loses with it on`() {
+        // 20,000 steps entered by hand into a third-party app. Nothing was
+        // counted by anything.
+        val typed = source(
+            "com.example.faker", 20_000, StepSourceKind.WATCH, manualSteps = 20_000
+        )
+        val off = resolve(StepSourcePolicy.AUTO, device(4_000), listOf(typed))
+        assertEquals(20_000, off.totals.steps)
+        assertTrue(off.usedExternal)
+        assertEquals(0, off.manualStepsExcluded)
+
+        val on = resolve(StepSourcePolicy.AUTO, device(4_000), listOf(typed), ignoreManualEntries = true)
+        assertEquals(4_000, on.totals.steps)
+        assertFalse(on.usedExternal)
+        assertEquals(StepSourceKind.SELF, on.kind)
+        // What was taken out, and what is left, so the UI can say why the
+        // number is 4,000 when Health Connect's own screen says 20,000.
+        assertEquals(20_000, on.manualStepsExcluded)
+        assertEquals(0, on.externalSteps)
+    }
+
+    @Test
+    fun `a mixed source is reduced by exactly its manual share`() {
+        // A watch counted 7,000 and the user typed in 5,000 more on top.
+        val watch = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, manualSteps = 5_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(6_000), listOf(watch), ignoreManualEntries = true)
+
+        assertEquals(7_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertEquals(7_000, result.externalSteps)
+        assertEquals(5_000, result.manualStepsExcluded)
+        // Never summed: the phone's 6,000 is not added to anything.
+        assertTrue(result.totals.steps < 6_000 + 7_000)
+        // The shown distance follows the counted steps, not the source's own
+        // figure, which would include the distance typed in alongside.
+        assertEquals(metrics.distance(7_000), result.totals.distance, 0.001)
+    }
+
+    @Test
+    fun `the flag off leaves a mixed source exactly as before`() {
+        val watch = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, distance = 9_000.0,
+            manualSteps = 5_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(6_000), listOf(watch))
+        assertEquals(12_000, result.totals.steps)
+        assertEquals(12_000, result.externalSteps)
+        assertEquals(9_000.0, result.totals.distance, 0.001)
+        assertEquals(0, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a pinned source cannot smuggle a manual entry in`() {
+        val typed = source(
+            "com.example.faker", 20_000, StepSourceKind.APP, manualSteps = 20_000
+        )
+        val result = resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(typed),
+            preferred = "com.example.faker", ignoreManualEntries = true
+        )
+        assertEquals(4_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+        assertEquals(20_000, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a typed-in morning does not survive as steps from before coverage`() {
+        // Installed at 15:00. Samsung Health holds 8,000 for the day, all
+        // before install - but 6,000 of them were typed in by hand.
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_000, StepSourceKind.APP,
+            stepsBeforeCoverage = 8_000, manualSteps = 6_000, manualStepsBeforeCoverage = 6_000
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(10), listOf(samsung), ignoreManualEntries = true)
+
+        // Only the counted 2,000 may be supplied from before install.
+        assertEquals(2_010, result.totals.steps)
+        assertTrue(result.merged)
+        assertEquals(2_000, result.baselineSteps)
+        assertEquals(6_000, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `when the split of the manual part around coverage is unknown the pre-coverage share is taken conservatively`() {
+        val samsung = source(
+            "com.sec.android.app.shealth", 8_000, StepSourceKind.APP,
+            stepsBeforeCoverage = 3_000, manualSteps = 6_000
+        )
+        // 8,000 - 6,000 = 2,000 counted; the pre-coverage share can be at most
+        // that, and with the manual part's timing unknown it is assumed to
+        // have all been before, leaving 0.
+        val result = resolve(StepSourcePolicy.AUTO, device(10), listOf(samsung), ignoreManualEntries = true)
+        assertEquals(10, result.totals.steps)
+        assertFalse(result.usedExternal)
+    }
+
+    @Test
+    fun `wearable and health_connect policies also compete on the counted number only`() {
+        val typed = source("com.fitbit.FitbitMobile", 20_000, StepSourceKind.WATCH, manualSteps = 20_000)
+        val mixed = source("com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, manualSteps = 5_000)
+
+        // Entirely typed in: the watch has no counted data, the phone answers.
+        val none = resolve(StepSourcePolicy.WEARABLE, device(4_000), listOf(typed), ignoreManualEntries = true)
+        assertEquals(4_000, none.totals.steps)
+        assertFalse(none.usedExternal)
+        assertEquals(20_000, none.manualStepsExcluded)
+
+        // Mixed: the exact counted number, as the policy promises.
+        val some = resolve(StepSourcePolicy.HEALTH_CONNECT, device(9_000), listOf(mixed), ignoreManualEntries = true)
+        assertEquals(7_000, some.totals.steps)
+        assertTrue(some.usedExternal)
+        assertEquals(5_000, some.manualStepsExcluded)
+    }
+
+    @Test
+    fun `a source with no method split is left alone by the flag`() {
+        // The aggregate path (windows over 35 days) carries no per-record
+        // metadata: manualSteps is -1, nothing can be subtracted.
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(7_800), listOf(watch), ignoreManualEntries = true)
+        assertEquals(8_000, result.totals.steps)
+        assertEquals(0, result.manualStepsExcluded)
+    }
+
+    @Test
+    fun `excludingManual reports the source's own counted number and keeps what was removed`() {
+        val mixed = source(
+            "com.fitbit.FitbitMobile", 12_000, StepSourceKind.WATCH, distance = 9_000.0,
+            stepsBeforeCoverage = 4_000, manualSteps = 5_000, manualStepsBeforeCoverage = 1_000
+        )
+        val reduced = mixed.excludingManual()
+        assertEquals(7_000, reduced.steps)
+        assertEquals(3_000, reduced.stepsBeforeCoverage)
+        assertEquals(5_000, reduced.manualSteps)
+        assertEquals(0.0, reduced.distance, 0.0)
+        // Nothing to exclude leaves the instance untouched.
+        val clean = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, manualSteps = 0)
+        assertSame(clean, clean.excludingManual())
+    }
+
+    @Test
+    fun `default arguments reproduce the 1_3_0 resolution for every policy`() {
+        // Nothing an existing consumer did not opt into may move a number.
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, distance = 6_100.0, manualSteps = 3_000)
+        val samsung = source(
+            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 5_990, manualSteps = 100
+        )
+        val phone = device(7_800)
+        for (policy in StepSourcePolicy.entries) {
+            val result = StepSourceResolver.resolve(policy, phone, listOf(watch, samsung), null, metrics)
+            val expected = when (policy) {
+                StepSourcePolicy.DEVICE -> 7_800
+                StepSourcePolicy.WEARABLE, StepSourcePolicy.HEALTH_CONNECT -> 8_000
+                StepSourcePolicy.AUTO -> 8_000
+            }
+            assertEquals(policy.name, expected, result.totals.steps)
+            assertEquals(policy.name, 0, result.manualStepsExcluded)
+            if (policy != StepSourcePolicy.DEVICE) {
+                assertEquals(policy.name, 8_000, result.externalSteps)
+                assertEquals(policy.name, 6_100.0, result.totals.distance, 0.001)
+            }
+        }
+    }
+
+    // ---- wearable trust (wearableTrust: metadata | catalog) ------------------
+
+    @Test
+    fun `an unknown package stamping TYPE_WATCH wins the whole day under metadata trust`() {
+        // Any app can stamp Device.TYPE_WATCH on its records. Classified as a
+        // watch for display, and by default trusted like one.
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), null, metrics,
+            wearableTrust = WearableTrust.METADATA
+        )
+        assertEquals(20_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertFalse(result.merged)
+        assertEquals(StepSourceKind.WATCH, result.kind)
+    }
+
+    @Test
+    fun `the same package is bound by the coverage rule under catalog trust`() {
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        // Only the pre-coverage share may be supplied; the rest is inflation.
+        assertEquals(4_500, result.totals.steps)
+        assertTrue(result.merged)
+        assertEquals(500, result.baselineSteps)
+        // Still a watch for display: the trust decision is separate from kind.
+        assertEquals(StepSourceKind.WATCH, result.kind)
+        assertEquals(20_000, result.externalSteps)
+    }
+
+    @Test
+    fun `a package on the allowlist is trusted under catalog trust`() {
+        val band = source("com.example.newband", 9_000, StepSourceKind.FITNESS_BAND, stepsBeforeCoverage = 0)
+        val without = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(band), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(8_000, without.totals.steps)
+        assertFalse(without.usedExternal)
+
+        val with = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(band), null, metrics,
+            wearableTrust = WearableTrust.CATALOG,
+            wearableAllowlist = setOf("com.example.newband")
+        )
+        assertEquals(9_000, with.totals.steps)
+        assertTrue(with.usedExternal)
+        assertFalse(with.merged)
+    }
+
+    @Test
+    fun `a catalogued companion app is trusted under catalog trust without an allowlist`() {
+        // Fitbit relays its watch from the phone and often stamps no device at
+        // all; the catalog is what knows it is a wearable.
+        val fitbit = source("com.fitbit.FitbitMobile", 9_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(8_000), listOf(fitbit), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(9_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+    }
+
+    @Test
+    fun `a pin still trusts its source under catalog trust`() {
+        // The user's explicit choice outranks the rule, as it always has.
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 500)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker), "com.example.faker", metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+        assertEquals(20_000, result.totals.steps)
+    }
+
+    @Test
+    fun `trustedWearable is stamped from the same rule the resolver uses`() {
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH)
+        val fitbit = source("com.fitbit.FitbitMobile", 9_000, StepSourceKind.WATCH)
+        val samsung = source("com.sec.android.app.shealth", 6_000, StepSourceKind.APP)
+        val platform = source("android", 6_000, StepSourceKind.PHONE)
+        val sources = listOf(faker, fitbit, samsung, platform)
+
+        val metadata = StepSourceTrust.stamp(sources, WearableTrust.METADATA, emptySet())
+        assertEquals(listOf(true, true, false, false), metadata.map { it.trustedWearable })
+
+        val catalog = StepSourceTrust.stamp(sources, WearableTrust.CATALOG, emptySet())
+        assertEquals(listOf(false, true, false, false), catalog.map { it.trustedWearable })
+        // Display classification does not move.
+        assertEquals(StepSourceKind.WATCH, catalog[0].kind)
+        assertTrue(catalog[0].isWearable)
+
+        val allowed = StepSourceTrust.stamp(sources, WearableTrust.CATALOG, setOf("com.example.faker"))
+        assertTrue(allowed[0].trustedWearable)
+        // The platform's own count is never a wearable, allowlist or not.
+        assertFalse(
+            StepSourceTrust.stamp(listOf(platform), WearableTrust.CATALOG, setOf("android"))[0].trustedWearable
+        )
+        assertEquals(WearableTrust.METADATA, WearableTrust.from("nonsense"))
+        assertEquals(WearableTrust.CATALOG, WearableTrust.from("catalog"))
     }
 }

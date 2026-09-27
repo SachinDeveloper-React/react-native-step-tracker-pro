@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,7 +17,11 @@ import StepTracker, {
   useStepStats,
   useStepTracker,
 } from 'react-native-step-tracker-pro';
-import type { TrackingHealth } from 'react-native-step-tracker-pro';
+import type {
+  IntegrityFlag,
+  TrackingHealth,
+  VerificationSnapshot,
+} from 'react-native-step-tracker-pro';
 
 const palette = {
   surface: '#E9EDF2',
@@ -31,6 +35,25 @@ const palette = {
 };
 
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+/** What a flag means, in words a user reading the card would recognise. */
+const FLAG_LABELS: Record<IntegrityFlag['type'], string> = {
+  cadence: 'Faster than anyone walks',
+  steady_cadence: 'Machine-steady pace',
+  continuous: 'Hours without a pause',
+  charging: 'Counted while charging',
+  in_vehicle: 'Counted in a vehicle',
+  activity_still: 'Counted while still',
+  night: 'Long walk in the small hours',
+  shake: 'Phone being shaken',
+  swing: 'Swing-like motion',
+  daily_volume: 'Over the daily limit',
+};
+
+function clockTime(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 /** Turns the status shape into one line a user can act on. */
 function healthSummary(health: ReturnType<typeof useHealthConnect>): string {
@@ -85,14 +108,35 @@ export default function App() {
     // Take the phone's count or a paired watch's, whichever saw more of the
     // day. Never both added together.
     stepSource: 'auto',
+    // The settings an app that pays for steps would use, here so the example
+    // shows what they change. Off, a typed-in entry counts like any other;
+    // on, it is read and listed but never becomes the day's number.
+    healthConnectIgnoreManualEntries: true,
+    // Only a catalogued companion app (or one on wearableAllowlist) is
+    // trusted for its whole margin; anything else stamping TYPE_WATCH is
+    // bound by the coverage rule like a phone-side app.
+    wearableTrust: 'catalog',
+    // A closed day never changes after the fact, and one day can never be
+    // handed a week's worth of counter.
+    gapRecovery: 'today_capped',
+    // Minute buckets, the event log and the detector for shaken phones,
+    // swing gadgets, chargers and implausible totals. 'flag' reports and
+    // changes no number; a server decides. 'exclude' would also take the
+    // suspect steps out of everything shown and synced.
+    fraudDetection: { enabled: true, mode: 'flag' },
+    // Short accelerometer windows, so the detector can tell a shake from a walk.
+    motionSampling: { enabled: true },
     onGoalReached: (event) =>
       Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
+    // Re-read the snapshot the integrity card is drawn from.
+    onSuspiciousActivity: () => refreshVerificationRef.current(),
   });
 
   const { stats } = useStepStats('week');
   const health = useHealthConnect();
   const [pending, setPending] = useState(0);
   const [tracking, setTracking] = useState<TrackingHealth | null>(null);
+  const [verification, setVerification] = useState<VerificationSnapshot | null>(null);
 
   // Re-read on every foreground: getTrackingHealth() is also what restarts a
   // service the OEM killed while the app was closed, and recoveryCount is
@@ -106,6 +150,30 @@ export default function App() {
       .then(setPending)
       .catch(() => {});
   }, []);
+
+  // What a server would be sent for today: the phone's own count, every
+  // Health Connect origin unresolved, and what the policy chose. Read on
+  // the same cadence as tracking health - foreground, date and state
+  // changes - not per step: it costs a Health Connect read and a battery
+  // status IPC, and the manual figure it feeds only moves when another app
+  // syncs. The recovered figure comes live off the snapshot regardless.
+  const refreshVerification = useCallback(() => {
+    if (!isSupported() || !snapshot?.date) return;
+    StepTracker.getVerificationSnapshot(snapshot.date)
+      .then(setVerification)
+      .catch(() => {});
+  }, [snapshot?.date]);
+  // The hook's options are built before this callback exists; a ref bridges it.
+  const refreshVerificationRef = useRef(refreshVerification);
+  refreshVerificationRef.current = refreshVerification;
+
+  useEffect(() => {
+    refreshVerification();
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') refreshVerification();
+    });
+    return () => sub.remove();
+  }, [refreshVerification, state]);
 
   useEffect(() => {
     refreshHealth();
@@ -170,6 +238,27 @@ export default function App() {
   const km = ((snapshot?.distance ?? 0) / 1000).toFixed(2);
   const kcal = Math.round(snapshot?.calories ?? 0);
   const best = stats?.bestDay?.steps ?? 1;
+  // Typed-in steps across every external origin for the day. Read and
+  // listed, and under healthConnectIgnoreManualEntries never counted.
+  const manualSteps = (verification?.sources ?? [])
+    .filter((source) => !source.isSelf && source.manualSteps > 0)
+    .reduce((sum, source) => sum + source.manualSteps, 0);
+  const recoveredSteps = snapshot?.recoveredSteps ?? 0;
+  const suspectSteps = snapshot?.suspectSteps ?? 0;
+  const integrity = verification?.integrity;
+  // Hints worth a line: any device signal that is on.
+  const deviceHints = integrity
+    ? (
+        [
+          ['emulator', integrity.device.emulator],
+          ['su binary', integrity.device.suBinary],
+          ['test-keys build', integrity.device.testKeysBuild],
+          ['ADB on', integrity.device.adbEnabled],
+        ] as const
+      )
+        .filter(([, on]) => on)
+        .map(([label]) => label)
+    : [];
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -194,6 +283,28 @@ export default function App() {
         <Text style={styles.laneLabel}>
           {Math.round(progress * 100)}% of {goal.toLocaleString()}
         </Text>
+        {/*
+          The two figures a server weighs differently from the headline:
+          steps this phone credited in one go after a dead period, and steps
+          somebody typed into Health Connect by hand.
+        */}
+        {suspectSteps > 0 && (
+          <Text style={styles.laneLabel}>
+            {suspectSteps.toLocaleString()} flagged as suspect
+            {snapshot?.stepSource?.suspectStepsExcluded ? ', not counted' : ''}
+          </Text>
+        )}
+        {(recoveredSteps > 0 || manualSteps > 0) && (
+          <Text style={styles.laneLabel}>
+            {recoveredSteps > 0
+              ? `${recoveredSteps.toLocaleString()} recovered after a gap`
+              : ''}
+            {recoveredSteps > 0 && manualSteps > 0 ? ' · ' : ''}
+            {manualSteps > 0
+              ? `${manualSteps.toLocaleString()} typed in by hand, not counted`
+              : ''}
+          </Text>
+        )}
 
         <View style={styles.row}>
           <Metric value={km} unit="km" />
@@ -323,6 +434,79 @@ export default function App() {
               </Text>
             </Pressable>
           )}
+
+        {/*
+          What getVerificationSnapshot() would hand a server for today:
+          nothing resolved, every origin separately, so the number on screen
+          is never the one that gets paid.
+        */}
+        {verification && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Verification snapshot</Text>
+            <Text style={styles.body}>
+              Phone {verification.deviceSteps.toLocaleString()} via {verification.sensor}
+              {verification.recoveredSteps > 0
+                ? ` (${verification.recoveredSteps.toLocaleString()} recovered)`
+                : ''}
+              {' · '}resolved {verification.resolved.steps.toLocaleString()} from{' '}
+              {verification.resolved.appName}
+              {verification.resolved.manualStepsExcluded > 0
+                ? ` (${verification.resolved.manualStepsExcluded.toLocaleString()} manual excluded)`
+                : ''}
+            </Text>
+            {verification.sources
+              .filter((source) => !source.isSelf)
+              .map((source) => (
+                <Text key={source.packageName} style={styles.cardMeta}>
+                  {source.appName}: {source.steps.toLocaleString()}
+                  {source.manualSteps > 0
+                    ? ` · ${source.manualSteps.toLocaleString()} manual`
+                    : ''}
+                  {source.isWearable
+                    ? source.trustedWearable
+                      ? ' · trusted wearable'
+                      : ' · stamped as a wearable, not trusted'
+                    : ''}
+                </Text>
+              ))}
+            <Text style={styles.cardMeta}>
+              Recovered {verification.health.recoveryCount}× ·{' '}
+              {verification.clock.timezone}
+            </Text>
+          </View>
+        )}
+
+        {/*
+          The integrity checks' view of today: what was flagged, when, and
+          why. In 'flag' mode none of this changes the number above; it is
+          what a server would weigh before paying for the day.
+        */}
+        {integrity?.enabled && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Integrity checks</Text>
+            <Text style={styles.body}>
+              {integrity.suspectSteps > 0
+                ? `${integrity.suspectSteps.toLocaleString()} of ${integrity.deviceSteps.toLocaleString()} steps flagged`
+                : 'Nothing flagged today.'}
+              {integrity.mode === 'exclude' && integrity.suspectSteps > 0
+                ? ' and left out of the count.'
+                : ''}
+            </Text>
+            {integrity.flags.map((flag) => (
+              <Text key={`${flag.type}@${flag.from}`} style={styles.cardMeta}>
+                {clockTime(flag.from)}–{clockTime(flag.to)} · {FLAG_LABELS[flag.type]} ·{' '}
+                {flag.steps.toLocaleString()} steps
+                {flag.severity === 'weak' ? ' (weak)' : ''}
+              </Text>
+            ))}
+            <Text style={styles.cardMeta}>
+              {integrity.minutes.count} active minutes · {integrity.events.length}{' '}
+              {integrity.events.length === 1 ? 'event' : 'events'} logged
+              {integrity.charging ? ' · charging now' : ''}
+              {deviceHints.length > 0 ? ` · ${deviceHints.join(', ')}` : ''}
+            </Text>
+          </View>
+        )}
 
         {error && <Text style={styles.error}>{error.message}</Text>}
 

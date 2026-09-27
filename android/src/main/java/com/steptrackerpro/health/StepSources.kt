@@ -1,6 +1,7 @@
 package com.steptrackerpro.health
 
 import androidx.health.connect.client.records.metadata.Device
+import androidx.health.connect.client.records.metadata.Metadata
 
 /**
  * What produced a set of Health Connect step records.
@@ -49,6 +50,58 @@ enum class StepSourceKind(val jsValue: String) {
 }
 
 /**
+ * How the steps behind a set of records were produced, per Health Connect's
+ * `Metadata.recordingMethod`: counted by a sensor while the app was open
+ * (active), counted by a sensor in the background (automatic), typed in by
+ * the user (manual), or unstated (unknown - the value every record written
+ * before the field existed carries, and what apps that never set it stamp).
+ *
+ * The writing app stamps it, so it is a statement rather than proof - but a
+ * manual entry is the one honest way for a user to put 20,000 steps into
+ * Health Connect from a keyboard, and every mainstream app labels it as such.
+ * An app that pays for steps wants that bucket separated out.
+ */
+data class RecordingMethods(
+    val active: Int,
+    val automatic: Int,
+    val manual: Int,
+    val unknown: Int
+) {
+    fun toMap(): Map<String, Any?> = mapOf(
+        "active" to active,
+        "automatic" to automatic,
+        "manual" to manual,
+        "unknown" to unknown
+    )
+
+    companion object {
+        const val ACTIVE = 0
+        const val AUTOMATIC = 1
+        const val MANUAL = 2
+        const val UNKNOWN = 3
+
+        /** Bucket index for a raw `Metadata.recordingMethod` value. */
+        fun bucketOf(method: Int): Int = when (method) {
+            Metadata.RECORDING_METHOD_ACTIVELY_RECORDED -> ACTIVE
+            Metadata.RECORDING_METHOD_AUTOMATICALLY_RECORDED -> AUTOMATIC
+            Metadata.RECORDING_METHOD_MANUAL_ENTRY -> MANUAL
+            else -> UNKNOWN
+        }
+
+        /** The JS name of a raw `Metadata.recordingMethod` value. */
+        fun nameOf(method: Int): String = when (bucketOf(method)) {
+            ACTIVE -> "active"
+            AUTOMATIC -> "automatic"
+            MANUAL -> "manual"
+            else -> "unknown"
+        }
+
+        fun fromBuckets(buckets: IntArray): RecordingMethods =
+            RecordingMethods(buckets[ACTIVE], buckets[AUTOMATIC], buckets[MANUAL], buckets[UNKNOWN])
+    }
+}
+
+/**
  * One app contributing steps to Health Connect over a time range, with the
  * totals it contributed.
  *
@@ -79,12 +132,92 @@ data class StepSource(
      * count more steps than its own hardware counter for the hours both were
      * watching, so anything beyond the gap is another app's inflation.
      */
-    val stepsBeforeCoverage: Int = -1
+    val stepsBeforeCoverage: Int = -1,
+    /**
+     * Of [steps], how many came from records stamped
+     * `RECORDING_METHOD_MANUAL_ENTRY` - typed in by the user rather than
+     * counted by anything. -1 when not computed: the aggregate API used for
+     * windows over 35 days returns totals with no per-record metadata, so
+     * there is nothing to bucket. [steps] always includes them; the
+     * `healthConnectIgnoreManualEntries` config decides whether the resolver
+     * subtracts them.
+     */
+    val manualSteps: Int = -1,
+    /** Of [steps], how many carried `RECORDING_METHOD_UNKNOWN`. -1 when not computed. */
+    val unknownMethodSteps: Int = -1,
+    /** The full split of [steps] by recording method. Null when not computed. */
+    val recordingMethods: RecordingMethods? = null,
+    /**
+     * Of [manualSteps], how many fell before this device's coverage began.
+     * Kept alongside [stepsBeforeCoverage] so excluding manual entries can
+     * take them out of the pre-coverage share as well as the total - a
+     * hand-entered morning must not survive as "steps from before install".
+     * -1 when either half is not computed. Internal to the resolver.
+     */
+    val manualStepsBeforeCoverage: Int = -1,
+    /**
+     * Whether the `auto` policy trusts this source for its whole margin over
+     * the phone. Under `wearableTrust: 'metadata'` (the default) it is
+     * exactly [isWearable]; under `'catalog'` only a package the catalog or
+     * the app's `wearableAllowlist` knows as a wearable qualifies, however
+     * its records were stamped. Set by [StepSourceTrust.stamp] on the way
+     * to JS so a consumer can see which rule applied; the resolver decides
+     * for itself from the same rule rather than reading this back.
+     */
+    val trustedWearable: Boolean = kind.isWearable,
+    /**
+     * Of [steps], how many came from records the writing app last modified
+     * more than a day after they ended - a hand-built history pushed in after
+     * the fact, or a companion app that synced very late. Evidence for a
+     * server, never subtracted here: a watch that was out of range for two
+     * days writes late too. -1 when not computed (aggregate reads).
+     */
+    val lateWrittenSteps: Int = -1,
+    /**
+     * Of [steps], how many fell in each local hour of the day, 24 entries
+     * summing to [steps]; every entry -1 when not computed (aggregate reads).
+     * A record spanning hours is split by time. See [HourlySteps].
+     */
+    val hourlySteps: List<Int> = HourlySteps.UNKNOWN,
+    /**
+     * Kilocalories from this origin's `ActiveCaloriesBurnedRecord`s, when
+     * `healthConnectReadActiveCalories` is on and granted; -1 otherwise, and
+     * on aggregate reads.
+     */
+    val activeCalories: Double = -1.0
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
     /** Health Connect's own on-device count - see [StepSourceCatalog.isPlatformOrigin]. */
     val isPlatform: Boolean get() = StepSourceCatalog.isPlatformOrigin(packageName)
+
+    /**
+     * This source with its manual entries taken out, for the resolver: the
+     * total and the pre-coverage share both drop by their manual part, and
+     * distance and calories are zeroed so they are re-derived from the steps
+     * that remain rather than carrying a hand-entered distance along.
+     * [manualSteps] itself is kept, so the caller can still report how much
+     * was excluded. Unchanged when nothing is known to be manual.
+     */
+    fun excludingManual(): StepSource {
+        if (manualSteps <= 0) return this
+        val kept = (steps - manualSteps).coerceAtLeast(0)
+        val before = when {
+            stepsBeforeCoverage < 0 -> -1
+            manualStepsBeforeCoverage >= 0 ->
+                (stepsBeforeCoverage - manualStepsBeforeCoverage).coerceIn(0, kept)
+            // The split of the manual part around coverage is unknown: take
+            // the conservative view that all of it could have been before,
+            // so the pre-coverage share can never carry a manual entry.
+            else -> (stepsBeforeCoverage - manualSteps).coerceIn(0, kept)
+        }
+        return copy(
+            steps = kept,
+            distance = 0.0,
+            calories = 0.0,
+            stepsBeforeCoverage = before
+        )
+    }
 
     fun toMap(): Map<String, Any?> = mapOf(
         "packageName" to packageName,
@@ -96,7 +229,14 @@ data class StepSource(
         "lastRecordAt" to lastRecordAt,
         "isSelf" to isSelf,
         "isWearable" to isWearable,
-        "isPlatform" to isPlatform
+        "isPlatform" to isPlatform,
+        "manualSteps" to manualSteps,
+        "unknownMethodSteps" to unknownMethodSteps,
+        "recordingMethods" to recordingMethods?.toMap(),
+        "trustedWearable" to trustedWearable,
+        "lateWrittenSteps" to lateWrittenSteps,
+        "hourlySteps" to hourlySteps,
+        "activeCalories" to activeCalories
     )
 }
 
@@ -180,6 +320,14 @@ object StepSourceCatalog {
     /** Companion apps worth probing for with PackageManager. */
     val COMPANION_PACKAGES: List<String> =
         KNOWN.filterValues { it.kind.isWearable }.keys.toList()
+
+    /**
+     * Whether the catalog itself knows this package as a wearable's companion
+     * app - the `wearableTrust: 'catalog'` rule. Unlike [classify] it ignores
+     * whatever `Device` the records were stamped with: any app can stamp
+     * `TYPE_WATCH`, and this is the list of ones that have earned it.
+     */
+    fun isKnownWearable(packageName: String): Boolean = KNOWN[packageName]?.kind?.isWearable == true
 
     fun appName(packageName: String): String = when {
         isPlatformOrigin(packageName) -> PLATFORM_APP_NAME

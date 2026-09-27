@@ -1,6 +1,12 @@
 import type { TurboModule } from 'react-native';
 import { TurboModuleRegistry } from 'react-native';
-import type { UnsafeObject } from 'react-native/Libraries/Types/CodegenTypes';
+// A deep import until the package's React Native floor reaches a release that
+// exports these types from 'react-native' itself; the floor is 0.77, and they
+// are not exported there.
+import type {
+  EventEmitter,
+  UnsafeObject,
+} from 'react-native/Libraries/Types/CodegenTypes';
 
 /**
  * Codegen spec. Everything crossing the bridge is an UnsafeObject so that a
@@ -8,6 +14,25 @@ import type { UnsafeObject } from 'react-native/Libraries/Types/CodegenTypes';
  * surface lives in `StepTracker.ts`, which is what consumers import.
  */
 export interface Spec extends TurboModule {
+  // ---- typed events (new architecture) --------------------------------
+  // Codegen generates an `emitOn…` method per emitter on the native side.
+  // The old architecture has no typed emitters; there the same events go
+  // out through RCTDeviceEventEmitter and `addListener`/`removeListeners`
+  // below keep that path alive.
+  readonly onStepsChanged: EventEmitter<UnsafeObject>;
+  readonly onGoalReached: EventEmitter<UnsafeObject>;
+  readonly onGoalProgressChanged: EventEmitter<UnsafeObject>;
+  readonly onTrackingStateChanged: EventEmitter<UnsafeObject>;
+  readonly onDayChanged: EventEmitter<UnsafeObject>;
+  readonly onHistoryBackfilled: EventEmitter<UnsafeObject>;
+  readonly onMotionWindow: EventEmitter<UnsafeObject>;
+  readonly onSuspiciousActivity: EventEmitter<UnsafeObject>;
+  readonly onSyncCompleted: EventEmitter<UnsafeObject>;
+  readonly onSyncAuthFailed: EventEmitter<UnsafeObject>;
+  readonly onStepSourceChanged: EventEmitter<UnsafeObject>;
+  readonly onHealthConnectStatusChanged: EventEmitter<UnsafeObject>;
+  readonly onError: EventEmitter<UnsafeObject>;
+
   // ---- lifecycle -------------------------------------------------------
   initialize(config: UnsafeObject): Promise<UnsafeObject>;
   updateConfig(config: UnsafeObject): Promise<UnsafeObject>;
@@ -29,6 +54,18 @@ export interface Spec extends TurboModule {
   getMonthlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getYearlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getHistory(startDate: string, endDate: string): Promise<UnsafeObject>;
+  getVerificationSnapshot(date: string, options: UnsafeObject): Promise<UnsafeObject>;
+  getMotionWindows(startDate: string, endDate: string): Promise<UnsafeObject>;
+
+  // ---- integrity -------------------------------------------------------
+  getIntegrityReport(date: string): Promise<UnsafeObject>;
+  getIntegrityEvents(startDate: string, endDate: string): Promise<UnsafeObject>;
+  getStepMinutes(startDate: string, endDate: string): Promise<UnsafeObject>;
+  attestDevice(challenge: string): Promise<UnsafeObject>;
+  hasAttestationKey(): Promise<boolean>;
+  getAttestationKeyInfo(): Promise<UnsafeObject | null>;
+  requestIntegrityToken(options: UnsafeObject): Promise<UnsafeObject>;
+  prepareIntegrity(cloudProjectNumber: number): Promise<boolean>;
 
   // ---- writes ----------------------------------------------------------
   resetToday(): Promise<boolean>;
@@ -57,6 +94,13 @@ export interface Spec extends TurboModule {
   readHealthConnectSteps(startIso: string, endIso: string): Promise<UnsafeObject>;
   writeHealthConnectSteps(date: string): Promise<boolean>;
   syncWithHealthConnect(): Promise<UnsafeObject>;
+  getHealthConnectRecords(
+    startIso: string,
+    endIso: string,
+    options: UnsafeObject
+  ): Promise<UnsafeObject>;
+  getHealthConnectChangesToken(options: UnsafeObject): Promise<string>;
+  getHealthConnectChanges(token: string): Promise<UnsafeObject>;
 
   // ---- step sources ----------------------------------------------------
   getStepSources(startDate: string, endDate: string): Promise<UnsafeObject>;
@@ -66,6 +110,7 @@ export interface Spec extends TurboModule {
 
   // ---- sync ------------------------------------------------------------
   getPendingSyncCount(): Promise<number>;
+  getSyncStatus(): Promise<UnsafeObject>;
   syncNow(): Promise<UnsafeObject>;
 
   // ---- event emitter plumbing -----------------------------------------

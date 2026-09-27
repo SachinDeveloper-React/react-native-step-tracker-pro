@@ -62,6 +62,104 @@ data class DailySummaryEntity(
     val totalSteps: Int,
     val totalDistance: Double,
     val totalCalories: Double,
+    /**
+     * Of `totalSteps`, how many were credited to the day in one go by gap
+     * recovery - after a process kill across midnight, a reboot, or the
+     * since-boot claim on install - rather than observed sample by sample.
+     * A server judging a day wants this separately: a recovered share is an
+     * apportionment, not an observation. Added in version 3 with a default
+     * of 0, so rows from before it read as fully observed, which is the
+     * only honest answer for a day nobody recorded the split for.
+     */
+    @ColumnInfo(name = "recoveredSteps", defaultValue = "0")
+    val recoveredSteps: Int = 0,
     @ColumnInfo(name = "updatedAt")
     val updatedAt: Long = System.currentTimeMillis()
+)
+
+/**
+ * One motion signature window: a handful of features describing how the
+ * phone moved for a few seconds, never the samples themselves. Bounded by
+ * `motionWindowRetention` (default 288, a day at five-minute intervals) and
+ * pruned on every insert, so the table cannot grow past that.
+ */
+@Entity(
+    tableName = "motion_window",
+    indices = [Index(value = ["startedAt"])]
+)
+data class MotionWindowEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    /** yyyy-MM-dd the window opened on, device local. */
+    val date: String,
+    /** Epoch ms the window opened. */
+    val startedAt: Long,
+    val durationMs: Long,
+    val sampleCount: Int,
+    val dominantFrequencyHz: Double,
+    val variance: Double,
+    val zeroCrossingRate: Double,
+    val peakRatio: Double,
+    val stepsDuringWindow: Int
+)
+
+/**
+ * One minute of this device's own steps, for the integrity checks: how many
+ * were timed to the minute, how many arrived untimed in a lump, and how many
+ * arrived while charging, still or in a vehicle. Only minutes with steps have
+ * a row. Written only while `fraudDetection.enabled`, and pruned with the
+ * day tables at `historyRetentionDays`. Counts, never samples.
+ */
+@Entity(
+    tableName = "step_minute",
+    indices = [Index(value = ["date"])]
+)
+data class StepMinuteEntity(
+    /** Epoch ms of the minute's start. */
+    @PrimaryKey
+    val minuteStart: Long,
+    /** yyyy-MM-dd the minute falls on, device local. */
+    val date: String,
+    val steps: Int,
+    val untimedSteps: Int,
+    val chargingSteps: Int,
+    val stillSteps: Int,
+    val vehicleSteps: Int
+)
+
+/**
+ * The detector's last verdict on one day: the strong minute-level flags'
+ * union and every flag as JSON. Replaced whole on each evaluation. The daily
+ * cap is not stored here - it is applied at read time against the day's
+ * device count, which a backfill can still move.
+ */
+@Entity(tableName = "integrity_day")
+data class IntegrityDayEntity(
+    @PrimaryKey
+    val date: String,
+    val flaggedSteps: Int,
+    val flagsJson: String,
+    val evaluatedAt: Long
+)
+
+/**
+ * Things that happened to the device or the tracker that a server judging a
+ * day wants to know about - a clock change, a reboot, a reset, a charger
+ * plugged in mid-walk. Bounded by count and by `historyRetentionDays`, and
+ * deliberately kept by `clearHistory()`, which is itself logged here.
+ */
+@Entity(
+    tableName = "integrity_event",
+    indices = [Index(value = ["at"])]
+)
+data class IntegrityEventEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    /** Epoch ms. */
+    val at: Long,
+    /** yyyy-MM-dd of [at], device local. */
+    val date: String,
+    val type: String,
+    /** A small JSON object; `{}` when there is nothing to add. */
+    val detailJson: String
 )

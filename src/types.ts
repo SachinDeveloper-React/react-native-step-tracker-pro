@@ -83,6 +83,42 @@ export interface StepTrackerConfig {
    */
   healthConnectHistoryRead?: boolean;
   /**
+   * Subtract steps the user typed in by hand
+   * (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source
+   * before a winner is picked. Default false.
+   *
+   * Off, a manual entry is ordinary data - for a display app a user's own
+   * correction is legitimate. On, a hand-entered 20,000 can never become the
+   * day's number under any policy or pin: each source competes on
+   * `steps - manualSteps`, and `ResolvedStepSource.manualStepsExcluded`
+   * says how much was taken out so the UI can explain why the number is
+   * lower than Health Connect's own screen. The records are still read and
+   * still listed per source by `getStepSources()`; the same permission
+   * covers them. Sources answered from the aggregate API (windows over 35
+   * days) carry no per-record split and are left as they are.
+   */
+  healthConnectIgnoreManualEntries?: boolean;
+  /**
+   * Also read Health Connect's active calories and report them per source as
+   * `StepSource.activeCalories`. Default false. It is one more permission,
+   * `android.permission.health.READ_ACTIVE_CALORIES_BURNED`, which your app
+   * must declare and justify to Play.
+   */
+  healthConnectReadActiveCalories?: boolean;
+  /**
+   * Which Health Connect record types reads cover. Default all three:
+   * `['steps', 'distance', 'totalCalories']`, as before 2.1.
+   *
+   * Each is one read permission your app declares and justifies to Play, so
+   * an app that only wants steps sets `['steps']` and asks for
+   * `READ_STEPS` alone. `'steps'` is required. A type left out is not
+   * read: a day answered from Health Connect derives it from the step count
+   * instead - distance from stride, calories from `calorieCoefficient` - as
+   * it already does for a watch that writes no distance, and per-source
+   * figures (`getStepSources()`, `readHealthConnectSteps()`) show 0.
+   */
+  healthConnectReadTypes?: HealthConnectReadType[];
+  /**
    * How to reconcile this phone's sensor with what other apps published to
    * Health Connect. Default 'auto'. See {@link StepSourcePolicy}.
    */
@@ -92,6 +128,19 @@ export interface StepTrackerConfig {
    * Overrides the policy's own choice whenever that origin has data.
    */
   preferredStepSourcePackage?: string;
+  /**
+   * What earns a Health Connect source the `'auto'` policy's full trust -
+   * its whole margin over the phone, rather than the coverage-bound share a
+   * phone-side app may add. Default `'metadata'`. See {@link WearableTrust}.
+   */
+  wearableTrust?: WearableTrust;
+  /**
+   * Packages trusted as wearables under `wearableTrust: 'catalog'` on top of
+   * the built-in catalog - a companion app the catalog has not caught up
+   * with, or a device your own users are known to wear. Ignored under
+   * `'metadata'`.
+   */
+  wearableAllowlist?: string[];
   /**
    * Opened when Health Connect asks the user why the app wants health data.
    * Health Connect links to it from its permission sheet and Play review
@@ -113,6 +162,25 @@ export interface StepTrackerConfig {
    * with `E_INVALID_CONFIG`. For a local development server only.
    */
   remoteSyncAllowHttp?: boolean;
+  /**
+   * What each record in the `remoteSyncUrl` upload carries. Default
+   * `'totals'`: `{ date, steps, distance, calories }`, the shape every
+   * earlier release sent, so existing endpoints keep working. `'full'` adds
+   * this device's own `deviceSteps` and `recoveredSteps`, the `stepSource`
+   * the policy resolved to, and the unresolved Health Connect `sources` for
+   * the day (read at upload time; `[]` when reads are not permitted). Every
+   * upload also carries an `Idempotency-Key` header, whichever shape.
+   */
+  remoteSyncPayload?: 'totals' | 'full';
+  /**
+   * How uploads authenticate. `'headers'` (default) sends
+   * `remoteSyncHeaders`. `'signature'` sends none of them and relies on the
+   * `Step-Tracker-Signature` header alone, signed by the key from
+   * `attestDevice()` - no secret is stored on the device at all. Without a
+   * key the worker does not upload and `syncAuthFailed` fires with
+   * `reason: 'no_key'`.
+   */
+  remoteSyncAuth?: 'headers' | 'signature';
   /** Restart tracking automatically after device reboot. Default true. */
   autoStartOnBoot?: boolean;
   /**
@@ -120,6 +188,15 @@ export interface StepTrackerConfig {
    * and the gap crossed midnight. Default `'split'`. See {@link GapRecovery}.
    */
   gapRecovery?: GapRecovery;
+  /**
+   * Under `gapRecovery: 'today_capped'`, the most one recovery may credit to
+   * the active day; whatever is over it is dropped, not moved. Default
+   * 20000 — twice a very active day. A genuine overnight gap on a phone that
+   * kills services is a few thousand steps; tens of thousands after a long
+   * dead period is a counter glitch or a week of walking that cannot
+   * honestly be given to one day.
+   */
+  gapRecoveryMaxSteps?: number;
   /**
    * Re-launch the service from a 15-minute WorkManager job when an OEM task
    * killer has removed it. Default true. Needs the battery-optimisation
@@ -150,6 +227,559 @@ export interface StepTrackerConfig {
    * lower it if a gentle walk with the phone in a bag is missed.
    */
   accelerometerThreshold?: number;
+  /**
+   * Motion signature windows. Default disabled. See {@link MotionSamplingConfig}.
+   */
+  motionSampling?: MotionSamplingConfig;
+  /**
+   * How many motion windows to keep on device. Default 288 — a day at
+   * five-minute intervals. Older windows are dropped as new ones are stored,
+   * so the table is bounded by construction.
+   */
+  motionWindowRetention?: number;
+  /**
+   * Integrity checks for apps that pay for steps. Default disabled. See
+   * {@link FraudDetectionConfig}.
+   */
+  fraudDetection?: FraudDetectionConfig;
+}
+
+/**
+ * Integrity checks: every step this phone counts is bucketed by minute, and a
+ * detector flags the shapes fake steps take - a phone shaken by hand, swung
+ * by a gadget, left on a charger, carried in a car - and totals no person
+ * walks. Events that matter to a verdict (clock changes, reboots, resets,
+ * charging, config changes) are logged next to them.
+ *
+ * **Nothing is removed unless `mode` is `'exclude'`.** Under the default
+ * `'flag'`, every number stays as counted and the findings arrive as
+ * `suspectSteps`, `getIntegrityReport()`, the `suspiciousActivity` event and
+ * the verification snapshot, for a server to weigh. Only strong flags count
+ * towards `suspectSteps`; weak ones are evidence.
+ *
+ * Each numeric threshold turns its check off at `0`. The defaults are
+ * starting points: tune them on your own users' data before you let them cost
+ * anybody anything.
+ */
+export interface FraudDetectionConfig {
+  enabled: boolean;
+  /**
+   * `'flag'` (default) reports suspect steps and changes no number.
+   * `'exclude'` also takes them out of every number this package shows,
+   * syncs to Health Connect or uploads, and out of the device count before
+   * sources are resolved. The raw count is still `deviceSteps`, and the
+   * shown number can go down when a run is flagged after the fact.
+   */
+  mode?: IntegrityMode;
+  /** Minutes with more timed steps than this are flagged. Default 200; 100–400, or 0 for off. */
+  maxCadenceSpm?: number;
+  /**
+   * This many minutes in a row whose counts never move by more than one
+   * step minute to minute, with no pause, is flagged as a machine. Default
+   * 30; at least 5, or 0 for off.
+   */
+  steadyCadenceMinutes?: number;
+  /** Walking past this many minutes without a pause flags the excess. Default 180; at least 30, or 0 for off. */
+  maxContinuousMinutes?: number;
+  /** Steps over this in a day are flagged. Default 50000; at least 1000, or 0 for off. */
+  maxDailySteps?: number;
+  /**
+   * Flag steps counted while the phone is plugged in. Default true. A person
+   * walking with a power bank in the same pocket is flagged too, so weigh it
+   * accordingly.
+   */
+  flagWhileCharging?: boolean;
+  /**
+   * Tag steps with Google's Activity Recognition state, flagging steps taken
+   * "in a vehicle" and noting ones taken "still". Default false. Needs the
+   * host app to add `com.google.android.gms:play-services-location`; without
+   * it this does nothing, and `IntegrityReport.activityRecognition.available`
+   * says so. No permission beyond `ACTIVITY_RECOGNITION`.
+   */
+  activityRecognition?: boolean;
+}
+
+export type IntegrityMode = 'flag' | 'exclude';
+
+/** A record type `healthConnectReadTypes` can name. */
+export type HealthConnectReadType = 'steps' | 'distance' | 'totalCalories';
+
+/**
+ * What a flag says about a stretch of the day.
+ *
+ * - `'cadence'` — minutes faster than people walk or run (strong)
+ * - `'steady_cadence'` — a count that barely moves minute to minute for half
+ *   an hour with no pause: a swing gadget or motor (strong)
+ * - `'continuous'` — walking past `maxContinuousMinutes` without a pause; the
+ *   excess only (strong)
+ * - `'charging'` — steps counted while plugged in (strong)
+ * - `'in_vehicle'` — steps counted while Activity Recognition said in a
+ *   vehicle; strong from three minutes, weak below
+ * - `'activity_still'` — steps counted while it said still (weak)
+ * - `'night'` — half an hour or more of walking starting between midnight and
+ *   5:00 (weak)
+ * - `'shake'` — a motion window fast, hard and tonal like a hand shake (strong)
+ * - `'swing'` — a motion window that is a near-pure tone at walking pace; a
+ *   phone in a backpack can look like this too (weak)
+ * - `'daily_volume'` — the day's count past `maxDailySteps`; the excess only
+ *   (strong)
+ */
+export type IntegrityFlagType =
+  | 'cadence'
+  | 'steady_cadence'
+  | 'continuous'
+  | 'charging'
+  | 'in_vehicle'
+  | 'activity_still'
+  | 'night'
+  | 'shake'
+  | 'swing'
+  | 'daily_volume';
+
+export interface IntegrityFlag {
+  type: IntegrityFlagType;
+  /** Only `'strong'` flags count towards `suspectSteps` and are excluded. */
+  severity: 'strong' | 'weak';
+  /** Epoch ms, inclusive. */
+  from: number;
+  /** Epoch ms, exclusive. */
+  to: number;
+  /** Steps this flag covers. Flags can overlap, so these do not sum to `suspectSteps`. */
+  steps: number;
+  /** The numbers behind the verdict: peak cadence, minutes, window features. */
+  evidence: Record<string, unknown>;
+}
+
+export type IntegrityEventType =
+  | 'clock_changed'
+  | 'timezone_changed'
+  | 'reboot'
+  | 'reset_today'
+  | 'history_cleared'
+  | 'config_changed'
+  | 'sensor_changed'
+  | 'charging_started'
+  | 'charging_stopped'
+  | 'activity_changed'
+  | 'service_recovered'
+  | 'device_attested';
+
+export interface IntegrityEvent {
+  /** Epoch ms. */
+  at: number;
+  type: IntegrityEventType;
+  /** e.g. `{ jumpMs }` for a clock change, `{ keys }` for a config change, `{ reason }` for a recovery. */
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Cheap hints about the device. Each can be faked on a rooted phone; they
+ * explain a verdict, and `attestDevice()` is the check a server can trust.
+ */
+export interface DeviceIntegritySignals {
+  emulator: boolean;
+  testKeysBuild: boolean;
+  suBinary: boolean;
+  adbEnabled: boolean;
+  developerOptions: boolean;
+  appDebuggable: boolean;
+  /** The hardware step counter as the OS names it, or null when there is none. */
+  stepCounter: { name: string; vendor: string; version: number; wakeUp: boolean } | null;
+}
+
+/** Everything the integrity checks know about one day. */
+export interface IntegrityReport {
+  date: string;
+  enabled: boolean;
+  mode: IntegrityMode;
+  /** This phone's own count for the day, before any exclusion. */
+  deviceSteps: number;
+  /** Strong flags' minutes plus any excess over `maxDailySteps`. 0 when disabled. */
+  suspectSteps: number;
+  flags: IntegrityFlag[];
+  events: IntegrityEvent[];
+  /** Totals of the day's per-minute buckets. */
+  minutes: {
+    count: number;
+    timedSteps: number;
+    untimedSteps: number;
+    chargingSteps: number;
+    stillSteps: number;
+    vehicleSteps: number;
+  };
+  /** Epoch ms of the verdict; today is judged afresh on every read. 0 when never. */
+  evaluatedAt: number;
+  /** The thresholds in force, after clamping. */
+  rules: {
+    maxCadenceSpm: number;
+    steadyCadenceMinutes: number;
+    maxContinuousMinutes: number;
+    maxDailySteps: number;
+    flagWhileCharging: boolean;
+  };
+  /** Plugged in right now; always false for a past day. */
+  charging: boolean;
+  activityRecognition: {
+    requested: boolean;
+    /** The host app ships Play Services' location library. */
+    available: boolean;
+    current: 'unknown' | 'still' | 'walking' | 'running' | 'on_bicycle' | 'in_vehicle';
+  };
+  device: DeviceIntegritySignals;
+}
+
+/** One minute of this phone's own steps. Only minutes with steps are listed. */
+export interface StepMinute {
+  /** Epoch ms of the minute's start. */
+  minuteStart: number;
+  /** Steps whose timing is known to within the minute. */
+  steps: number;
+  /**
+   * Steps that arrived in one lump after a silence — a sensor batch that
+   * overflowed, or a dead process — parked at the minute they arrived in.
+   */
+  untimedSteps: number;
+  chargingSteps: number;
+  stillSteps: number;
+  vehicleSteps: number;
+}
+
+/**
+ * A Keystore key bound to the server's challenge. Verify `certificateChain`
+ * up to Google's hardware attestation root, check the challenge in the leaf's
+ * attestation extension along with the verified boot state, then store
+ * `publicKey` against the install.
+ */
+export interface DeviceAttestation {
+  /** Hex SHA-256 of `publicKey`; every signature names it. */
+  keyId: string;
+  algorithm: 'SHA256withECDSA';
+  /** Base64 X.509 SubjectPublicKeyInfo. */
+  publicKey: string;
+  /** Base64 DER certificates, leaf first. */
+  certificateChain: string[];
+  /** False when the device refused attestation and an unattested key was made instead. */
+  attested: boolean;
+  securityLevel: 'strongbox' | 'tee' | 'software' | 'unknown';
+  /** Epoch ms the key was generated. */
+  createdAt: number;
+}
+
+/** Evidence `getVerificationSnapshot()` can add next to the totals. */
+export type VerificationSnapshotPart =
+  'minutes' | 'motionWindows' | 'healthConnectRecords';
+
+export interface VerificationSnapshotOptions {
+  /**
+   * Sign the snapshot with the install's Keystore key (made by
+   * `attestDevice()`, or an unattested one on first use). Default false.
+   */
+  sign?: boolean;
+  /** A server-issued value echoed inside the signed payload, so it cannot be replayed. */
+  nonce?: string;
+  /**
+   * The evidence behind the day's totals, added inside the signed payload
+   * so one signature - and one Play Integrity `requestHash` - covers it:
+   *
+   * - `'minutes'`: the day's per-minute buckets, as `getStepMinutes()`.
+   *   Recorded only while `fraudDetection.enabled`.
+   * - `'motionWindows'`: the day's motion signature windows, as
+   *   `getMotionWindows()`. Recorded only while `motionSampling.enabled`.
+   * - `'healthConnectRecords'`: the day's raw Health Connect records, as
+   *   `getHealthConnectRecords()`, of `healthConnectRecordTypes`.
+   *
+   * Default none: the snapshot is exactly the 2.0 shape.
+   */
+  include?: VerificationSnapshotPart[];
+  /** Record types for `include: ['healthConnectRecords']`. Default `['steps']`. */
+  healthConnectRecordTypes?: HealthConnectRecordType[];
+}
+
+/** `VerificationSnapshot.healthConnectRecords`. */
+export interface SnapshotHealthConnectRecords {
+  /**
+   * `'read'` when the records were read - an empty list then means there
+   * were none. Otherwise why not: `'disabled'` (`healthConnectEnabled`
+   * false), `'unavailable'` (no provider), `'not_granted'` (a read
+   * permission for `recordTypes` is missing), `'timeout'` or `'failed'`.
+   * The step-source policy does not matter here: an explicit ask reads
+   * whenever it can.
+   */
+  status: 'read' | 'disabled' | 'unavailable' | 'not_granted' | 'timeout' | 'failed';
+  recordTypes: HealthConnectRecordType[];
+  records: AnyHealthConnectRecord[];
+  /** More than 10,000 records of one type that day. */
+  truncated: boolean;
+}
+
+/**
+ * Present when the snapshot was signed. Verify `value` over the UTF-8 bytes
+ * of `signedPayload` with the key named by `keyId`, then parse
+ * `signedPayload` and trust that - not the unsigned fields around it.
+ */
+export interface SnapshotSignature {
+  keyId: string;
+  algorithm: 'SHA256withECDSA';
+  /** Base64 DER ECDSA signature. */
+  value: string;
+  attested: boolean;
+  /** The exact JSON that was signed: this snapshot minus `signature`. */
+  signedPayload: string;
+  /** Hex SHA-256 of `signedPayload`, for Play Integrity's `requestHash`. */
+  payloadSha256: string;
+}
+
+export interface IntegrityTokenOptions {
+  /** What the token is bound to - a signed snapshot's `signature.payloadSha256`. At most 500 characters. */
+  requestHash: string;
+  /** Your Google Cloud project number, from the Play Console's app integrity page. */
+  cloudProjectNumber: number;
+}
+
+export interface IntegrityToken {
+  /** Opaque here; your server decrypts and verifies it with Google. */
+  token: string;
+  requestHash: string;
+}
+
+/**
+ * `StepTrackerError.details` on an `E_INTEGRITY_FAILED` rejection from
+ * `requestIntegrityToken()` or `prepareIntegrity()`.
+ */
+export interface IntegrityErrorDetails {
+  /** Play's `StandardIntegrityErrorCode`, or null when Play gave none. */
+  playErrorCode: number | null;
+  /** Play's name for the code, such as `'NETWORK_ERROR'`; `'UNKNOWN'` for a code this version does not know. */
+  playError: string | null;
+  /**
+   * Back off and call again: the same call can succeed without anything
+   * changing (`NETWORK_ERROR`, `TOO_MANY_REQUESTS`,
+   * `CANNOT_BIND_TO_SERVICE`, `GOOGLE_SERVER_UNAVAILABLE`,
+   * `CLIENT_TRANSIENT_ERROR`, `INTEGRITY_TOKEN_PROVIDER_INVALID`,
+   * `INTERNAL_ERROR`). False means something has to change first - the
+   * user updates the Play Store or Play services, the app comes from Play,
+   * or the cloud project number or hash is fixed.
+   */
+  retryable: boolean;
+}
+
+/** A record type the raw Health Connect reads and change tracking return. */
+export type HealthConnectRecordType = 'steps' | 'distance';
+
+export interface HealthConnectRecordOptions {
+  /** Default `['steps']`. Each needs its own read permission granted. */
+  recordTypes?: HealthConnectRecordType[];
+}
+
+/** What every raw Health Connect record carries, whatever its type. */
+export interface HealthConnectRecordBase {
+  id: string;
+  clientRecordId: string | null;
+  clientRecordVersion: number;
+  /** The app that wrote it. */
+  packageName: string;
+  recordingMethod: 'active' | 'automatic' | 'manual' | 'unknown';
+  device: {
+    type:
+      | 'unknown'
+      | 'watch'
+      | 'phone'
+      | 'scale'
+      | 'ring'
+      | 'head_mounted'
+      | 'fitness_band'
+      | 'chest_strap'
+      | 'smart_display';
+    manufacturer: string | null;
+    model: string | null;
+  } | null;
+  /** Epoch ms. */
+  startTime: number;
+  endTime: number;
+  /** Seconds east of UTC the writer recorded; null when it gave none. */
+  startZoneOffsetSeconds: number | null;
+  endZoneOffsetSeconds: number | null;
+  /** Epoch ms of the last write to the record. */
+  lastModifiedTime: number;
+}
+
+/** One step record as Health Connect stores it. */
+export interface HealthConnectRecord extends HealthConnectRecordBase {
+  /**
+   * Always sent from 2.1. Optional in the type only so step records built
+   * by hand against 2.0 - in a test, say - still type-check; narrow a mixed
+   * list with `record.recordType === 'distance'`.
+   */
+  recordType?: 'steps';
+  count: number;
+}
+
+/** {@link HealthConnectRecord}, by the name that says which type it is. */
+export type HealthConnectStepRecord = HealthConnectRecord;
+
+/** One distance record as Health Connect stores it. */
+export interface HealthConnectDistanceRecord extends HealthConnectRecordBase {
+  recordType: 'distance';
+  distanceMeters: number;
+}
+
+/** A raw record of any {@link HealthConnectRecordType}; narrow on `recordType`. */
+export type AnyHealthConnectRecord =
+  HealthConnectStepRecord | HealthConnectDistanceRecord;
+
+export interface HealthConnectRecordList<
+  R extends AnyHealthConnectRecord = HealthConnectRecord,
+> {
+  /** Oldest first, whichever type each is. */
+  records: R[];
+  /** More records of some type exist than one call returns (10,000 each); narrow the window. */
+  truncated: boolean;
+}
+
+export interface HealthConnectChanges<
+  R extends AnyHealthConnectRecord = HealthConnectRecord,
+> {
+  /**
+   * Health Connect no longer has the changes since this token - it keeps
+   * them 30 days. Take a new token and re-read with
+   * `getHealthConnectRecords()`.
+   */
+  tokenExpired: boolean;
+  /** Inserted or updated records, of the types the token was taken for. */
+  upserted: R[];
+  /** Ids of deleted records. */
+  deletedIds: string[];
+  /** The cursor for the next call; null when `tokenExpired`. */
+  nextToken: string | null;
+  /** Call again with `nextToken` straight away. */
+  hasMore: boolean;
+}
+
+/**
+ * The remote endpoint refused an upload, or signature auth had no key to
+ * sign with. The batch is not retried with the same credentials: refresh
+ * them with `updateConfig({ remoteSyncHeaders })`, or call `attestDevice()`,
+ * then `syncNow()`.
+ */
+/** `getSyncStatus()`. */
+export interface SyncStatus {
+  remote: RemoteSyncStatus;
+}
+
+/**
+ * What remote uploads last did, kept across process deaths. Uploads run in
+ * the background, usually with no JS alive to hear `syncAuthFailed`; read
+ * this when the app comes up.
+ */
+export interface RemoteSyncStatus {
+  /** `remoteSyncUrl` is set. */
+  configured: boolean;
+  /** Days not yet accepted by the endpoint. */
+  pendingRecords: number;
+  /** Epoch ms the last upload began, or was refused before sending. 0 when never. */
+  lastAttemptAt: number;
+  /** Epoch ms of the last accepted upload. 0 when never. */
+  lastSuccessAt: number;
+  /** Failed attempts since the last accepted one. */
+  consecutiveFailures: number;
+  /** The most recent failure, kept after a later success as history; null when none. */
+  lastFailure: RemoteSyncFailure | null;
+  /**
+   * The last attempt was refused over its credentials - 401, 403, or
+   * signature auth with no key - and nothing has changed since: no new
+   * `remoteSyncHeaders`, URL or `remoteSyncAuth`, no `attestDevice()`, no
+   * accepted upload. Every scheduled upload would be refused the same way,
+   * so refresh the credentials and call `syncNow()`.
+   */
+  authFailed: boolean;
+}
+
+export interface RemoteSyncFailure {
+  /** Epoch ms the failed attempt began. */
+  at: number;
+  reason:
+    | 'unauthorized'
+    | 'forbidden'
+    | 'no_key'
+    | 'insecure_url'
+    | 'http_error'
+    | 'no_response';
+  /** The HTTP status, when the server answered. */
+  status: number | null;
+  message: string;
+  /** The worker retries this one on its own. */
+  retryable: boolean;
+}
+
+export interface SyncAuthFailedEvent {
+  target: 'remote';
+  /** The HTTP status, or null for `'no_key'`. */
+  status: number | null;
+  reason: 'unauthorized' | 'forbidden' | 'no_key';
+  auth: 'headers' | 'signature';
+}
+
+/** Fired when the integrity checks find something new for a day. */
+export interface SuspiciousActivityEvent {
+  date: string;
+  /** Only the flags not reported for this day before. */
+  flags: IntegrityFlag[];
+  deviceSteps: number;
+  suspectSteps: number;
+  mode: IntegrityMode;
+}
+
+/**
+ * Every few minutes while tracking is running and steps have accrued since
+ * the last window, sample the accelerometer for one short window and store a
+ * handful of numbers describing the motion — **features only, never the
+ * samples**: a dominant frequency, a variance, a zero-crossing rate, a peak
+ * ratio and the steps counted meanwhile. Enough for a server to tell a 1.8 Hz
+ * walk from a 4 Hz shake; not enough to reconstruct anything.
+ *
+ * Off by default. On, it is one extra sensor registration per window and, on
+ * a non-wake-up accelerometer with `accelerometerWakeLock` on, a wake lock for
+ * the window's length. Sampling stops while paused, and is skipped while the
+ * app is in the background without the battery-optimisation exemption — a
+ * background sample on a phone the user has not exempted is the cost Doze
+ * exists to prevent. Results arrive on the `motionWindow` event and through
+ * `getMotionWindows()`.
+ */
+export interface MotionSamplingConfig {
+  enabled: boolean;
+  /** Length of one window in seconds. Default 10, at most 60. */
+  windowSeconds?: number;
+  /** Minutes between windows. Default 5, at least 1. */
+  intervalMinutes?: number;
+}
+
+/**
+ * Features of one motion window. The numbers describe how the phone moved
+ * for `durationMs`; the samples they came from were discarded on device.
+ */
+export interface MotionWindow {
+  /** Epoch ms the window opened. */
+  startedAt: number;
+  /** How long it actually ran, ms. */
+  durationMs: number;
+  /** Accelerometer samples it saw. */
+  sampleCount: number;
+  /**
+   * Where the motion's energy sits, Hz. Gait is 1.2–2.5 Hz at the stride; a
+   * hand shake is 3–6 Hz; a still phone reads `0`.
+   */
+  dominantFrequencyHz: number;
+  /** Of the mean-removed acceleration magnitude, (m/s²)². A pocketed walk is a few; a shake is tens. */
+  variance: number;
+  /** Mean crossings per second — about twice the dominant frequency for a clean oscillation. */
+  zeroCrossingRate: number;
+  /**
+   * Share of in-band energy at `dominantFrequencyHz`, 0..1: near 1 for a
+   * metronomic shake, lower for a walk with its harmonics, `0` when still.
+   */
+  peakRatio: number;
+  /** Steps this device counted while the window was open. */
+  stepsDuringWindow: number;
 }
 
 /**
@@ -160,13 +790,23 @@ export interface StepTrackerConfig {
  *
  * - `'split'` (default) spreads them across the days in the gap in proportion
  *   to time. A service killed at 23:00 and revived at 09:00 gives one tenth
- *   to yesterday and the rest to today.
- * - `'today'` credits all of them to the current day.
- * - `'drop'` discards whatever cannot be placed on the current day. The
- *   choice for an app where step counts have monetary value and an
- *   over-credit is worse than a loss.
+ *   to yesterday and the rest to today. **Yesterday's stored total grows
+ *   after the fact**, announced by `historyBackfilled`.
+ * - `'today'` credits all of them to the current day. Closed days never
+ *   change, but one day can be handed everything since the last reading.
+ * - `'today_capped'` is `'today'` bounded by `gapRecoveryMaxSteps` (default
+ *   20,000); the rest is dropped. Closed days never change, and a counter
+ *   glitch after a week-long kill cannot mint 100,000 steps on one day.
+ * - `'drop'` discards whatever cannot be placed on the current day.
+ *
+ * For an app where a day must never change once it has been settled — paid
+ * for, uploaded, shown on a leaderboard — use `'today_capped'` or `'drop'`.
+ * Both leave closed days alone; `'drop'` also refuses the current day
+ * anything from a gap that started on another one. Under either, the share
+ * a day did receive is reported as `recoveredSteps`, so a server can weigh
+ * it differently from steps observed live.
  */
-export type GapRecovery = 'split' | 'today' | 'drop';
+export type GapRecovery = 'split' | 'today' | 'today_capped' | 'drop';
 
 export interface StepSnapshot {
   /** yyyy-MM-dd in the device timezone. */
@@ -186,6 +826,19 @@ export interface StepSnapshot {
   source: SensorSource;
   /** Epoch ms of the last sensor sample. */
   timestamp: number;
+  /**
+   * Of this device's own count for the day, how many steps gap recovery
+   * credited in one go rather than observing sample by sample. See
+   * {@link DayRecord.recoveredSteps}. Never includes Health Connect, and
+   * unchanged when a Health Connect source supplied `steps`.
+   */
+  recoveredSteps: number;
+  /**
+   * Of this device's count for the day, how many the integrity checks
+   * flagged. `0` unless `fraudDetection.enabled`. Already taken out of
+   * `steps` under `fraudDetection.mode: 'exclude'`.
+   */
+  suspectSteps: number;
   /** Which source the numbers above came from. */
   stepSource: ResolvedStepSource;
 }
@@ -199,6 +852,25 @@ export interface DayRecord {
   synced: boolean;
   /** Uploaded to `remoteSyncUrl`. Always false when no endpoint is configured. */
   syncedRemote: boolean;
+  /**
+   * Of this device's own count for the day, how many steps were credited in
+   * one go by gap recovery — the share of an overnight kill apportioned to
+   * the day, a reboot's since-boot steps, an install's since-boot claim —
+   * rather than observed sample by sample. An apportionment is an estimate,
+   * so a server judging the day wants it separately. Grows when a past day
+   * is backfilled (`historyBackfilled`); `0` for a day counted live, and for
+   * every day stored before 1.4.0, whose split was never recorded. Always
+   * this device's figure; Health Connect never contributes to it.
+   */
+  recoveredSteps: number;
+  /**
+   * Of this device's own count for the day, how many the integrity checks
+   * flagged: strong flags' minutes plus any excess over `maxDailySteps`. `0`
+   * unless `fraudDetection.enabled`. On a resolved record under
+   * `fraudDetection.mode: 'exclude'` they are already out of `steps`; on
+   * `getHistory()` rows, which are stored counts, they are still in.
+   */
+  suspectSteps: number;
   /**
    * Which source the numbers came from. Absent on records returned by
    * `getHistory()`, which reports the on-device rows verbatim.
@@ -223,6 +895,92 @@ export interface RangeStats {
   /** Present for weekly/monthly windows when a goal is configured. */
   goal?: number;
   goalProgress?: number;
+}
+
+/**
+ * Everything a server needs to judge one day, with nothing resolved for it.
+ * An app that converts steps into anything of value should post this rather
+ * than a single number: the phone's own count and every Health Connect origin
+ * arrive separately, typed-in records are marked, the recovered share is
+ * split out, and the clock is there to spot edits. `resolved` is what the
+ * current policy chose, for comparison only.
+ */
+export interface VerificationSnapshot {
+  /**
+   * The snapshot's shape. Bumped when a field is removed, renamed or changes
+   * meaning; a new field does not bump it. `2` from 2.0, the first release to
+   * send it. A snapshot without it came from 1.x: the 1.5 shape when it
+   * carries `integrity`, the 1.4 shape when it does not. Both parse as
+   * version 2 minus the fields they lack.
+   */
+  schemaVersion: number;
+  /** The npm version of this package that produced it, e.g. `'2.0.0'`. */
+  libraryVersion: string;
+  /** yyyy-MM-dd in the device timezone. */
+  date: string;
+  /** What this phone's own sensor counted. Never includes Health Connect. */
+  deviceSteps: number;
+  /** Of `deviceSteps`, how many gap recovery credited in one go. See {@link DayRecord.recoveredSteps}. */
+  recoveredSteps: number;
+  /** This device's sensor. `'accelerometer'` and `'step_detector'` lose steps while the process is dead. */
+  sensor: SensorSource;
+  /**
+   * Epoch ms from which this device covered the day; 0 = whole day. Only
+   * set on an install day, and only known for today — a past day reads 0.
+   */
+  coverageStartAt: number;
+  /**
+   * Every Health Connect origin for the day, unresolved, including `self`
+   * (this app's own mirror). Empty when Health Connect is unavailable,
+   * reads are not granted, or `stepSource` is `'device'`. Each carries
+   * `manualSteps`, `recordingMethods` and `trustedWearable`.
+   */
+  sources: StepSource[];
+  /** What the current policy resolved to, for comparison only. */
+  resolved: ResolvedStepSource;
+  capabilities: Pick<
+    DeviceCapabilities,
+    'hasStepCounter' | 'hasStepDetector' | 'manufacturer' | 'model' | 'sdkInt'
+  >;
+  health: Pick<
+    TrackingHealth,
+    | 'recoveryCount'
+    | 'lastRecoveryReason'
+    | 'batteryOptimizationEnabled'
+    | 'aggressiveOem'
+  >;
+  /**
+   * Wall clock next to a boot id derived from `elapsedRealtime`. A clock
+   * edit moves `wallClockMs` and `bootId` together and leaves the uptime
+   * behind the boot id alone, so a server comparing two snapshots from the
+   * same boot can see the seam.
+   */
+  clock: {
+    wallClockMs: number;
+    /** Approximate epoch ms of the device's boot; constant for one boot unless the clock is edited. */
+    bootId: number;
+    /** IANA zone id, e.g. `Asia/Kolkata`. */
+    timezone: string;
+    utcOffsetMinutes: number;
+  };
+  /** Of `deviceSteps`, what the integrity checks flagged. `0` unless enabled. */
+  suspectSteps: number;
+  /** The flags, events, minute totals and device hints behind `suspectSteps`. */
+  integrity: IntegrityReport;
+  /** Echoed from `options.include`, in a fixed order; absent when nothing was asked for. */
+  include?: VerificationSnapshotPart[];
+  /** With `include: ['minutes']`. */
+  minutes?: StepMinute[];
+  /** With `include: ['motionWindows']`. */
+  motionWindows?: MotionWindow[];
+  /** With `include: ['healthConnectRecords']`. */
+  healthConnectRecords?: SnapshotHealthConnectRecords;
+  /** Echoed from `options.nonce`. */
+  nonce?: string;
+  /** Epoch ms the snapshot was signed; only on a signed snapshot. */
+  signedAt?: number;
+  /** Only when `options.sign`. */
+  signature?: SnapshotSignature;
 }
 
 export interface RangeOptions {
@@ -280,6 +1038,13 @@ export interface HealthConnectStatus {
   historyReadGranted: boolean;
   grantedPermissions: string[];
   missingPermissions: string[];
+  /**
+   * Permissions config asks for that your app's manifest does not declare.
+   * From 2.0 the library declares none; add them (see docs/PERMISSIONS.md)
+   * or `requestHealthConnectPermissions()` rejects with
+   * `E_HEALTH_CONNECT_NOT_DECLARED`.
+   */
+  undeclaredPermissions: string[];
   /** How many times the sheet has been shown without a grant. */
   denialCount: number;
   /**
@@ -321,6 +1086,32 @@ export type StepSourcePolicy =
    */
   | 'auto';
 
+/**
+ * What makes a Health Connect source "a wearable" for the `'auto'` policy's
+ * trust decision. `'auto'` is a display policy: it exists so a user with a
+ * watch sees the watch's number. It is not a fraud control, because the
+ * signal it trusts by default is one any app can stamp.
+ */
+export type WearableTrust =
+  /**
+   * Default, and the behaviour of every earlier release. The `Device.type`
+   * the writing app stamped on its records decides: a source stamped
+   * `TYPE_WATCH` is trusted for its whole margin. Right for display - a Wear
+   * OS watch stamps it and no catalog keeps up with every band - and wrong
+   * for an app paying per step, since any app can stamp it.
+   */
+  | 'metadata'
+  /**
+   * Only a package the built-in catalog knows as a wearable's companion app
+   * (Fitbit, Garmin Connect, Galaxy Wearable, ...) or one on
+   * `wearableAllowlist` is trusted for its whole margin. An unlisted package
+   * that stamps a wearable type keeps `kind: 'watch'` for display but is
+   * bound by the coverage rule like a phone-side app: it may fill the part
+   * of the day before this device's coverage began, and nothing after.
+   * `StepSource.trustedWearable` says which rule applied.
+   */
+  | 'catalog';
+
 /** What sort of hardware or app produced a set of step records. */
 export type StepSourceKind =
   | 'self'
@@ -332,12 +1123,32 @@ export type StepSourceKind =
   | 'app'
   | 'unknown';
 
+/**
+ * How the steps behind a source's records were produced, as stamped by the
+ * writing app in Health Connect's `Metadata.recordingMethod`. The four buckets
+ * sum to `StepSource.steps`.
+ */
+export interface RecordingMethodBreakdown {
+  /** Counted by a sensor while the writing app was in use. */
+  active: number;
+  /** Counted by a sensor in the background - a watch, a phone pedometer. */
+  automatic: number;
+  /** Typed in by the user. */
+  manual: number;
+  /**
+   * Unstated. Every record written before the field existed carries this,
+   * and so does one from an app that never sets it.
+   */
+  unknown: number;
+}
+
 /** One app contributing steps to Health Connect, with what it contributed. */
 export interface StepSource {
   packageName: string;
   /** Friendly name where the package is recognised, else the package name. */
   appName: string;
   kind: StepSourceKind;
+  /** The origin's full total, manual entries included. */
   steps: number;
   /** Metres. 0 when the source published steps but no distance. */
   distance: number;
@@ -347,8 +1158,18 @@ export interface StepSource {
   lastRecordAt: number;
   /** Records this package wrote itself. */
   isSelf: boolean;
-  /** Counted on the body rather than in a pocket. */
+  /** Counted on the body rather than in a pocket, going by `kind`. Display only. */
   isWearable: boolean;
+  /**
+   * Whether the `'auto'` policy trusts this source for its whole margin over
+   * the phone. Under `wearableTrust: 'metadata'` (the default) it equals
+   * `isWearable`; under `'catalog'` it is true only for a package the
+   * catalog or `wearableAllowlist` knows as a wearable, whatever its records
+   * were stamped with. A source that is `isWearable` but not
+   * `trustedWearable` is being treated as a phone-side app by the coverage
+   * rule.
+   */
+  trustedWearable: boolean;
   /**
    * Health Connect's own on-device step count (Android 14, SDK extension
    * 20+), attributed to `android` or to `com.android.healthconnect.phone.<hash>`.
@@ -356,6 +1177,44 @@ export interface StepSource {
    * classified `'phone'`, never a wearable.
    */
   isPlatform: boolean;
+  /**
+   * Of `steps`, how many came from records the writing app stamped
+   * `RECORDING_METHOD_MANUAL_ENTRY` - typed in by the user rather than
+   * counted by anything. The single easiest way to fake a day through a
+   * third-party app, and the bucket `healthConnectIgnoreManualEntries`
+   * subtracts.
+   *
+   * `-1` when not computed: windows over 35 days are answered through the
+   * aggregate API, which returns totals with no per-record metadata, the
+   * same way `stepsBeforeCoverage` is unavailable there. Every single-day
+   * read is exact.
+   */
+  manualSteps: number;
+  /** Of `steps`, how many carried `RECORDING_METHOD_UNKNOWN`. `-1` when not computed. */
+  unknownMethodSteps: number;
+  /** The full split of `steps` by recording method. `null` when not computed. */
+  recordingMethods: RecordingMethodBreakdown | null;
+  /**
+   * Of `steps`, how many came from records the writing app last modified
+   * more than a day after they ended — a history pushed in after the fact,
+   * or a companion app that synced very late. Evidence, never subtracted:
+   * a watch out of range for two days writes late too. `-1` when not
+   * computed (aggregate reads over 35 days).
+   */
+  lateWrittenSteps: number;
+  /**
+   * Of `steps`, how many fell in each local hour of the day: 24 entries
+   * summing to `steps`, a record spanning hours split by time. On a range
+   * (`getStepSources`) it is the hour-of-day total across the range. Every
+   * entry is `-1` when not computed - aggregate reads over 35 days.
+   */
+  hourlySteps: number[];
+  /**
+   * Kilocalories from this app's active-calorie records, with
+   * `healthConnectReadActiveCalories` on and granted; `-1` otherwise and on
+   * aggregate reads.
+   */
+  activeCalories: number;
 }
 
 /** The outcome of picking a source for one day. */
@@ -382,6 +1241,20 @@ export interface ResolvedStepSource {
   merged: boolean;
   /** How far ahead the external source was when the baseline was taken. */
   baselineSteps: number;
+  /**
+   * Manual-entry steps subtracted from the external source that was
+   * evaluated, under `healthConnectIgnoreManualEntries`. `0` when the flag
+   * is off. `externalSteps + manualStepsExcluded` is what Health Connect's
+   * own screen shows for that source, so a UI can say "20,000 typed in by
+   * hand were not counted" instead of leaving the difference unexplained.
+   */
+  manualStepsExcluded: number;
+  /**
+   * Flagged steps taken out of this device's count before it competed,
+   * under `fraudDetection.mode: 'exclude'`. `0` otherwise. `deviceSteps` is
+   * the count after the exclusion.
+   */
+  suspectStepsExcluded: number;
 }
 
 export interface CurrentStepSource extends ResolvedStepSource {
@@ -460,6 +1333,12 @@ export interface BackgroundRestrictionStatus {
   aggressiveOem: boolean;
   /** Doze restrictions still apply; `openBatteryOptimizationSettings()` or `requestDisableBatteryOptimization()`. */
   batteryOptimizationEnabled: boolean;
+  /**
+   * Your app declares `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, so
+   * `requestDisableBatteryOptimization()` can show the direct dialog. False
+   * by default from 2.0; the call then opens the settings list instead.
+   */
+  directPromptAvailable: boolean;
   /** `openManufacturerAutoStartSettings()` will land on an OEM screen rather than app info. */
   autoStartSettingsAvailable: boolean;
   /**
@@ -530,13 +1409,43 @@ export interface DayChangedEvent {
   previousDaySteps: number;
 }
 
+/**
+ * A past day's stored total grew after the fact: gap recovery placed steps
+ * on it — the part of an overnight kill that fell before midnight under
+ * `'split'`, or a reboot's since-boot steps spread from the boot instant.
+ * Fired once per affected day, after the write has committed, so an app that
+ * has already settled that day knows to look again. `dayChanged` is
+ * unrelated and unchanged. Never fires under `'today'`, `'today_capped'` or
+ * `'drop'`, which leave closed days alone.
+ */
+export interface HistoryBackfilledEvent {
+  /** yyyy-MM-dd of the day that changed. Never the current day. */
+  date: string;
+  /** Steps added to it by this recovery. */
+  addedSteps: number;
+  /** Its stored total afterwards. */
+  totalSteps: number;
+  /**
+   * `'gap'` — nothing was listening between the last reading and this one.
+   * `'reboot'` — the counter restarted, and these are the steps since boot.
+   */
+  reason: 'gap' | 'reboot';
+}
+
 export interface StepTrackerEventMap {
   stepsChanged: StepsChangedEvent;
   goalReached: GoalReachedEvent;
   goalProgressChanged: GoalProgressEvent;
   trackingStateChanged: TrackingStateEvent;
   dayChanged: DayChangedEvent;
+  historyBackfilled: HistoryBackfilledEvent;
+  /** One motion signature window was stored. See {@link MotionWindow}. */
+  motionWindow: MotionWindow;
+  /** The integrity checks found something new. See {@link SuspiciousActivityEvent}. */
+  suspiciousActivity: SuspiciousActivityEvent;
   syncCompleted: SyncEvent;
+  /** The endpoint refused the credentials. See {@link SyncAuthFailedEvent}. */
+  syncAuthFailed: SyncAuthFailedEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;
   error: { code: string; message: string };

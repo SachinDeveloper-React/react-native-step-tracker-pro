@@ -25,6 +25,10 @@ object Bridge {
         putString("state", snapshot.state.jsValue)
         putString("source", snapshot.source.jsValue)
         putDouble("timestamp", snapshot.timestamp.toDouble())
+        // This device's own recovered share; a Health Connect winner does not
+        // change it, so it is not touched by the resolution overload below.
+        putInt("recoveredSteps", snapshot.recoveredSteps)
+        putInt("suspectSteps", snapshot.suspectSteps)
     }
 
     /**
@@ -39,11 +43,14 @@ object Bridge {
         live: StepSnapshot,
         resolution: StepSourceResolver.Resolution
     ): WritableMap = snapshot(live).apply {
-        if (!resolution.usedExternal) {
+        val totals = resolution.totals
+        putInt("suspectSteps", totals.suspectSteps)
+        // Swapped when another source won, and when exclude mode took flagged
+        // steps out of this device's own count.
+        if (!resolution.usedExternal && totals.steps == live.steps) {
             putMap("stepSource", map(resolution.toMap()))
             return@apply
         }
-        val totals = resolution.totals
         putInt("steps", totals.steps)
         putDouble("distance", round(totals.distance, 2))
         putDouble("calories", round(totals.calories, 2))
@@ -75,7 +82,9 @@ object Bridge {
         "goalReached" to snapshot.goalReached,
         "state" to snapshot.state.jsValue,
         "source" to snapshot.source.jsValue,
-        "timestamp" to snapshot.timestamp
+        "timestamp" to snapshot.timestamp,
+        "recoveredSteps" to snapshot.recoveredSteps,
+        "suspectSteps" to snapshot.suspectSteps
     )
 
     fun snapshotMap(
@@ -92,6 +101,8 @@ object Bridge {
         putDouble("calories", round(totals.calories, 2))
         putBoolean("synced", totals.synced)
         putBoolean("syncedRemote", totals.syncedRemote)
+        putInt("recoveredSteps", totals.recoveredSteps)
+        putInt("suspectSteps", totals.suspectSteps)
     }
 
     fun days(list: List<DayTotals>): WritableArray = Arguments.createArray().apply {
@@ -193,3 +204,7 @@ fun ReadableMap.optString(key: String, fallback: String?): String? =
 
 fun ReadableArray.toStringList(): List<String> =
     (0 until size()).mapNotNull { getString(it) }
+
+/** The string list at [key], or null when it is absent or null. */
+fun ReadableMap.optStringList(key: String): List<String>? =
+    if (hasKey(key) && !isNull(key)) getArray(key)?.toStringList() else null

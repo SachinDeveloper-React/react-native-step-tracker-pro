@@ -38,38 +38,33 @@ await StepTracker.requestPermissions();   // ACTIVITY_RECOGNITION (+ POST_NOTIFI
 await StepTracker.startTracking();
 ```
 
-### Manifest — remove what you will not use
+### Manifest — nothing to add
 
-The library manifest merges in the Health Connect permissions and the
-rationale activity so that Mode C works out of the box. In Mode A they are
-dead weight that Play will still ask you to justify, so strip them in
-`android/app/src/main/AndroidManifest.xml`:
+From 2.0 the library manifest merges in only what this mode needs - the
+sensor, foreground-service, notification, boot and wake-lock permissions - so
+there are no health permissions to strip and nothing for Play to question.
+
+Two optional touches in `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Health Connect data permissions -->
-    <uses-permission android:name="android.permission.health.READ_STEPS" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.WRITE_STEPS" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.READ_DISTANCE" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.WRITE_DISTANCE" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" tools:node="remove" />
-    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" tools:node="remove" />
+    <!-- Only with an eligible Play use case: lets requestDisableBatteryOptimization()
+         show the direct dialog instead of the settings list. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application>
-        <!-- The rationale screen Health Connect links to; not needed without it. -->
+        <!-- The rationale screen Health Connect links to. Harmless without
+             Health Connect; remove it if you want no exported activity from here. -->
         <activity android:name="com.steptrackerpro.health.HealthPrivacyPolicyActivity" tools:node="remove" />
         <activity-alias android:name="com.steptrackerpro.health.ViewPermissionUsageActivity" tools:node="remove" />
     </application>
 </manifest>
 ```
 
-Keep `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` if you will call
-`requestDisableBatteryOptimization()` (recommended on low-end phones — see
-[OEM_BATTERY.md](OEM_BATTERY.md)); remove it too if you will only ever open the
+The battery prompt is recommended on low-end phones - see
+[OEM_BATTERY.md](OEM_BATTERY.md). Without it the same call opens the
 settings list.
 
 ### Permissions to request
@@ -134,9 +129,18 @@ if (status.canRead) {
 With `healthConnectWriteEnabled: false` the permission sheet asks only for the
 three `READ_*` grants, and `status.granted` means "reads granted".
 
-### Manifest — remove what you will not use
+### Manifest — add the read set, remove the sensor
+
+Add the Health Connect read permissions - the library no longer declares any
+(see [PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add)) -
+and strip the sensor side this mode does not use:
 
 ```xml
+<!-- Health Connect reads -->
+<uses-permission android:name="android.permission.health.READ_STEPS" />
+<uses-permission android:name="android.permission.health.READ_DISTANCE" />
+<uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
+
 <!-- No sensor, no service, no boot restart -->
 <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" tools:node="remove" />
 <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" tools:node="remove" />
@@ -144,12 +148,6 @@ three `READ_*` grants, and `status.granted` means "reads granted".
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" tools:node="remove" />
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" tools:node="remove" />
 <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
-<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" tools:node="remove" />
-
-<!-- Write permissions: this mode never writes -->
-<uses-permission android:name="android.permission.health.WRITE_STEPS" tools:node="remove" />
-<uses-permission android:name="android.permission.health.WRITE_DISTANCE" tools:node="remove" />
-<uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" tools:node="remove" />
 
 <application>
     <service android:name="com.steptrackerpro.service.StepTrackerService" tools:node="remove" />
@@ -158,10 +156,12 @@ three `READ_*` grants, and `status.granted` means "reads granted".
 </application>
 ```
 
-Keep `READ_HEALTH_DATA_IN_BACKGROUND` only if you set
+Add `READ_HEALTH_DATA_IN_BACKGROUND` only if you set
 `healthConnectBackgroundRead: true` (a widget or a background sync that reads
-while the app is closed); keep `READ_HEALTH_DATA_HISTORY` only with
-`healthConnectHistoryRead: true` (anything older than 30 days).
+while the app is closed), and `READ_HEALTH_DATA_HISTORY` only with
+`healthConnectHistoryRead: true` (anything older than 30 days). Set
+`healthConnectWriteEnabled: false` too, so the package never asks for the
+write set you did not declare.
 
 ### Permissions to request
 
@@ -273,17 +273,46 @@ reported so a UI can show "5,500 on this phone · 6,000 from Samsung Health".
 exact number and keep it, jumps included, which is what a user who treats the
 watch as the source of truth wants. `'device'` never reads.
 
-### Manifest
+### Steps typed in by hand
 
-Nothing to remove for the default set. Trim the optional permissions you do
-not enable:
+Every Health Connect record says how it was produced — counted by a sensor,
+or typed in by the user (`RECORDING_METHOD_MANUAL_ENTRY`). `getStepSources()`
+reports the split per source as `manualSteps` and `recordingMethods`, and by
+default the resolver treats a manual entry like any other steps: for a
+display app a user correcting their own day is legitimate. An app that
+converts steps into anything of value should set
 
-```xml
-<uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" tools:node="remove" />
+```ts
+healthConnectIgnoreManualEntries: true,
 ```
 
-and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` if you will only use the settings
-list (see [PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md#3-battery-optimisation-exemption)).
+after which every source competes on `steps - manualSteps` under every
+policy, pin included, and `stepSource.manualStepsExcluded` on each snapshot
+says how much was left out so the screen can explain the difference from
+Health Connect's own number. The records are still read — the permission is
+the same — and still listed; only the resolved number changes. Details in
+[API.md](API.md#manual-entries).
+
+### Manifest — add the read and write sets
+
+The library declares no Health Connect permission from 2.0. Add the default
+set, plus background reads if you turn them on:
+
+```xml
+<uses-permission android:name="android.permission.health.READ_STEPS" />
+<uses-permission android:name="android.permission.health.READ_DISTANCE" />
+<uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
+<uses-permission android:name="android.permission.health.WRITE_STEPS" />
+<uses-permission android:name="android.permission.health.WRITE_DISTANCE" />
+<uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
+<!-- with healthConnectBackgroundRead: true -->
+<uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
+```
+
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is yours to add if you want the direct
+dialog (see [PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md#3-battery-optimisation-exemption)).
+The full list, with what each is for, is in
+[PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add).
 
 ### Permissions to request
 
@@ -332,4 +361,6 @@ list (see [PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md#3-battery-optimisa
 change in any `initialize()` or `updateConfig()` call. Changing the policy
 clears the day's continuity baseline; the next read takes a fresh one.
 Manifest changes need a new release, and adding a health permission to the
-manifest means a new health declaration.
+manifest means a new health declaration. A config that asks for a permission
+the manifest does not declare fails loudly: the request rejects with
+`E_HEALTH_CONNECT_NOT_DECLARED`.

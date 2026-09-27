@@ -8,17 +8,30 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [StepHistoryEntity::class, DailySummaryEntity::class],
-    version = 2,
+    entities = [
+        StepHistoryEntity::class,
+        DailySummaryEntity::class,
+        MotionWindowEntity::class,
+        StepMinuteEntity::class,
+        IntegrityDayEntity::class,
+        IntegrityEventEntity::class
+    ],
+    version = StepDatabase.VERSION,
     exportSchema = true
 )
 abstract class StepDatabase : RoomDatabase() {
 
     abstract fun stepHistoryDao(): StepHistoryDao
     abstract fun dailySummaryDao(): DailySummaryDao
+    abstract fun motionWindowDao(): MotionWindowDao
+    abstract fun stepMinuteDao(): StepMinuteDao
+    abstract fun integrityDao(): IntegrityDao
 
     companion object {
         private const val NAME = "step_tracker_pro.db"
+
+        /** Kept next to the `@Database` annotation; the migration test targets it. */
+        const val VERSION = 5
 
         /**
          * Health Connect and the remote endpoint used to share the `synced`
@@ -39,6 +52,96 @@ abstract class StepDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * `daily_summary.recoveredSteps`: how many of a day's steps were
+         * credited by gap recovery rather than observed. Existing rows get 0,
+         * the only honest value for a day whose split was never recorded.
+         * A destructive fallback is not an option here: users have 35 days
+         * of history in this table and nothing else holds it.
+         */
+        internal val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE daily_summary ADD COLUMN recoveredSteps INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
+        /**
+         * The `motion_window` table for opt-in motion signature windows. A
+         * new table, so nothing existing is touched; the day tables are
+         * exactly as version 3 left them.
+         */
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `motion_window` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`startedAt` INTEGER NOT NULL, " +
+                        "`durationMs` INTEGER NOT NULL, " +
+                        "`sampleCount` INTEGER NOT NULL, " +
+                        "`dominantFrequencyHz` REAL NOT NULL, " +
+                        "`variance` REAL NOT NULL, " +
+                        "`zeroCrossingRate` REAL NOT NULL, " +
+                        "`peakRatio` REAL NOT NULL, " +
+                        "`stepsDuringWindow` INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_motion_window_startedAt` " +
+                        "ON `motion_window` (`startedAt`)"
+                )
+            }
+        }
+
+        /**
+         * The three integrity tables - per-minute step buckets, the
+         * detector's per-day verdict and the event log. New tables only;
+         * nothing version 4 had is touched, and they start empty rather than
+         * being back-filled from history nobody timed.
+         */
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `step_minute` (" +
+                        "`minuteStart` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`steps` INTEGER NOT NULL, " +
+                        "`untimedSteps` INTEGER NOT NULL, " +
+                        "`chargingSteps` INTEGER NOT NULL, " +
+                        "`stillSteps` INTEGER NOT NULL, " +
+                        "`vehicleSteps` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`minuteStart`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_step_minute_date` ON `step_minute` (`date`)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `integrity_day` (" +
+                        "`date` TEXT NOT NULL, " +
+                        "`flaggedSteps` INTEGER NOT NULL, " +
+                        "`flagsJson` TEXT NOT NULL, " +
+                        "`evaluatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`date`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `integrity_event` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`at` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`detailJson` TEXT NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_integrity_event_at` ON `integrity_event` (`at`)"
+                )
+            }
+        }
+
+        /** Every migration, in order, for the builder and the migration test. */
+        internal val MIGRATIONS: Array<Migration> =
+            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+
         @Volatile
         private var instance: StepDatabase? = null
 
@@ -49,10 +152,16 @@ abstract class StepDatabase : RoomDatabase() {
                     StepDatabase::class.java,
                     NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(*MIGRATIONS)
                     // Counter state lives in SharedPreferences, so a corrupt or
                     // unmigratable history file costs history, never the live count.
-                    .fallbackToDestructiveMigrationOnDowngrade()
+                    // The no-argument form: Room 2.7 deprecates it for an
+                    // overload 2.6.1 does not have, and 2.6.1 is still what an
+                    // app on React Native 0.74-0.76 pins (docs/INSTALLATION.md).
+                    .let {
+                        @Suppress("DEPRECATION")
+                        it.fallbackToDestructiveMigrationOnDowngrade()
+                    }
                     .build()
                     .also { instance = it }
             }

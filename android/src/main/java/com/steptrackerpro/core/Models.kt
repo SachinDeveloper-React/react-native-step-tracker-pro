@@ -38,7 +38,11 @@ data class StepSnapshot(
     val goalReached: Boolean,
     val state: TrackingState,
     val source: SensorSource,
-    val timestamp: Long
+    val timestamp: Long,
+    /** Of `steps`, how many gap recovery credited in one go. See [DayTotals.recoveredSteps]. */
+    val recoveredSteps: Int = 0,
+    /** Of this device's count, how many the integrity checks flagged. See [DayTotals.suspectSteps]. */
+    val suspectSteps: Int = 0
 )
 
 /**
@@ -57,7 +61,23 @@ data class DayTotals(
     /** Mirrored into Health Connect. */
     val synced: Boolean = false,
     /** Uploaded to `remoteSyncUrl`. Always false when no endpoint is configured. */
-    val syncedRemote: Boolean = false
+    val syncedRemote: Boolean = false,
+    /**
+     * Of `steps`, how many were credited to the day in one go by gap
+     * recovery - the share of an overnight kill apportioned to it, a
+     * reboot's since-boot steps, an install's since-boot claim - rather
+     * than observed sample by sample. Always this device's own figure;
+     * Health Connect never contributes to it.
+     */
+    val recoveredSteps: Int = 0,
+    /**
+     * Of this device's count, how many the integrity checks flagged - the
+     * strong flags' minutes plus whatever the rest of the day exceeds the
+     * daily cap by. 0 unless `fraudDetection.enabled`. Under
+     * `fraudDetection.mode: 'exclude'` a resolved day has already had them
+     * taken out of `steps`; everywhere else they are still in it.
+     */
+    val suspectSteps: Int = 0
 )
 
 data class RangeStats(

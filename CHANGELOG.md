@@ -5,7 +5,535 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.3.0] - 2026-09-11
+## [2.1.0] - Unreleased
+
+Additive: the evidence a server-side verifier scores, signed with the
+totals; background upload failures that survive until the app looks; fewer
+Health Connect permissions for apps that read steps alone. Nothing existing
+changes shape unless asked.
+
+### Added
+
+- **`getVerificationSnapshot(date, { include })`** puts the evidence behind
+  a day's totals inside the signed payload: `'minutes'` (the per-minute
+  buckets), `'motionWindows'` and `'healthConnectRecords'` (the raw records,
+  of `healthConnectRecordTypes`, default steps). One signature and one Play
+  Integrity `requestHash` then cover what a server scores for cadence or
+  motion, where before only the totals were signed and a modified app could
+  send doctored minutes beside them. `include` is echoed; the records carry
+  a `status` that says why they are missing when they are. Without
+  `include` the snapshot is the 2.0 shape, and `schemaVersion` stays 2.
+- **`getSyncStatus()`** returns what remote uploads last did, stored across
+  process deaths: last attempt and success, consecutive failures, the last
+  failure with its reason and HTTP status, pending days, and `authFailed` -
+  the credentials were refused and nothing has changed since. Uploads run
+  in WorkManager, usually with no JS to hear `syncAuthFailed`; the refusal
+  used to be lost, and every later run failed the same way unnoticed.
+- **`healthConnectReadTypes`** config, default
+  `['steps', 'distance', 'totalCalories']`. An app that reads steps alone
+  sets `['steps']` and declares and asks for `READ_STEPS` only; distance and
+  calories on a day answered from Health Connect are then derived from the
+  step count. The Expo plugin takes the same list as `healthConnect.readTypes`.
+- **Distance records** in `getHealthConnectRecords(start, end, { recordTypes })`
+  and in change tracking through
+  `getHealthConnectChangesToken({ recordTypes })`, for per-interval distance
+  checks. Records now carry `recordType`; distance ones carry
+  `distanceMeters` in place of `count`. Steps alone remains the default, and
+  each type needs its own read grant.
+- **`prepareIntegrity(cloudProjectNumber)`** prepares Play Integrity's token
+  provider ahead of the first `requestIntegrityToken()`, which otherwise pays
+  for it.
+- **`StepTrackerError.details`.** `E_INTEGRITY_FAILED` carries
+  `{ playErrorCode, playError, retryable }`, and the docs list which of
+  Play's codes are temporary.
+
+### Changed
+
+- `HealthConnectStatus.canRead` is measured against `healthConnectReadTypes`;
+  with the default it is the same three permissions as before.
+- A raw Health Connect read whose grant is revoked mid-call rejects with
+  `E_HEALTH_CONNECT_DENIED` rather than `E_UNKNOWN`, and the message names
+  the missing permission.
+
+## [2.0.1] - 2026-09-27
+
+Fixes from a review of 2.0.0. No API changes.
+
+### Fixed
+
+- **`updateConfig()` re-derives weekly and monthly goals.** `initialize()`
+  derived them as the daily goal × 7 and × 30; `updateConfig()` did not, and
+  the native side kept the old values. Since 2.0 `useStepTracker` sends every
+  config change through `updateConfig()`, so a user who changed their daily
+  goal kept weekly and monthly goals from the old one. A patch that sets them
+  explicitly keeps its own.
+- **`updateConfig()` validates like `initialize()`.** It skipped every check -
+  height and weight ranges, the fraud thresholds, the `https` rule for
+  `remoteSyncUrl`, `wearableAllowlist` - so bad values were clamped natively
+  instead of rejected. An `http://` endpoint is still accepted when an
+  earlier call set `remoteSyncAllowHttp`.
+- **Both now reject values that were only clamped before:** negative goals,
+  throttles and sync intervals, a stride over 3 m, a `NaN` daily goal, and
+  unknown `sex`, `stepSource`, `wearableTrust`, `gapRecovery` and
+  `remoteSyncPayload` values - all `E_INVALID_CONFIG`.
+- **Unknown React Native version builds the new architecture.** When
+  `node_modules/react-native` is not where the build looks and
+  `newArchEnabled` is not set, 2.0.0 built the old-architecture code, which
+  React Native 0.82+ cannot run. An explicit `newArchEnabled=false` still
+  builds the old one.
+- **The AGP lookup for `com.android.legacy-kapt`** tries every class loader
+  that can see the app's AGP, not only the root buildscript's. An app with
+  AGP in a `plugins {}` block built with 2.0.0 too in testing - React
+  Native's Gradle plugin puts AGP on the root classpath anyway - so this
+  covers setups without that plugin.
+- **`schemaVersion` docs.** It was described as `2` from 1.5, with "absent"
+  meaning the 1.4 shape. No 1.x release sent it: a snapshot without it is
+  the 1.5 shape if it carries `integrity`, the 1.4 shape if not, and both
+  parse as version 2 with fields missing.
+
+### CI
+
+- A fourth compatibility build: React Native 0.77.3 with the new architecture
+  turned off, the path events take on the old architecture.
+- The tag workflow stopped at `npm publish` for want of an `NPM_TOKEN`
+  secret, so 2.0.1 was published by hand and carries no npm provenance,
+  like 2.0.0.
+
+## [2.0.0] - 2026-09-27
+
+Current toolchains, a manifest that declares only what sensor counting
+needs, and the pieces a server-side verifier was missing. Breaking changes
+are listed first, with what to do about each in
+[Migrating from 1.x](#migrating-from-1x).
+
+### Breaking
+
+- **Minimal library manifest.** The library now merges in only
+  `ACTIVITY_RECOGNITION`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_HEALTH`,
+  `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED` and `WAKE_LOCK`. The Health
+  Connect permissions and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` are declared
+  by the app, and only when it uses them - no app inherits a permission it
+  then has to justify to Play. A config that asks for an undeclared Health
+  Connect permission rejects with the new `E_HEALTH_CONNECT_NOT_DECLARED`,
+  naming the missing entries, instead of Health Connect silently leaving them
+  off its sheet; `HealthConnectStatus.undeclaredPermissions` lists them up
+  front. Without the battery permission `requestDisableBatteryOptimization()`
+  opens the settings list, and `BackgroundRestrictionStatus.directPromptAvailable`
+  says so.
+- **Typed events on the new architecture.** Events reach JS through
+  codegen-typed emitters (`onStepsChanged` and so on) instead of
+  `RCTDeviceEventEmitter`. `StepTracker.addListener` and the hooks handle both
+  architectures; code that subscribed to `StepTrackerPro:<event>` through its
+  own `NativeEventEmitter` stops receiving events on the new architecture.
+- **`useStepTracker` applies config changes.** It used to read config once,
+  on mount, and silently drop every later change. It now pushes a change
+  through `updateConfig()`, compared by value so a new object literal on each
+  render is not a change. An app whose config legitimately changes will now
+  see it take effect.
+- **Refused uploads are not retried.** A 401 or 403 from `remoteSyncUrl`
+  raises `syncAuthFailed` and ends the attempt; retrying the same credentials
+  only earned more refusals. Other failures back off and retry as before.
+- **The codegen spec changed** (new methods, the emitters, a second argument
+  to `getVerificationSnapshot`), so the app's native code has to be rebuilt -
+  as for any native module upgrade.
+
+### Build and toolchains
+
+- Builds on **AGP 9** with `android.builtInKotlin` either way. Built-in Kotlin
+  refuses the Kotlin Android and kapt plugins, so the library applies AGP's
+  `com.android.legacy-kapt` and adds the `gradle-kotlin` artifact that
+  provides it - React Native apps do not have it on the classpath - at the
+  host's AGP version. The architecture shims are registered as Kotlin
+  sources too, which built-in Kotlin needs. `android.newDsl=true` builds as
+  well.
+- **React Native 0.82+ is new-architecture-only**, detected from the app's
+  `react-native` package rather than trusting `newArchEnabled`, which newer
+  templates may drop.
+- `kotlinOptions {}` replaced with `compilerOptions`; Room's JVM-default
+  requirement uses Kotlin 2.2's typed `jvmDefault` where it exists.
+  `project.buildDir` replaced with `layout.buildDirectory`.
+- The **Health Connect client follows compileSdk**: 1.1.0 stable from
+  compileSdk 36, 1.1.0-beta01 below. `ext.healthConnectVersion` still pins.
+- The library declares **minSdk 26** whatever the app says, so an app on
+  React Native's template default of 24 fails the manifest merge naming this
+  package.
+- Inside an app the library's buildscript adds no AGP or Kotlin plugin of its
+  own; only a standalone build of the package does.
+- `getCurrentActivity()` replaced with `reactApplicationContext.currentActivity`
+  (deprecated in React Native 0.80), and the three deprecation warnings
+  Kotlin 2.2 raised in the package fixed. It compiles warning-free on RN 0.77
+  and 0.87.
+- **CI builds the packed library in real apps** made from React Native's
+  template - 0.77.3 on AGP 8.7, 0.87.2 on AGP 9.2 with built-in Kotlin off
+  and on - and checks the merged manifest carries no opt-in permission. The
+  README has the compatibility table.
+
+### Added
+
+- **Play Integrity**: `requestIntegrityToken({ requestHash, cloudProjectNumber })`,
+  a standard request bound to a signed snapshot's `payloadSha256`. Compile-only,
+  like Activity Recognition: the app adds `com.google.android.play:integrity`,
+  and without it the call rejects with `E_INTEGRITY_UNAVAILABLE`.
+- `hasAttestationKey()` and `getAttestationKeyInfo()`, so an app attests once
+  instead of replacing the key on every launch.
+- `schemaVersion` and `libraryVersion` on the verification snapshot, first,
+  so a server can pick a parser across releases. `schemaVersion` is 2.
+- **Sealed remote-sync headers.** `remoteSyncHeaders` are encrypted with an
+  AES-GCM key in the Android Keystore before they are stored; 1.x plaintext
+  headers are sealed on first read.
+- `syncAuthFailed` event and `remoteSyncAuth: 'signature'`, which sends no
+  stored headers and authenticates uploads with the device key alone.
+- `getHealthConnectRecords(start, end)`: every step record as stored - id,
+  client record id, source app, recording method, device, start and end with
+  zone offsets, last-modified time, count.
+- `getHealthConnectChangesToken()` and `getHealthConnectChanges(token)`:
+  inserted, updated and deleted step records since a cursor, with expired
+  tokens reported as `tokenExpired` rather than thrown.
+- `StepSource.hourlySteps` (24 local hours; every entry -1 on the aggregate
+  path) and `StepSource.activeCalories` behind the opt-in
+  `healthConnectReadActiveCalories`.
+- `removeAllListeners(event?)`.
+- **Jest mock** at `react-native-step-tracker-pro/jest`: every method a
+  `jest.fn` resolving with an empty-day value, `__emit` to fire listeners,
+  static hooks.
+- **Expo config plugin**: declares the opt-in permissions and raises
+  `android.minSdkVersion` to 26. Checked against `@expo/config-plugins` 57.
+- A **publish workflow** that runs `npm publish --provenance` on a version
+  tag.
+
+### Fixed
+
+- **Forged reboots.** `BootReceiver` logs a `reboot` integrity event only
+  when `Settings.Global.BOOT_COUNT` has moved since the last one it logged,
+  so an unprotected `QUICKBOOT_POWERON` from another app - or the duplicate
+  some devices send - no longer writes fake reboots. The meaningless
+  `priority="1000"` is gone.
+- `SECURITY.md` and `CONTRIBUTING.md` are published; the changelog linked to
+  both. The `author` field names the author.
+- Changelog dates for 1.0.0, 1.3.0 and 1.4.0 now match the npm publish dates.
+
+### Deprecated
+
+- `removeListener()` with no argument. It removes every listener in the app,
+  the hooks' included, and now warns once. Use `removeAllListeners()`. The
+  no-argument form goes in 3.0; `removeListener(event)` stays.
+
+### Not changed
+
+- **Android only.** iOS stays unsupported, now stated plainly: autolinking
+  skips it, `isSupported()` is false, and every method rejects with
+  `E_UNSUPPORTED_PLATFORM`.
+- The codegen types still come from `react-native/Libraries/Types/CodegenTypes`:
+  React Native 0.77, the floor, does not export them from `react-native`.
+
+### Migrating from 1.x
+
+The full guide, with before-and-after examples per mode, is
+[docs/MIGRATING.md](docs/MIGRATING.md). In short:
+
+1. **Declare the Health Connect permissions you use** in
+   `android/app/src/main/AndroidManifest.xml` - the snippets are in
+   [docs/PERMISSIONS.md](docs/PERMISSIONS.md#what-the-library-declares-and-what-you-add).
+   Delete any `tools:node="remove"` lines you added for them; they now remove
+   nothing. Expo apps list the package under `plugins` instead.
+2. **Declare `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** if you use the direct
+   battery dialog; otherwise do nothing and the settings list opens.
+3. **Subscribe through `StepTracker.addListener`** (or the hooks), not a
+   `NativeEventEmitter` of your own.
+4. **Replace `removeListener()` with no argument** by `removeAllListeners()`,
+   or better, keep and `remove()` the subscriptions you create.
+5. **Handle `syncAuthFailed`** if you set `remoteSyncHeaders`: refresh the
+   token with `updateConfig`, then `syncNow()`.
+6. **Pass config to `useStepTracker` from one component**, and expect changes
+   to it to apply.
+7. **Raise `minSdkVersion` to 26** if your app is still on React Native's
+   default of 24.
+8. Rebuild the native app.
+
+## [1.5.0] - 2026-09-27
+
+Integrity checks for apps that pay for steps: flag the ways a count is
+faked, log what happened to the device, and let a server verify where the
+numbers came from. Everything is opt-in. With `fraudDetection` left off,
+nothing is recorded, every new figure is `0`, and every number is what it
+was.
+
+### Added
+
+#### Per-minute step buckets
+
+- With `fraudDetection.enabled`, every step this phone watches being taken
+  is placed on the minute it was taken in: a new `step_minute` table,
+  counts only, pruned at `historyRetentionDays`. `getStepMinutes(from, to)`
+  reads it.
+- A new engine hook reports each observed delta with the span it was taken
+  in. Steps credited by gap recovery, and paused steps, are never observed.
+- A lump after a silence — a sensor batch that overflowed with the screen
+  off, or the first sample after a dead process — is parked as
+  `untimedSteps` at the minute it arrived in and never judged for cadence.
+  Spreading it across the gap would invent exactly the steady count the
+  detector looks for.
+- Each minute also counts the steps that arrived while charging, and while
+  Activity Recognition said still or in a vehicle.
+
+#### A fraud detector
+
+- `FraudDetector` is pure Kotlin and judges a day from its minutes and
+  motion windows. Strong flags: `cadence` (a minute over `maxCadenceSpm`,
+  default 200), `steady_cadence` (`steadyCadenceMinutes`, default 30, in a
+  row that never move by more than one step a minute: a swing gadget or
+  motor), `continuous` (the excess past `maxContinuousMinutes`, default
+  180), `charging`, `in_vehicle` from three minutes, `shake` (a motion
+  window at 3.3 Hz or faster, hard and tonal) and `daily_volume` (the excess
+  over `maxDailySteps`, default 50,000). Weak flags, evidence only:
+  `activity_still`, `night`, `swing`, and `in_vehicle` under three minutes.
+- `suspectSteps` is the strong flags' minutes, each counted once, plus the
+  daily excess. It is on `StepSnapshot`, `DayRecord`, the verification
+  snapshot and, with the checks on, the `'full'` remote payload.
+- Today is re-judged about once a minute, from the sensor path while steps
+  arrive and from the service heartbeat after they stop; a closing day gets
+  a final verdict at rollover. Verdicts are stored in `integrity_day`.
+- `getIntegrityReport(date)`: the flags with their evidence, the day's
+  events, minute totals, the rules in force, charging and Activity
+  Recognition state, and device hints.
+- `suspiciousActivity` event, once per new flag, and an
+  `onSuspiciousActivity` option on `useStepTracker`.
+- Every threshold turns off at `0`. The defaults stay clear of honest
+  walks, treadmill sessions and runs in the JVM tests; they are starting
+  points to tune on real data.
+
+#### Exclude mode
+
+- `fraudDetection.mode: 'exclude'` takes `suspectSteps` out of this
+  device's count before sources are resolved, and so out of everything the
+  package shows or sends: `getTodaySteps()`, `stepsChanged`, the
+  notification, goals, stats, the Health Connect mirror and the remote
+  upload. `deviceSteps` stays raw, and `ResolvedStepSource.suspectStepsExcluded`
+  says how much came out. Changing mode clears the continuity baseline.
+  The default, `'flag'`, changes no number.
+
+#### An integrity event log
+
+- `integrity_event`, bounded to 2,000 rows and to retention:
+  `clock_changed` (with the jump), `timezone_changed`, `reboot`,
+  `reset_today`, `history_cleared`, `config_changed` (the keys that moved,
+  logged even when the change turns the checks off), `sensor_changed`,
+  `charging_started` / `charging_stopped`, `activity_changed`,
+  `service_recovered` and `device_attested`. `getIntegrityEvents(from, to)`
+  reads it. `clearHistory()` keeps it and logs the clear.
+
+#### Keystore attestation and signing
+
+- `attestDevice(challenge)` generates an EC P-256 key in the Android
+  Keystore bound to your server's challenge and returns its certificate
+  chain, so a server can check the device, its boot state and the app
+  before trusting anything signed with it.
+- `getVerificationSnapshot(date, { sign, nonce })` signs the snapshot. The
+  exact JSON that was signed travels as `signature.signedPayload`, so a
+  server verifies bytes it never has to rebuild. `payloadSha256` fits Play
+  Integrity's `requestHash`.
+- Once a key exists, every upload to `remoteSyncUrl` carries a
+  `Step-Tracker-Signature` header over the exact body bytes.
+
+#### Activity Recognition, optional
+
+- `fraudDetection.activityRecognition` tags steps with Google's Activity
+  Recognition transitions when the host app adds
+  `play-services-location`. The package declares it compile-only, probes
+  for it before touching it, and ships consumer ProGuard rules so an app
+  without it builds and runs unchanged. No new permission; no location.
+
+#### Health Connect late writes
+
+- `StepSource.lateWrittenSteps`: steps from records last modified more
+  than a day after they ended. Evidence for a server, never subtracted.
+
+#### Storage
+
+- **Room schema 5**, with `MIGRATION_4_5` creating `step_minute`,
+  `integrity_day` and `integrity_event`. Nothing existing is touched, and
+  the new tables start empty. Instrumented tests migrate version 2 and
+  version 4 databases with real rows.
+
+### Changed
+
+- `getVerificationSnapshot()` takes an optional second argument and always
+  carries `suspectSteps` and an `integrity` block. Both are `0` and empty,
+  apart from the device hints, with the checks off.
+- `initialize()` now tells a running service when it changed config, so
+  receivers and schedules follow without waiting for a restart. It only
+  does so on a real change, not on every launch.
+
+### Tests
+
+- 36 new JVM tests: the detector against synthetic days, minute
+  attribution, config round-trip and clamping, the payload with integrity
+  data and exclusion, and the emulator heuristic.
+- 8 new instrumented tests, including one that runs the whole layer through
+  the real core, database and Keystore and verifies a signed snapshot
+  against the attested key.
+- 12 new Jest tests for validation, the new methods and the event.
+
+## [1.4.0] - 2026-09-18
+
+The release for apps that pay for steps. Nothing here changes what a
+consumer who touches no new config sees: the same resolved numbers, the same
+events, the same remote payload. Everything is opt-in or additive.
+
+### Added
+
+#### Health Connect recording method per source
+
+- `StepSource` now splits each origin's `steps` by Health Connect's
+  `recordingMethod`, which the writing app stamps on every record:
+  `manualSteps` (typed in by the user, `RECORDING_METHOD_MANUAL_ENTRY`),
+  `unknownMethodSteps`, and the full `recordingMethods` split
+  `{ active, automatic, manual, unknown }`. `steps` is still the full total.
+  A hand-entered 20,000 was previously indistinguishable from a watch's
+  count, which is the single easiest way to fake steps through a third-party
+  app. Windows over 35 days are answered through the aggregate API, which
+  carries no per-record metadata, so on those days the new fields are `-1` /
+  `null` — the same limitation `stepsBeforeCoverage` has there. Every
+  single-day read is exact.
+- `healthConnectIgnoreManualEntries` config (default `false`). On, every
+  external source competes on `steps - manualSteps` under every policy and
+  even when pinned, so a typed-in number can never become the day's number;
+  a source with nothing left once its manual entries are out has no count to
+  offer and the phone answers. A manual entry's share of the pre-coverage
+  steps is taken out too, so a hand-entered morning cannot survive as "steps
+  from before install". Distance and calories for a reduced source are
+  re-derived from the steps that remain. Turning the flag on or off clears
+  the day's continuity baseline, so a baseline taken from a typed-in total
+  does not survive until midnight.
+- `ResolvedStepSource.manualStepsExcluded`: how much was taken out of the
+  source that was evaluated. `externalSteps + manualStepsExcluded` is what
+  Health Connect's own screen shows for it, so a UI can explain the
+  difference. `0` whenever the flag is off.
+- The records are still read — `READ_STEPS` covers them, there is no separate
+  permission — and still listed per source; only the resolved number changes.
+  [PLAY_STORE_COMPLIANCE.md](docs/PLAY_STORE_COMPLIANCE.md#on-manual-entries)
+  says so for the health declaration.
+
+#### Wearable trust under `auto` is opt-in strict
+
+- `wearableTrust` config, `'metadata'` (default, unchanged behaviour) or
+  `'catalog'`. Under `auto`, a candidate is trusted for its whole margin over
+  the phone when it is a wearable — and by default "is a wearable" comes
+  from the `Device.type` the writing app stamped on its records, which any
+  app can set to `TYPE_WATCH`. That is fine for display and wrong for an app
+  paying per step. Under `'catalog'` only a package the built-in catalog
+  knows as a wearable's companion app, or one on the new `wearableAllowlist`
+  config, earns that trust; an unlisted package that stamps a wearable type
+  keeps `kind: 'watch'` for display and is bound by the coverage rule like a
+  phone-side app. Pins, and the `wearable` / `health_connect` policies, are
+  unaffected.
+- `StepSource.trustedWearable` says which rule applied to each source.
+  `isWearable` keeps describing the display classification.
+- Changing `wearableTrust` or `wearableAllowlist` clears the day's
+  continuity baseline, like a policy change.
+
+#### Gap recovery is auditable and can leave closed days alone
+
+- `recoveredSteps` on `DayRecord` and `StepSnapshot`: of this device's count
+  for the day, how many steps gap recovery credited in one go — today's
+  share of an overnight kill, a reboot's since-boot steps, an install's
+  since-boot claim — rather than observing sample by sample. An
+  apportionment is an estimate, and a server judging a day wants it
+  separately. Stored as `daily_summary.recoveredSteps`, kept in the engine's
+  atomic counter state so it cannot drift from the total, grown by exactly
+  what a backfill adds to a past day, and `0` for a day counted live.
+- **Room schema 3**, with a real `Migration(2, 3)` that adds the column
+  with a default of `0` — the only honest value for a day whose split was
+  never recorded. No destructive fallback: users have 35 days of history in
+  that table. An instrumented `MigrationTestHelper` test builds version 2
+  from the exported schema, migrates real rows and checks every one is
+  still there.
+- `historyBackfilled` event, `{ date, addedSteps, totalSteps, reason: 'gap'
+  | 'reboot' }`, fired once per affected past day after the repository
+  write commits. Until now `StepRepository.addToDay()` changed a previous
+  day's stored total with no signal to JS; an app that had already paid for
+  that day had no way to know its number moved. `dayChanged` is unchanged.
+- `gapRecovery: 'today_capped'` and `gapRecoveryMaxSteps` (default 20,000):
+  like `'today'`, but a recovery credits at most the cap to the active day
+  and drops the rest, so a counter glitch after a week-long kill cannot
+  mint 100,000 steps on one day. Closed days never change under it. The
+  `GapRecovery` documentation now recommends `'today_capped'` or `'drop'`
+  for apps where a settled day must never change after the fact.
+- The policy application moved out of the engine into
+  `StepGapSplitter.apply()`, pure and JVM-tested for all four values; the
+  engine instrumented tests cover `today_capped`, the recovered share
+  through a rollover, a reset and a re-seed, and the backfill reason.
+
+#### One verification snapshot for server-side ingest
+
+- `getVerificationSnapshot(date)`: everything a server needs to judge a day,
+  with nothing resolved for it — this phone's own `deviceSteps` and
+  `recoveredSteps`, the `sensor`, `coverageStartAt`, every Health Connect
+  origin unresolved and `self` included (each with `manualSteps`,
+  `recordingMethods` and `trustedWearable`), what the policy `resolved` for
+  comparison, the device `capabilities`, the service's recovery `health`,
+  and a `clock` block that puts the wall clock next to an
+  `elapsedRealtime`-derived boot id so a server can spot clock edits. Apps
+  that verify server-side were stitching this together from four calls.
+  The JS wrapper rejects a malformed date with `E_INVALID_CONFIG` before
+  touching native, like the range reads. [API.md](docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot)
+  has a worked example of posting it and a rule set for the other end.
+
+#### Remote sync: idempotent, and optionally richer
+
+- Every upload to `remoteSyncUrl` carries an `Idempotency-Key` header — a
+  SHA-256 digest of the package name and each record's date and step count,
+  sorted by date — so a batch WorkManager retried, or one `syncNow()` queued
+  alongside the periodic job, is recognisable server-side as the same
+  content. A day whose count has since grown produces a new key.
+- `remoteSyncPayload` config, `'totals'` (default; the 1.3 shape byte for
+  byte) or `'full'`, which adds per record this device's `deviceSteps` and
+  `recoveredSteps`, the `stepSource` the policy resolved to, and the
+  unresolved Health Connect `sources` for the day, read at upload time and
+  `[]` when reads are not permitted.
+- The body and the key moved into `RemotePayload`, pure and JVM-tested: same
+  records → same key, one step changed → different key, and the default body
+  has exactly the four fields it had in 1.3. A day whose Health Connect read
+  failed uploads as this device's own with no origins, never with an empty
+  `stepSource`; and the per-day reads for `'full'` are bounded as a whole,
+  so a hanging provider cannot outlast the worker.
+
+#### Motion signature windows (opt-in)
+
+- `motionSampling: { enabled, windowSeconds?: 10, intervalMinutes?: 5 }`
+  config, default disabled. While tracking is running and steps have accrued
+  since the last window, the service samples the accelerometer for one window
+  and stores **features only — never raw traces**: `dominantFrequencyHz`,
+  `variance`, `zeroCrossingRate`, `peakRatio`, `stepsDuringWindow`,
+  `startedAt`. Enough for a server to tell a 1.8 Hz walk from a 4 Hz shake;
+  not enough to reconstruct anything. The last `motionWindowRetention`
+  (default 288, a day at five-minute intervals) are kept in a new
+  `motion_window` table (Room schema 4, additive migration).
+- `getMotionWindows(startDate, endDate)` and the `motionWindow` event.
+- Sampling stops while paused, is skipped while the app is in the background
+  without the battery exemption, listens in on the pedometer's own samples on
+  an accelerometer-only phone rather than registering twice, and on a
+  non-wake-up accelerometer holds a timed partial wake lock for the window
+  only when `accelerometerWakeLock` allows — the existing wake-lock policy.
+- Seven JVM tests feed synthetic walking and shaking traces and assert the
+  features separate them on frequency, variance, crossing rate and purity,
+  at 20 Hz and 50 Hz alike, and that a still phone reports no frequency.
+
+### Project hygiene
+
+- The published tarball no longer carries `android/.kotlin/`. The Kotlin
+  daemon writes crash logs under `android/.kotlin/errors/` during a local
+  build, and `*.log` in `.npmignore` does not apply inside a directory that
+  `package.json#files` lists, so a stray log shipped with the package.
+  `!android/.kotlin` is now in `files`.
+- `devDependencies.react-native`, `example/package.json` and the standalone
+  Gradle pin in `android/settings.gradle` all say `0.77.0`, the floor
+  `peerDependencies` has claimed since 1.1.0. Nothing about the floor moved:
+  Room 2.7 needs Kotlin 2.0+, React Native 0.77 is the first release on
+  Kotlin 2.0.21, and 0.76 is still on 1.9.24. The package was merely being
+  developed and CI-tested against a version it does not claim to support.
+
+## [1.3.0] - 2026-09-12
 
 The release for phones that kill services and users who also wear a watch:
 steps counted while the process was dead are recovered instead of dropped, a
@@ -403,7 +931,7 @@ answered by `installHealthConnect()`.
   0.74–0.76 the package still works if you pin `kotlinVersion = "1.9.24"` and
   `roomVersion = "2.6.1"`.
 
-## [1.0.0] - 2026-09-06
+## [1.0.0] - 2026-09-08
 
 Initial release.
 
@@ -423,6 +951,11 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.0
+[2.0.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.1
+[2.0.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.0
+[1.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.5.0
+[1.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.4.0
 [1.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.3.0
 [1.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.2.0
 [1.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.1.0

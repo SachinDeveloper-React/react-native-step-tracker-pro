@@ -21,13 +21,23 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectWriteEnabled'
     | 'healthConnectBackgroundRead'
     | 'healthConnectHistoryRead'
+    | 'healthConnectIgnoreManualEntries'
+    | 'healthConnectReadActiveCalories'
+    | 'healthConnectReadTypes'
     | 'stepSource'
+    | 'wearableTrust'
+    | 'remoteSyncPayload'
+    | 'remoteSyncAuth'
     | 'autoStartOnBoot'
     | 'gapRecovery'
+    | 'gapRecoveryMaxSteps'
     | 'watchdogEnabled'
     | 'accelerometerFallback'
     | 'accelerometerWakeLock'
     | 'accelerometerThreshold'
+    | 'motionSampling'
+    | 'motionWindowRetention'
+    | 'fraudDetection'
   >
 > = {
   height: 170,
@@ -46,13 +56,32 @@ export const DEFAULT_CONFIG: Required<
   healthConnectWriteEnabled: true,
   healthConnectBackgroundRead: false,
   healthConnectHistoryRead: false,
+  healthConnectIgnoreManualEntries: false,
+  healthConnectReadActiveCalories: false,
+  healthConnectReadTypes: ['steps', 'distance', 'totalCalories'],
   stepSource: 'auto',
+  wearableTrust: 'metadata',
+  remoteSyncPayload: 'totals',
+  remoteSyncAuth: 'headers',
   autoStartOnBoot: true,
   gapRecovery: 'split',
+  gapRecoveryMaxSteps: 20000,
   watchdogEnabled: true,
   accelerometerFallback: true,
   accelerometerWakeLock: true,
   accelerometerThreshold: 0.9,
+  motionSampling: { enabled: false, windowSeconds: 10, intervalMinutes: 5 },
+  motionWindowRetention: 288,
+  fraudDetection: {
+    enabled: false,
+    mode: 'flag',
+    maxCadenceSpm: 200,
+    steadyCadenceMinutes: 30,
+    maxContinuousMinutes: 180,
+    maxDailySteps: 50000,
+    flagWhileCharging: true,
+    activityRecognition: false,
+  },
 };
 
 /** Stride length = height(cm) * coefficient / 100. */
