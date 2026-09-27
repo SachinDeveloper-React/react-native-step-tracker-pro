@@ -130,6 +130,18 @@ describe('initialize()', () => {
     [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
     [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
     [{ privacyPolicyUrl: 'intent://evil' }, /privacyPolicyUrl/],
+    [{ fraudDetection: { enabled: true, mode: 'remove' as 'flag' } }, /mode/],
+    [{ fraudDetection: { enabled: true, maxCadenceSpm: 50 } }, /maxCadenceSpm/],
+    [{ fraudDetection: { enabled: true, maxCadenceSpm: 150.5 } }, /maxCadenceSpm/],
+    [
+      { fraudDetection: { enabled: true, steadyCadenceMinutes: 2 } },
+      /steadyCadenceMinutes/,
+    ],
+    [
+      { fraudDetection: { enabled: true, maxContinuousMinutes: 10 } },
+      /maxContinuousMinutes/,
+    ],
+    [{ fraudDetection: { enabled: true, maxDailySteps: -5 } }, /maxDailySteps/],
   ])('rejects %j with E_INVALID_CONFIG', async (config, message) => {
     await expect(StepTracker.initialize(config)).rejects.toMatchObject({
       code: 'E_INVALID_CONFIG',
@@ -183,6 +195,26 @@ describe('initialize()', () => {
       healthConnectIgnoreManualEntries: true,
     });
     expect(DEFAULT_CONFIG.healthConnectIgnoreManualEntries).toBe(false);
+  });
+
+  it('passes fraudDetection through as one object, zero meaning off', async () => {
+    await StepTracker.initialize({
+      fraudDetection: {
+        enabled: true,
+        mode: 'exclude',
+        maxDailySteps: 0,
+        steadyCadenceMinutes: 45,
+      },
+    });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      fraudDetection: {
+        enabled: true,
+        mode: 'exclude',
+        maxDailySteps: 0,
+        steadyCadenceMinutes: 45,
+      },
+    });
+    expect(DEFAULT_CONFIG.fraudDetection).toMatchObject({ enabled: false, mode: 'flag' });
   });
 
   it('allows https remote endpoints and web privacy policies', async () => {
@@ -242,7 +274,20 @@ describe('date validation', () => {
     ).resolves.toMatchObject({
       deviceSteps: 7,
     });
-    expect(native.calledWith('getVerificationSnapshot')).toEqual([['2026-09-14']]);
+    expect(native.calledWith('getVerificationSnapshot')).toEqual([['2026-09-14', {}]]);
+  });
+
+  it('getVerificationSnapshot() passes signing options through and bounds the nonce', async () => {
+    await StepTracker.getVerificationSnapshot('2026-09-14', { sign: true, nonce: 'n-1' });
+    expect(native.calledWith('getVerificationSnapshot')).toEqual([
+      ['2026-09-14', { sign: true, nonce: 'n-1' }],
+    ]);
+    await expect(
+      StepTracker.getVerificationSnapshot('2026-09-14', { nonce: 'x'.repeat(513) })
+    ).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+      message: expect.stringMatching(/nonce/),
+    });
   });
 
   it('getMotionWindows() validates the range and unwraps the list', async () => {
@@ -268,6 +313,58 @@ describe('date validation', () => {
       motionSampling: { enabled: true, windowSeconds: 15 },
     });
     expect(DEFAULT_CONFIG.motionSampling.enabled).toBe(false);
+  });
+
+  it('getIntegrityReport() validates the date before touching native', async () => {
+    await expect(StepTracker.getIntegrityReport('yesterday')).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+    });
+    expect(native.calls).toHaveLength(0);
+    native.when('getIntegrityReport', {
+      date: '2026-09-14',
+      suspectSteps: 300,
+      flags: [],
+    });
+    await expect(StepTracker.getIntegrityReport('2026-09-14')).resolves.toMatchObject({
+      suspectSteps: 300,
+    });
+  });
+
+  it('getIntegrityEvents() and getStepMinutes() validate the range and unwrap the list', async () => {
+    await expect(
+      StepTracker.getIntegrityEvents('2026-09-10', '2026-09-09')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    await expect(
+      StepTracker.getStepMinutes('2026-9-9', '2026-09-09')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    expect(native.calls).toHaveLength(0);
+
+    native.when('getIntegrityEvents', {
+      events: [{ at: 1, type: 'reboot', detail: {} }],
+    });
+    await expect(
+      StepTracker.getIntegrityEvents('2026-09-09', '2026-09-10')
+    ).resolves.toEqual([{ at: 1, type: 'reboot', detail: {} }]);
+
+    native.when('getStepMinutes', { minutes: [{ minuteStart: 60000, steps: 110 }] });
+    await expect(StepTracker.getStepMinutes('2026-09-09', '2026-09-09')).resolves.toEqual(
+      [{ minuteStart: 60000, steps: 110 }]
+    );
+  });
+
+  it('attestDevice() bounds the challenge in UTF-8 bytes, not characters', async () => {
+    for (const bad of ['', 'x'.repeat(129), 'é'.repeat(65)]) {
+      await expect(StepTracker.attestDevice(bad)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+        message: expect.stringMatching(/challenge/),
+      });
+    }
+    expect(native.calls).toHaveLength(0);
+    native.when('attestDevice', { keyId: 'ab', attested: true });
+    await expect(StepTracker.attestDevice('é'.repeat(64))).resolves.toMatchObject({
+      attested: true,
+    });
+    expect(native.calledWith('attestDevice')).toEqual([['é'.repeat(64)]]);
   });
 
   it('unwraps history records', async () => {
@@ -389,11 +486,36 @@ describe('events', () => {
     StepTracker.addListener('dayChanged', () => {});
     StepTracker.addListener('historyBackfilled', () => {});
     StepTracker.addListener('motionWindow', () => {});
+    StepTracker.addListener('suspiciousActivity', () => {});
     StepTracker.removeListener();
     expect(__listenerCount('StepTrackerPro:goalReached')).toBe(0);
     expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(0);
     expect(__listenerCount('StepTrackerPro:historyBackfilled')).toBe(0);
     expect(__listenerCount('StepTrackerPro:motionWindow')).toBe(0);
+    expect(__listenerCount('StepTrackerPro:suspiciousActivity')).toBe(0);
+  });
+
+  it('delivers suspiciousActivity with its flags', () => {
+    const seen: unknown[] = [];
+    StepTracker.addListener('suspiciousActivity', (event) => seen.push(event));
+    const payload = {
+      date: '2026-09-14',
+      flags: [
+        {
+          type: 'charging',
+          severity: 'strong',
+          from: 0,
+          to: 60000,
+          steps: 90,
+          evidence: {},
+        },
+      ],
+      deviceSteps: 5000,
+      suspectSteps: 90,
+      mode: 'flag',
+    };
+    __emit('StepTrackerPro:suspiciousActivity', payload);
+    expect(seen).toEqual([payload]);
   });
 
   it('delivers historyBackfilled with its payload', () => {

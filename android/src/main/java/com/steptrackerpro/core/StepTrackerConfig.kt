@@ -144,8 +144,45 @@ data class StepTrackerConfig(
     val motionWindowSeconds: Int = MotionDefaults.WINDOW_SECONDS,
     val motionIntervalMinutes: Int = MotionDefaults.INTERVAL_MINUTES,
     /** How many windows to keep. 288 is a day at five-minute intervals. */
-    val motionWindowRetention: Int = MotionDefaults.RETENTION
+    val motionWindowRetention: Int = MotionDefaults.RETENTION,
+    /**
+     * Integrity checks: per-minute step buckets, the event log, and the
+     * detector that flags shaken phones, swing gadgets, charging, vehicles
+     * and implausible cadence or volume. Off by default - an app that does
+     * not pay for steps has no use for it, and it is one more table write per
+     * commit. JS presents these as `fraudDetection: { enabled, mode,
+     * maxCadenceSpm, steadyCadenceMinutes, maxContinuousMinutes,
+     * maxDailySteps, flagWhileCharging, activityRecognition }`.
+     */
+    val fraudDetectionEnabled: Boolean = false,
+    /** One of [IntegrityMode]'s `jsValue`s: `flag` (default) or `exclude`. */
+    val fraudMode: String = IntegrityMode.FLAG.jsValue,
+    val fraudMaxCadenceSpm: Int = IntegrityRules.DEFAULT_MAX_CADENCE_SPM,
+    val fraudSteadyCadenceMinutes: Int = IntegrityRules.DEFAULT_STEADY_MINUTES,
+    val fraudMaxContinuousMinutes: Int = IntegrityRules.DEFAULT_MAX_CONTINUOUS_MINUTES,
+    val fraudMaxDailySteps: Int = IntegrityRules.DEFAULT_MAX_DAILY_STEPS,
+    val fraudFlagWhileCharging: Boolean = true,
+    /**
+     * Tag steps with Google's Activity Recognition state (still, in a
+     * vehicle, ...). Only takes effect when the host app ships
+     * `com.google.android.gms:play-services-location`; this package declares
+     * it compile-only so an app that does not want Play Services never gets it.
+     */
+    val fraudActivityRecognition: Boolean = false
 ) {
+
+    val integrityMode: IntegrityMode get() = IntegrityMode.from(fraudMode)
+
+    /** True when flagged steps come out of every number shown, synced and resolved. */
+    val excludeSuspect: Boolean get() = fraudDetectionEnabled && integrityMode == IntegrityMode.EXCLUDE
+
+    fun integrityRules(): IntegrityRules = IntegrityRules(
+        maxCadenceSpm = fraudMaxCadenceSpm,
+        steadyCadenceMinutes = fraudSteadyCadenceMinutes,
+        maxContinuousMinutes = fraudMaxContinuousMinutes,
+        maxDailySteps = fraudMaxDailySteps,
+        flagWhileCharging = fraudFlagWhileCharging
+    )
 
     /**
      * Clamps every numeric field into a range the rest of the package can rely
@@ -195,8 +232,18 @@ data class StepTrackerConfig(
         // under a minute is a poll, not a signature.
         motionWindowSeconds = motionWindowSeconds.coerceIn(1, MotionDefaults.MAX_WINDOW_SECONDS),
         motionIntervalMinutes = motionIntervalMinutes.coerceAtLeast(1),
-        motionWindowRetention = motionWindowRetention.coerceAtLeast(1)
+        motionWindowRetention = motionWindowRetention.coerceAtLeast(1),
+        // Zero turns a check off; anything else is held to a range where the
+        // check still means something. A cadence cap of 50 would flag every
+        // walk, a steady run of two minutes every treadmill.
+        fraudMode = IntegrityMode.from(fraudMode).jsValue,
+        fraudMaxCadenceSpm = offOr(fraudMaxCadenceSpm) { it.coerceIn(100, 400) },
+        fraudSteadyCadenceMinutes = offOr(fraudSteadyCadenceMinutes) { it.coerceIn(5, 24 * 60) },
+        fraudMaxContinuousMinutes = offOr(fraudMaxContinuousMinutes) { it.coerceIn(30, 24 * 60) },
+        fraudMaxDailySteps = offOr(fraudMaxDailySteps) { it.coerceAtLeast(1_000) }
     )
+
+    private inline fun offOr(value: Int, clamp: (Int) -> Int): Int = if (value <= 0) 0 else clamp(value)
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("height", heightCm)
@@ -243,6 +290,14 @@ data class StepTrackerConfig(
         put("motionWindowSeconds", motionWindowSeconds)
         put("motionIntervalMinutes", motionIntervalMinutes)
         put("motionWindowRetention", motionWindowRetention)
+        put("fraudDetectionEnabled", fraudDetectionEnabled)
+        put("fraudMode", fraudMode)
+        put("fraudMaxCadenceSpm", fraudMaxCadenceSpm)
+        put("fraudSteadyCadenceMinutes", fraudSteadyCadenceMinutes)
+        put("fraudMaxContinuousMinutes", fraudMaxContinuousMinutes)
+        put("fraudMaxDailySteps", fraudMaxDailySteps)
+        put("fraudFlagWhileCharging", fraudFlagWhileCharging)
+        put("fraudActivityRecognition", fraudActivityRecognition)
     }
 
     companion object {
@@ -339,6 +394,24 @@ data class StepTrackerConfig(
                 ),
                 motionWindowRetention = json.optInt(
                     "motionWindowRetention", fallback.motionWindowRetention
+                ),
+                fraudDetectionEnabled = json.optBoolean(
+                    "fraudDetectionEnabled", fallback.fraudDetectionEnabled
+                ),
+                fraudMode = json.optString("fraudMode", fallback.fraudMode),
+                fraudMaxCadenceSpm = json.optInt("fraudMaxCadenceSpm", fallback.fraudMaxCadenceSpm),
+                fraudSteadyCadenceMinutes = json.optInt(
+                    "fraudSteadyCadenceMinutes", fallback.fraudSteadyCadenceMinutes
+                ),
+                fraudMaxContinuousMinutes = json.optInt(
+                    "fraudMaxContinuousMinutes", fallback.fraudMaxContinuousMinutes
+                ),
+                fraudMaxDailySteps = json.optInt("fraudMaxDailySteps", fallback.fraudMaxDailySteps),
+                fraudFlagWhileCharging = json.optBoolean(
+                    "fraudFlagWhileCharging", fallback.fraudFlagWhileCharging
+                ),
+                fraudActivityRecognition = json.optBoolean(
+                    "fraudActivityRecognition", fallback.fraudActivityRecognition
                 )
             )
         }

@@ -17,11 +17,13 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.steptrackerpro.core.AccelerometerStepDetector
+import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.MotionWindowSampler
 import com.steptrackerpro.core.SensorSource
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
+import com.steptrackerpro.integrity.IntegritySignals
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.BatteryOptimizationHelper
 import com.steptrackerpro.util.PermissionHelper
@@ -40,6 +42,9 @@ class StepTrackerService : Service(), SensorEventListener {
 
     private lateinit var core: StepTrackerCore
     private lateinit var notifications: NotificationFactory
+
+    /** Charging, clock and Activity Recognition inputs to the integrity checks. */
+    private lateinit var integritySignals: IntegritySignals
 
     private var sensorManager: SensorManager? = null
     private var counterSensor: Sensor? = null
@@ -88,6 +93,14 @@ class StepTrackerService : Service(), SensorEventListener {
     private val heartbeat = object : Runnable {
         override fun run() {
             core.state.lastHeartbeatAt = System.currentTimeMillis()
+            // The last minutes of a walk are judged even when no step follows
+            // them, and under exclude mode the shade follows the verdict.
+            // Both are no-ops with detection off; the redraw dedupes on the
+            // number shown.
+            if (core.integrity.enabled && listening) {
+                core.integrity.maybeEvaluate()
+                pushNotification()
+            }
             // A listener that could not be registered earlier - the sensor
             // service was not ready, a HAL hiccup - is retried here for as
             // long as the tracker is meant to be running, so a transient
@@ -153,6 +166,7 @@ class StepTrackerService : Service(), SensorEventListener {
         isAlive = true
         core = StepTrackerCore.get(this)
         notifications = NotificationFactory(this)
+        integritySignals = IntegritySignals(this, core)
         sensorManager = getSystemService(SENSOR_SERVICE) as? SensorManager
         counterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         detectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
@@ -221,6 +235,7 @@ class StepTrackerService : Service(), SensorEventListener {
                     )
                 }
                 scheduleMotionSampling()
+                integritySignals.apply()
                 pushNotification(force = true)
             }
             ServiceCommands.ACTION_REFRESH -> pushNotification(force = true)
@@ -235,11 +250,16 @@ class StepTrackerService : Service(), SensorEventListener {
                 // and how often those happen is the number an app needs in
                 // order to decide whether to walk the user to the OEM's
                 // battery settings.
-                when {
-                    intent == null -> core.state.recordRecovery("sticky")
-                    fromBoot -> core.state.recordRecovery("boot")
-                    recoveredBy != null -> core.state.recordRecovery(recoveredBy)
-                    else -> core.state.resetRecovery()
+                val recovery = when {
+                    intent == null -> "sticky"
+                    fromBoot -> "boot"
+                    else -> recoveredBy
+                }
+                if (recovery != null) {
+                    core.state.recordRecovery(recovery)
+                    core.integrity.log(IntegrityEvent.SERVICE_RECOVERED, mapOf("reason" to recovery))
+                } else {
+                    core.state.resetRecovery()
                 }
                 startTracking(fromBoot = fromBoot, restore = restore)
             }
@@ -331,6 +351,7 @@ class StepTrackerService : Service(), SensorEventListener {
         SyncScheduler.schedule(this, core.config())
         SyncScheduler.scheduleWatchdog(this, core.config())
         scheduleMotionSampling()
+        integritySignals.apply()
         pushNotification(force = true)
         core.emitTrackingState(
             when {
@@ -379,6 +400,7 @@ class StepTrackerService : Service(), SensorEventListener {
         if (!listening) registerSensors()
         core.state.trackingState = TrackingState.RUNNING
         scheduleMotionSampling()
+        integritySignals.apply()
         pushNotification(force = true)
         core.emitTrackingState("resumed")
     }
@@ -389,6 +411,7 @@ class StepTrackerService : Service(), SensorEventListener {
         core.flush()
         scheduleMotionSampling()
         unregisterSensors()
+        integritySignals.stop()
         core.emitTrackingState("stopped")
         stopForegroundCompat()
         stopSelf()
@@ -432,7 +455,7 @@ class StepTrackerService : Service(), SensorEventListener {
             )
             if (ok) {
                 listening = true
-                core.state.source = SensorSource.STEP_COUNTER
+                markSource(SensorSource.STEP_COUNTER)
                 return true
             }
         }
@@ -446,7 +469,7 @@ class StepTrackerService : Service(), SensorEventListener {
             )
             if (ok) {
                 listening = true
-                core.state.source = SensorSource.STEP_DETECTOR
+                markSource(SensorSource.STEP_DETECTOR)
                 return true
             }
         }
@@ -469,7 +492,7 @@ class StepTrackerService : Service(), SensorEventListener {
                     accelerometer = AccelerometerStepDetector(
                         threshold = config.accelerometerThreshold.toFloat()
                     )
-                    core.state.source = SensorSource.ACCELEROMETER
+                    markSource(SensorSource.ACCELEROMETER)
                     if (!sensor.isWakeUpSensor && config.accelerometerWakeLock) acquireWakeLock()
                     return true
                 }
@@ -477,6 +500,21 @@ class StepTrackerService : Service(), SensorEventListener {
         }
 
         return false
+    }
+
+    /**
+     * Records which sensor is counting, and logs a move between two real
+     * sensors: steps from a detector or the accelerometer are weighed
+     * differently from the hardware counter's, and a server wants the seam.
+     */
+    private fun markSource(source: SensorSource) {
+        val before = core.state.source
+        core.state.source = source
+        if (before != source && before != SensorSource.NONE) {
+            core.integrity.log(
+                IntegrityEvent.SENSOR_CHANGED, mapOf("from" to before.jsValue, "to" to source.jsValue)
+            )
+        }
     }
 
     private fun unregisterSensors() {
@@ -762,6 +800,7 @@ class StepTrackerService : Service(), SensorEventListener {
         isAlive = false
         sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()
+        integritySignals.stop()
         core.flush()
         sensorThread?.quitSafely()
         sensorThread = null

@@ -143,6 +143,17 @@
             android:enabled="true"
             android:exported="false" />
 
+        <!--
+          Activity Recognition transitions for the integrity checks. Only ever
+          fired by Play Services through an explicit PendingIntent this package
+          creates, and only when the host app ships play-services-location and
+          turns on fraudDetection.activityRecognition.
+        -->
+        <receiver
+            android:name="com.steptrackerpro.integrity.ActivityTransitionReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
         <activity
             android:name="com.steptrackerpro.health.HealthPermissionActivity"
             android:exported="false"

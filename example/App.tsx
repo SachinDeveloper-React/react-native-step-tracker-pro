@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,7 +17,11 @@ import StepTracker, {
   useStepStats,
   useStepTracker,
 } from 'react-native-step-tracker-pro';
-import type { TrackingHealth, VerificationSnapshot } from 'react-native-step-tracker-pro';
+import type {
+  IntegrityFlag,
+  TrackingHealth,
+  VerificationSnapshot,
+} from 'react-native-step-tracker-pro';
 
 const palette = {
   surface: '#E9EDF2',
@@ -31,6 +35,25 @@ const palette = {
 };
 
 const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+/** What a flag means, in words a user reading the card would recognise. */
+const FLAG_LABELS: Record<IntegrityFlag['type'], string> = {
+  cadence: 'Faster than anyone walks',
+  steady_cadence: 'Machine-steady pace',
+  continuous: 'Hours without a pause',
+  charging: 'Counted while charging',
+  in_vehicle: 'Counted in a vehicle',
+  activity_still: 'Counted while still',
+  night: 'Long walk in the small hours',
+  shake: 'Phone being shaken',
+  swing: 'Swing-like motion',
+  daily_volume: 'Over the daily limit',
+};
+
+function clockTime(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 /** Turns the status shape into one line a user can act on. */
 function healthSummary(health: ReturnType<typeof useHealthConnect>): string {
@@ -96,8 +119,17 @@ export default function App() {
     // A closed day never changes after the fact, and one day can never be
     // handed a week's worth of counter.
     gapRecovery: 'today_capped',
+    // Minute buckets, the event log and the detector for shaken phones,
+    // swing gadgets, chargers and implausible totals. 'flag' reports and
+    // changes no number; a server decides. 'exclude' would also take the
+    // suspect steps out of everything shown and synced.
+    fraudDetection: { enabled: true, mode: 'flag' },
+    // Short accelerometer windows, so the detector can tell a shake from a walk.
+    motionSampling: { enabled: true },
     onGoalReached: (event) =>
       Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
+    // Re-read the snapshot the integrity card is drawn from.
+    onSuspiciousActivity: () => refreshVerificationRef.current(),
   });
 
   const { stats } = useStepStats('week');
@@ -131,6 +163,9 @@ export default function App() {
       .then(setVerification)
       .catch(() => {});
   }, [snapshot?.date]);
+  // The hook's options are built before this callback exists; a ref bridges it.
+  const refreshVerificationRef = useRef(refreshVerification);
+  refreshVerificationRef.current = refreshVerification;
 
   useEffect(() => {
     refreshVerification();
@@ -209,6 +244,21 @@ export default function App() {
     .filter((source) => !source.isSelf && source.manualSteps > 0)
     .reduce((sum, source) => sum + source.manualSteps, 0);
   const recoveredSteps = snapshot?.recoveredSteps ?? 0;
+  const suspectSteps = snapshot?.suspectSteps ?? 0;
+  const integrity = verification?.integrity;
+  // Hints worth a line: any device signal that is on.
+  const deviceHints = integrity
+    ? (
+        [
+          ['emulator', integrity.device.emulator],
+          ['su binary', integrity.device.suBinary],
+          ['test-keys build', integrity.device.testKeysBuild],
+          ['ADB on', integrity.device.adbEnabled],
+        ] as const
+      )
+        .filter(([, on]) => on)
+        .map(([label]) => label)
+    : [];
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -238,6 +288,12 @@ export default function App() {
           steps this phone credited in one go after a dead period, and steps
           somebody typed into Health Connect by hand.
         */}
+        {suspectSteps > 0 && (
+          <Text style={styles.laneLabel}>
+            {suspectSteps.toLocaleString()} flagged as suspect
+            {snapshot?.stepSource?.suspectStepsExcluded ? ', not counted' : ''}
+          </Text>
+        )}
         {(recoveredSteps > 0 || manualSteps > 0) && (
           <Text style={styles.laneLabel}>
             {recoveredSteps > 0
@@ -416,6 +472,38 @@ export default function App() {
             <Text style={styles.cardMeta}>
               Recovered {verification.health.recoveryCount}× ·{' '}
               {verification.clock.timezone}
+            </Text>
+          </View>
+        )}
+
+        {/*
+          The integrity checks' view of today: what was flagged, when, and
+          why. In 'flag' mode none of this changes the number above; it is
+          what a server would weigh before paying for the day.
+        */}
+        {integrity?.enabled && (
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Integrity checks</Text>
+            <Text style={styles.body}>
+              {integrity.suspectSteps > 0
+                ? `${integrity.suspectSteps.toLocaleString()} of ${integrity.deviceSteps.toLocaleString()} steps flagged`
+                : 'Nothing flagged today.'}
+              {integrity.mode === 'exclude' && integrity.suspectSteps > 0
+                ? ' and left out of the count.'
+                : ''}
+            </Text>
+            {integrity.flags.map((flag) => (
+              <Text key={`${flag.type}@${flag.from}`} style={styles.cardMeta}>
+                {clockTime(flag.from)}–{clockTime(flag.to)} · {FLAG_LABELS[flag.type]} ·{' '}
+                {flag.steps.toLocaleString()} steps
+                {flag.severity === 'weak' ? ' (weak)' : ''}
+              </Text>
+            ))}
+            <Text style={styles.cardMeta}>
+              {integrity.minutes.count} active minutes · {integrity.events.length}{' '}
+              {integrity.events.length === 1 ? 'event' : 'events'} logged
+              {integrity.charging ? ' · charging now' : ''}
+              {deviceHints.length > 0 ? ` · ${deviceHints.join(', ')}` : ''}
             </Text>
           </View>
         )}

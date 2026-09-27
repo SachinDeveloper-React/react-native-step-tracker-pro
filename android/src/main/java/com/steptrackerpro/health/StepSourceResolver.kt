@@ -140,7 +140,13 @@ object StepSourceResolver {
          * Connect itself shows for that source, which is what a UI needs in
          * order to explain why the number here is lower.
          */
-        val manualStepsExcluded: Int = 0
+        val manualStepsExcluded: Int = 0,
+        /**
+         * Of this device's count, how many flagged steps were taken out
+         * before it competed, under `fraudDetection.mode: 'exclude'`. Zero
+         * otherwise. `deviceSteps` is the count after the exclusion.
+         */
+        val suspectStepsExcluded: Int = 0
     ) {
         fun toMap(): Map<String, Any?> = mapOf(
             "date" to totals.date,
@@ -153,7 +159,8 @@ object StepSourceResolver {
             "usedExternal" to usedExternal,
             "merged" to merged,
             "baselineSteps" to baselineSteps,
-            "manualStepsExcluded" to manualStepsExcluded
+            "manualStepsExcluded" to manualStepsExcluded,
+            "suspectStepsExcluded" to suspectStepsExcluded
         )
     }
 

@@ -76,6 +76,15 @@ class StepCounterEngine(
      */
     var onBackfill: ((Map<String, Int>, BackfillReason) -> Unit)? = null
 
+    /**
+     * Invoked with steps this device watched being taken, and the span they
+     * were taken in: from the previous sample's event time to this one's.
+     * Never called for steps gap recovery credited in one go, nor for paused
+     * samples. Feeds the per-minute integrity timeline; the callee must be
+     * cheap, because it runs under this engine's lock on the sensor thread.
+     */
+    var onObserved: ((fromMillis: Long, toMillis: Long, steps: Int) -> Unit)? = null
+
     /** Why a past day is being credited after the fact. Values match the JS event. */
     enum class BackfillReason(val jsValue: String) {
         /** Nothing was listening between the last reading and this one. */
@@ -184,6 +193,7 @@ class StepCounterEngine(
     fun onCounterSample(rawValue: Float, eventAtMillis: Long): StepSnapshot? {
         if (rawValue < 0f || rawValue.isNaN()) return null
         rollDateIfNeeded()
+        val previousEventAt = state.lastEventAt
 
         val currentBoot = bootIdProvider()
         val currentElapsed = elapsedProvider()
@@ -314,6 +324,11 @@ class StepCounterEngine(
 
         backfill?.let { shares -> onBackfill?.invoke(shares, backfillReason) }
 
+        // What this sample added beyond what recovery credited in one go is
+        // what the sensor was seen counting.
+        val observed = total - previous - recoveredNow
+        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed)
+
         if (total == previous) return null
         pendingCommit += (total - previous)
         return snapshot()
@@ -337,6 +352,7 @@ class StepCounterEngine(
         }
         if (paused) return null
 
+        val previousEventAt = state.lastEventAt
         val total = state.stepsToday + steps
         // The counter fields are left exactly as they were. Blanking them here
         // would send the first counter sample on a dual-sensor device that fell
@@ -357,6 +373,7 @@ class StepCounterEngine(
         // next counter sample re-pin instead of recomputing from a stale anchor.
         reanchorOnNextSample = true
         pendingCommit += steps
+        onObserved?.invoke(previousEventAt, eventAtMillis, steps)
         return snapshot()
     }
 

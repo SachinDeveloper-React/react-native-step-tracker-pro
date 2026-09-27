@@ -156,7 +156,15 @@ data class StepSource(
      * to JS so a consumer can see which rule applied; the resolver decides
      * for itself from the same rule rather than reading this back.
      */
-    val trustedWearable: Boolean = kind.isWearable
+    val trustedWearable: Boolean = kind.isWearable,
+    /**
+     * Of [steps], how many came from records the writing app last modified
+     * more than a day after they ended - a hand-built history pushed in after
+     * the fact, or a companion app that synced very late. Evidence for a
+     * server, never subtracted here: a watch that was out of range for two
+     * days writes late too. -1 when not computed (aggregate reads).
+     */
+    val lateWrittenSteps: Int = -1
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
@@ -205,7 +213,8 @@ data class StepSource(
         "manualSteps" to manualSteps,
         "unknownMethodSteps" to unknownMethodSteps,
         "recordingMethods" to recordingMethods?.toMap(),
-        "trustedWearable" to trustedWearable
+        "trustedWearable" to trustedWearable,
+        "lateWrittenSteps" to lateWrittenSteps
     )
 }
 

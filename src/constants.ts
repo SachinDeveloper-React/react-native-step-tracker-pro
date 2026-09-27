@@ -34,6 +34,7 @@ export const DEFAULT_CONFIG: Required<
     | 'accelerometerThreshold'
     | 'motionSampling'
     | 'motionWindowRetention'
+    | 'fraudDetection'
   >
 > = {
   height: 170,
@@ -65,6 +66,16 @@ export const DEFAULT_CONFIG: Required<
   accelerometerThreshold: 0.9,
   motionSampling: { enabled: false, windowSeconds: 10, intervalMinutes: 5 },
   motionWindowRetention: 288,
+  fraudDetection: {
+    enabled: false,
+    mode: 'flag',
+    maxCadenceSpm: 200,
+    steadyCadenceMinutes: 30,
+    maxContinuousMinutes: 180,
+    maxDailySteps: 50000,
+    flagWhileCharging: true,
+    activityRecognition: false,
+  },
 };
 
 /** Stride length = height(cm) * coefficient / 100. */

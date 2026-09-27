@@ -5,6 +5,7 @@ import type {
   GoalReachedEvent,
   StepSnapshot,
   StepTrackerConfig,
+  SuspiciousActivityEvent,
   TrackingState,
 } from '../types';
 
@@ -14,6 +15,12 @@ export interface UseStepTrackerOptions extends StepTrackerConfig {
   /** Refetch the snapshot when the app returns to the foreground. Default true. */
   refreshOnForeground?: boolean;
   onGoalReached?: (event: GoalReachedEvent) => void;
+  /**
+   * The integrity checks found something new for a day. Only fires with
+   * `fraudDetection.enabled`. The snapshot is re-read as well, because under
+   * `mode: 'exclude'` the number can drop without a sensor sample to carry it.
+   */
+  onSuspiciousActivity?: (event: SuspiciousActivityEvent) => void;
 }
 
 export interface UseStepTrackerResult {
@@ -40,6 +47,7 @@ export function useStepTracker(
     autoStart = false,
     refreshOnForeground = true,
     onGoalReached,
+    onSuspiciousActivity,
     ...config
   } = options;
 
@@ -52,6 +60,8 @@ export function useStepTracker(
   configRef.current = config;
   const goalRef = useRef(onGoalReached);
   goalRef.current = onGoalReached;
+  const suspiciousRef = useRef(onSuspiciousActivity);
+  suspiciousRef.current = onSuspiciousActivity;
 
   const refresh = useCallback(async () => {
     if (!isSupported()) return;
@@ -112,6 +122,10 @@ export function useStepTracker(
     const sourceSub = StepTracker.addListener('stepSourceChanged', () => {
       void refresh();
     });
+    const suspiciousSub = StepTracker.addListener('suspiciousActivity', (payload) => {
+      suspiciousRef.current?.(payload);
+      void refresh();
+    });
 
     return () => {
       cancelled = true;
@@ -120,6 +134,7 @@ export function useStepTracker(
       goalSub.remove();
       daySub.remove();
       sourceSub.remove();
+      suspiciousSub.remove();
     };
   }, [autoStart, refresh]);
 

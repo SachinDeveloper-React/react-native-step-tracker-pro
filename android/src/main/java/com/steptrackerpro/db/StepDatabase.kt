@@ -8,7 +8,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [StepHistoryEntity::class, DailySummaryEntity::class, MotionWindowEntity::class],
+    entities = [
+        StepHistoryEntity::class,
+        DailySummaryEntity::class,
+        MotionWindowEntity::class,
+        StepMinuteEntity::class,
+        IntegrityDayEntity::class,
+        IntegrityEventEntity::class
+    ],
     version = StepDatabase.VERSION,
     exportSchema = true
 )
@@ -17,12 +24,14 @@ abstract class StepDatabase : RoomDatabase() {
     abstract fun stepHistoryDao(): StepHistoryDao
     abstract fun dailySummaryDao(): DailySummaryDao
     abstract fun motionWindowDao(): MotionWindowDao
+    abstract fun stepMinuteDao(): StepMinuteDao
+    abstract fun integrityDao(): IntegrityDao
 
     companion object {
         private const val NAME = "step_tracker_pro.db"
 
         /** Kept next to the `@Database` annotation; the migration test targets it. */
-        const val VERSION = 4
+        const val VERSION = 5
 
         /**
          * Health Connect and the remote endpoint used to share the `synced`
@@ -85,8 +94,53 @@ abstract class StepDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The three integrity tables - per-minute step buckets, the
+         * detector's per-day verdict and the event log. New tables only;
+         * nothing version 4 had is touched, and they start empty rather than
+         * being back-filled from history nobody timed.
+         */
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `step_minute` (" +
+                        "`minuteStart` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`steps` INTEGER NOT NULL, " +
+                        "`untimedSteps` INTEGER NOT NULL, " +
+                        "`chargingSteps` INTEGER NOT NULL, " +
+                        "`stillSteps` INTEGER NOT NULL, " +
+                        "`vehicleSteps` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`minuteStart`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_step_minute_date` ON `step_minute` (`date`)"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `integrity_day` (" +
+                        "`date` TEXT NOT NULL, " +
+                        "`flaggedSteps` INTEGER NOT NULL, " +
+                        "`flagsJson` TEXT NOT NULL, " +
+                        "`evaluatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`date`))"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `integrity_event` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`at` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`type` TEXT NOT NULL, " +
+                        "`detailJson` TEXT NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_integrity_event_at` ON `integrity_event` (`at`)"
+                )
+            }
+        }
+
         /** Every migration, in order, for the builder and the migration test. */
-        internal val MIGRATIONS: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        internal val MIGRATIONS: Array<Migration> =
+            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         @Volatile
         private var instance: StepDatabase? = null

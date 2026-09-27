@@ -5,6 +5,130 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-09-27
+
+Integrity checks for apps that pay for steps: flag the ways a count is
+faked, log what happened to the device, and let a server verify where the
+numbers came from. Everything is opt-in. With `fraudDetection` left off,
+nothing is recorded, every new figure is `0`, and every number is what it
+was.
+
+### Added
+
+#### Per-minute step buckets
+
+- With `fraudDetection.enabled`, every step this phone watches being taken
+  is placed on the minute it was taken in: a new `step_minute` table,
+  counts only, pruned at `historyRetentionDays`. `getStepMinutes(from, to)`
+  reads it.
+- A new engine hook reports each observed delta with the span it was taken
+  in. Steps credited by gap recovery, and paused steps, are never observed.
+- A lump after a silence — a sensor batch that overflowed with the screen
+  off, or the first sample after a dead process — is parked as
+  `untimedSteps` at the minute it arrived in and never judged for cadence.
+  Spreading it across the gap would invent exactly the steady count the
+  detector looks for.
+- Each minute also counts the steps that arrived while charging, and while
+  Activity Recognition said still or in a vehicle.
+
+#### A fraud detector
+
+- `FraudDetector` is pure Kotlin and judges a day from its minutes and
+  motion windows. Strong flags: `cadence` (a minute over `maxCadenceSpm`,
+  default 200), `steady_cadence` (`steadyCadenceMinutes`, default 30, in a
+  row that never move by more than one step a minute: a swing gadget or
+  motor), `continuous` (the excess past `maxContinuousMinutes`, default
+  180), `charging`, `in_vehicle` from three minutes, `shake` (a motion
+  window at 3.3 Hz or faster, hard and tonal) and `daily_volume` (the excess
+  over `maxDailySteps`, default 50,000). Weak flags, evidence only:
+  `activity_still`, `night`, `swing`, and `in_vehicle` under three minutes.
+- `suspectSteps` is the strong flags' minutes, each counted once, plus the
+  daily excess. It is on `StepSnapshot`, `DayRecord`, the verification
+  snapshot and, with the checks on, the `'full'` remote payload.
+- Today is re-judged about once a minute, from the sensor path while steps
+  arrive and from the service heartbeat after they stop; a closing day gets
+  a final verdict at rollover. Verdicts are stored in `integrity_day`.
+- `getIntegrityReport(date)`: the flags with their evidence, the day's
+  events, minute totals, the rules in force, charging and Activity
+  Recognition state, and device hints.
+- `suspiciousActivity` event, once per new flag, and an
+  `onSuspiciousActivity` option on `useStepTracker`.
+- Every threshold turns off at `0`. The defaults stay clear of honest
+  walks, treadmill sessions and runs in the JVM tests; they are starting
+  points to tune on real data.
+
+#### Exclude mode
+
+- `fraudDetection.mode: 'exclude'` takes `suspectSteps` out of this
+  device's count before sources are resolved, and so out of everything the
+  package shows or sends: `getTodaySteps()`, `stepsChanged`, the
+  notification, goals, stats, the Health Connect mirror and the remote
+  upload. `deviceSteps` stays raw, and `ResolvedStepSource.suspectStepsExcluded`
+  says how much came out. Changing mode clears the continuity baseline.
+  The default, `'flag'`, changes no number.
+
+#### An integrity event log
+
+- `integrity_event`, bounded to 2,000 rows and to retention:
+  `clock_changed` (with the jump), `timezone_changed`, `reboot`,
+  `reset_today`, `history_cleared`, `config_changed` (the keys that moved,
+  logged even when the change turns the checks off), `sensor_changed`,
+  `charging_started` / `charging_stopped`, `activity_changed`,
+  `service_recovered` and `device_attested`. `getIntegrityEvents(from, to)`
+  reads it. `clearHistory()` keeps it and logs the clear.
+
+#### Keystore attestation and signing
+
+- `attestDevice(challenge)` generates an EC P-256 key in the Android
+  Keystore bound to your server's challenge and returns its certificate
+  chain, so a server can check the device, its boot state and the app
+  before trusting anything signed with it.
+- `getVerificationSnapshot(date, { sign, nonce })` signs the snapshot. The
+  exact JSON that was signed travels as `signature.signedPayload`, so a
+  server verifies bytes it never has to rebuild. `payloadSha256` fits Play
+  Integrity's `requestHash`.
+- Once a key exists, every upload to `remoteSyncUrl` carries a
+  `Step-Tracker-Signature` header over the exact body bytes.
+
+#### Activity Recognition, optional
+
+- `fraudDetection.activityRecognition` tags steps with Google's Activity
+  Recognition transitions when the host app adds
+  `play-services-location`. The package declares it compile-only, probes
+  for it before touching it, and ships consumer ProGuard rules so an app
+  without it builds and runs unchanged. No new permission; no location.
+
+#### Health Connect late writes
+
+- `StepSource.lateWrittenSteps`: steps from records last modified more
+  than a day after they ended. Evidence for a server, never subtracted.
+
+#### Storage
+
+- **Room schema 5**, with `MIGRATION_4_5` creating `step_minute`,
+  `integrity_day` and `integrity_event`. Nothing existing is touched, and
+  the new tables start empty. Instrumented tests migrate version 2 and
+  version 4 databases with real rows.
+
+### Changed
+
+- `getVerificationSnapshot()` takes an optional second argument and always
+  carries `suspectSteps` and an `integrity` block. Both are `0` and empty,
+  apart from the device hints, with the checks off.
+- `initialize()` now tells a running service when it changed config, so
+  receivers and schedules follow without waiting for a restart. It only
+  does so on a real change, not on every launch.
+
+### Tests
+
+- 36 new JVM tests: the detector against synthetic days, minute
+  attribution, config round-trip and clamping, the payload with integrity
+  data and exclusion, and the emulator heuristic.
+- 8 new instrumented tests, including one that runs the whole layer through
+  the real core, database and Keystore and verifies a signed snapshot
+  against the attested key.
+- 12 new Jest tests for validation, the new methods and the event.
+
 ## [1.4.0] - 2026-09-14
 
 The release for apps that pay for steps. Nothing here changes what a
@@ -582,6 +706,8 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[1.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.5.0
+[1.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.4.0
 [1.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.3.0
 [1.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.2.0
 [1.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.1.0

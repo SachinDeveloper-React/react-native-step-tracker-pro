@@ -28,6 +28,7 @@ object Bridge {
         // This device's own recovered share; a Health Connect winner does not
         // change it, so it is not touched by the resolution overload below.
         putInt("recoveredSteps", snapshot.recoveredSteps)
+        putInt("suspectSteps", snapshot.suspectSteps)
     }
 
     /**
@@ -42,11 +43,14 @@ object Bridge {
         live: StepSnapshot,
         resolution: StepSourceResolver.Resolution
     ): WritableMap = snapshot(live).apply {
-        if (!resolution.usedExternal) {
+        val totals = resolution.totals
+        putInt("suspectSteps", totals.suspectSteps)
+        // Swapped when another source won, and when exclude mode took flagged
+        // steps out of this device's own count.
+        if (!resolution.usedExternal && totals.steps == live.steps) {
             putMap("stepSource", map(resolution.toMap()))
             return@apply
         }
-        val totals = resolution.totals
         putInt("steps", totals.steps)
         putDouble("distance", round(totals.distance, 2))
         putDouble("calories", round(totals.calories, 2))
@@ -79,7 +83,8 @@ object Bridge {
         "state" to snapshot.state.jsValue,
         "source" to snapshot.source.jsValue,
         "timestamp" to snapshot.timestamp,
-        "recoveredSteps" to snapshot.recoveredSteps
+        "recoveredSteps" to snapshot.recoveredSteps,
+        "suspectSteps" to snapshot.suspectSteps
     )
 
     fun snapshotMap(
@@ -97,6 +102,7 @@ object Bridge {
         putBoolean("synced", totals.synced)
         putBoolean("syncedRemote", totals.syncedRemote)
         putInt("recoveredSteps", totals.recoveredSteps)
+        putInt("suspectSteps", totals.suspectSteps)
     }
 
     fun days(list: List<DayTotals>): WritableArray = Arguments.createArray().apply {

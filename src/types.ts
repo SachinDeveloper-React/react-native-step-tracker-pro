@@ -208,6 +208,266 @@ export interface StepTrackerConfig {
    * so the table is bounded by construction.
    */
   motionWindowRetention?: number;
+  /**
+   * Integrity checks for apps that pay for steps. Default disabled. See
+   * {@link FraudDetectionConfig}.
+   */
+  fraudDetection?: FraudDetectionConfig;
+}
+
+/**
+ * Integrity checks: every step this phone counts is bucketed by minute, and a
+ * detector flags the shapes fake steps take - a phone shaken by hand, swung
+ * by a gadget, left on a charger, carried in a car - and totals no person
+ * walks. Events that matter to a verdict (clock changes, reboots, resets,
+ * charging, config changes) are logged next to them.
+ *
+ * **Nothing is removed unless `mode` is `'exclude'`.** Under the default
+ * `'flag'`, every number stays as counted and the findings arrive as
+ * `suspectSteps`, `getIntegrityReport()`, the `suspiciousActivity` event and
+ * the verification snapshot, for a server to weigh. Only strong flags count
+ * towards `suspectSteps`; weak ones are evidence.
+ *
+ * Each numeric threshold turns its check off at `0`. The defaults are
+ * starting points: tune them on your own users' data before you let them cost
+ * anybody anything.
+ */
+export interface FraudDetectionConfig {
+  enabled: boolean;
+  /**
+   * `'flag'` (default) reports suspect steps and changes no number.
+   * `'exclude'` also takes them out of every number this package shows,
+   * syncs to Health Connect or uploads, and out of the device count before
+   * sources are resolved. The raw count is still `deviceSteps`, and the
+   * shown number can go down when a run is flagged after the fact.
+   */
+  mode?: IntegrityMode;
+  /** Minutes with more timed steps than this are flagged. Default 200; 100–400, or 0 for off. */
+  maxCadenceSpm?: number;
+  /**
+   * This many minutes in a row whose counts never move by more than one
+   * step minute to minute, with no pause, is flagged as a machine. Default
+   * 30; at least 5, or 0 for off.
+   */
+  steadyCadenceMinutes?: number;
+  /** Walking past this many minutes without a pause flags the excess. Default 180; at least 30, or 0 for off. */
+  maxContinuousMinutes?: number;
+  /** Steps over this in a day are flagged. Default 50000; at least 1000, or 0 for off. */
+  maxDailySteps?: number;
+  /**
+   * Flag steps counted while the phone is plugged in. Default true. A person
+   * walking with a power bank in the same pocket is flagged too, so weigh it
+   * accordingly.
+   */
+  flagWhileCharging?: boolean;
+  /**
+   * Tag steps with Google's Activity Recognition state, flagging steps taken
+   * "in a vehicle" and noting ones taken "still". Default false. Needs the
+   * host app to add `com.google.android.gms:play-services-location`; without
+   * it this does nothing, and `IntegrityReport.activityRecognition.available`
+   * says so. No permission beyond `ACTIVITY_RECOGNITION`.
+   */
+  activityRecognition?: boolean;
+}
+
+export type IntegrityMode = 'flag' | 'exclude';
+
+/**
+ * What a flag says about a stretch of the day.
+ *
+ * - `'cadence'` — minutes faster than people walk or run (strong)
+ * - `'steady_cadence'` — a count that barely moves minute to minute for half
+ *   an hour with no pause: a swing gadget or motor (strong)
+ * - `'continuous'` — walking past `maxContinuousMinutes` without a pause; the
+ *   excess only (strong)
+ * - `'charging'` — steps counted while plugged in (strong)
+ * - `'in_vehicle'` — steps counted while Activity Recognition said in a
+ *   vehicle; strong from three minutes, weak below
+ * - `'activity_still'` — steps counted while it said still (weak)
+ * - `'night'` — half an hour or more of walking starting between midnight and
+ *   5:00 (weak)
+ * - `'shake'` — a motion window fast, hard and tonal like a hand shake (strong)
+ * - `'swing'` — a motion window that is a near-pure tone at walking pace; a
+ *   phone in a backpack can look like this too (weak)
+ * - `'daily_volume'` — the day's count past `maxDailySteps`; the excess only
+ *   (strong)
+ */
+export type IntegrityFlagType =
+  | 'cadence'
+  | 'steady_cadence'
+  | 'continuous'
+  | 'charging'
+  | 'in_vehicle'
+  | 'activity_still'
+  | 'night'
+  | 'shake'
+  | 'swing'
+  | 'daily_volume';
+
+export interface IntegrityFlag {
+  type: IntegrityFlagType;
+  /** Only `'strong'` flags count towards `suspectSteps` and are excluded. */
+  severity: 'strong' | 'weak';
+  /** Epoch ms, inclusive. */
+  from: number;
+  /** Epoch ms, exclusive. */
+  to: number;
+  /** Steps this flag covers. Flags can overlap, so these do not sum to `suspectSteps`. */
+  steps: number;
+  /** The numbers behind the verdict: peak cadence, minutes, window features. */
+  evidence: Record<string, unknown>;
+}
+
+export type IntegrityEventType =
+  | 'clock_changed'
+  | 'timezone_changed'
+  | 'reboot'
+  | 'reset_today'
+  | 'history_cleared'
+  | 'config_changed'
+  | 'sensor_changed'
+  | 'charging_started'
+  | 'charging_stopped'
+  | 'activity_changed'
+  | 'service_recovered'
+  | 'device_attested';
+
+export interface IntegrityEvent {
+  /** Epoch ms. */
+  at: number;
+  type: IntegrityEventType;
+  /** e.g. `{ jumpMs }` for a clock change, `{ keys }` for a config change, `{ reason }` for a recovery. */
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Cheap hints about the device. Each can be faked on a rooted phone; they
+ * explain a verdict, and `attestDevice()` is the check a server can trust.
+ */
+export interface DeviceIntegritySignals {
+  emulator: boolean;
+  testKeysBuild: boolean;
+  suBinary: boolean;
+  adbEnabled: boolean;
+  developerOptions: boolean;
+  appDebuggable: boolean;
+  /** The hardware step counter as the OS names it, or null when there is none. */
+  stepCounter: { name: string; vendor: string; version: number; wakeUp: boolean } | null;
+}
+
+/** Everything the integrity checks know about one day. */
+export interface IntegrityReport {
+  date: string;
+  enabled: boolean;
+  mode: IntegrityMode;
+  /** This phone's own count for the day, before any exclusion. */
+  deviceSteps: number;
+  /** Strong flags' minutes plus any excess over `maxDailySteps`. 0 when disabled. */
+  suspectSteps: number;
+  flags: IntegrityFlag[];
+  events: IntegrityEvent[];
+  /** Totals of the day's per-minute buckets. */
+  minutes: {
+    count: number;
+    timedSteps: number;
+    untimedSteps: number;
+    chargingSteps: number;
+    stillSteps: number;
+    vehicleSteps: number;
+  };
+  /** Epoch ms of the verdict; today is judged afresh on every read. 0 when never. */
+  evaluatedAt: number;
+  /** The thresholds in force, after clamping. */
+  rules: {
+    maxCadenceSpm: number;
+    steadyCadenceMinutes: number;
+    maxContinuousMinutes: number;
+    maxDailySteps: number;
+    flagWhileCharging: boolean;
+  };
+  /** Plugged in right now; always false for a past day. */
+  charging: boolean;
+  activityRecognition: {
+    requested: boolean;
+    /** The host app ships Play Services' location library. */
+    available: boolean;
+    current: 'unknown' | 'still' | 'walking' | 'running' | 'on_bicycle' | 'in_vehicle';
+  };
+  device: DeviceIntegritySignals;
+}
+
+/** One minute of this phone's own steps. Only minutes with steps are listed. */
+export interface StepMinute {
+  /** Epoch ms of the minute's start. */
+  minuteStart: number;
+  /** Steps whose timing is known to within the minute. */
+  steps: number;
+  /**
+   * Steps that arrived in one lump after a silence — a sensor batch that
+   * overflowed, or a dead process — parked at the minute they arrived in.
+   */
+  untimedSteps: number;
+  chargingSteps: number;
+  stillSteps: number;
+  vehicleSteps: number;
+}
+
+/**
+ * A Keystore key bound to the server's challenge. Verify `certificateChain`
+ * up to Google's hardware attestation root, check the challenge in the leaf's
+ * attestation extension along with the verified boot state, then store
+ * `publicKey` against the install.
+ */
+export interface DeviceAttestation {
+  /** Hex SHA-256 of `publicKey`; every signature names it. */
+  keyId: string;
+  algorithm: 'SHA256withECDSA';
+  /** Base64 X.509 SubjectPublicKeyInfo. */
+  publicKey: string;
+  /** Base64 DER certificates, leaf first. */
+  certificateChain: string[];
+  /** False when the device refused attestation and an unattested key was made instead. */
+  attested: boolean;
+  securityLevel: 'strongbox' | 'tee' | 'software' | 'unknown';
+  /** Epoch ms the key was generated. */
+  createdAt: number;
+}
+
+export interface VerificationSnapshotOptions {
+  /**
+   * Sign the snapshot with the install's Keystore key (made by
+   * `attestDevice()`, or an unattested one on first use). Default false.
+   */
+  sign?: boolean;
+  /** A server-issued value echoed inside the signed payload, so it cannot be replayed. */
+  nonce?: string;
+}
+
+/**
+ * Present when the snapshot was signed. Verify `value` over the UTF-8 bytes
+ * of `signedPayload` with the key named by `keyId`, then parse
+ * `signedPayload` and trust that - not the unsigned fields around it.
+ */
+export interface SnapshotSignature {
+  keyId: string;
+  algorithm: 'SHA256withECDSA';
+  /** Base64 DER ECDSA signature. */
+  value: string;
+  attested: boolean;
+  /** The exact JSON that was signed: this snapshot minus `signature`. */
+  signedPayload: string;
+  /** Hex SHA-256 of `signedPayload`, for Play Integrity's `requestHash`. */
+  payloadSha256: string;
+}
+
+/** Fired when the integrity checks find something new for a day. */
+export interface SuspiciousActivityEvent {
+  date: string;
+  /** Only the flags not reported for this day before. */
+  flags: IntegrityFlag[];
+  deviceSteps: number;
+  suspectSteps: number;
+  mode: IntegrityMode;
 }
 
 /**
@@ -314,6 +574,12 @@ export interface StepSnapshot {
    * unchanged when a Health Connect source supplied `steps`.
    */
   recoveredSteps: number;
+  /**
+   * Of this device's count for the day, how many the integrity checks
+   * flagged. `0` unless `fraudDetection.enabled`. Already taken out of
+   * `steps` under `fraudDetection.mode: 'exclude'`.
+   */
+  suspectSteps: number;
   /** Which source the numbers above came from. */
   stepSource: ResolvedStepSource;
 }
@@ -338,6 +604,14 @@ export interface DayRecord {
    * this device's figure; Health Connect never contributes to it.
    */
   recoveredSteps: number;
+  /**
+   * Of this device's own count for the day, how many the integrity checks
+   * flagged: strong flags' minutes plus any excess over `maxDailySteps`. `0`
+   * unless `fraudDetection.enabled`. On a resolved record under
+   * `fraudDetection.mode: 'exclude'` they are already out of `steps`; on
+   * `getHistory()` rows, which are stored counts, they are still in.
+   */
+  suspectSteps: number;
   /**
    * Which source the numbers came from. Absent on records returned by
    * `getHistory()`, which reports the on-device rows verbatim.
@@ -420,6 +694,16 @@ export interface VerificationSnapshot {
     timezone: string;
     utcOffsetMinutes: number;
   };
+  /** Of `deviceSteps`, what the integrity checks flagged. `0` unless enabled. */
+  suspectSteps: number;
+  /** The flags, events, minute totals and device hints behind `suspectSteps`. */
+  integrity: IntegrityReport;
+  /** Echoed from `options.nonce`. */
+  nonce?: string;
+  /** Epoch ms the snapshot was signed; only on a signed snapshot. */
+  signedAt?: number;
+  /** Only when `options.sign`. */
+  signature?: SnapshotSignature;
 }
 
 export interface RangeOptions {
@@ -626,6 +910,14 @@ export interface StepSource {
   unknownMethodSteps: number;
   /** The full split of `steps` by recording method. `null` when not computed. */
   recordingMethods: RecordingMethodBreakdown | null;
+  /**
+   * Of `steps`, how many came from records the writing app last modified
+   * more than a day after they ended — a history pushed in after the fact,
+   * or a companion app that synced very late. Evidence, never subtracted:
+   * a watch out of range for two days writes late too. `-1` when not
+   * computed (aggregate reads over 35 days).
+   */
+  lateWrittenSteps: number;
 }
 
 /** The outcome of picking a source for one day. */
@@ -660,6 +952,12 @@ export interface ResolvedStepSource {
    * hand were not counted" instead of leaving the difference unexplained.
    */
   manualStepsExcluded: number;
+  /**
+   * Flagged steps taken out of this device's count before it competed,
+   * under `fraudDetection.mode: 'exclude'`. `0` otherwise. `deviceSteps` is
+   * the count after the exclusion.
+   */
+  suspectStepsExcluded: number;
 }
 
 export interface CurrentStepSource extends ResolvedStepSource {
@@ -840,6 +1138,8 @@ export interface StepTrackerEventMap {
   historyBackfilled: HistoryBackfilledEvent;
   /** One motion signature window was stored. See {@link MotionWindow}. */
   motionWindow: MotionWindow;
+  /** The integrity checks found something new. See {@link SuspiciousActivityEvent}. */
+  suspiciousActivity: SuspiciousActivityEvent;
   syncCompleted: SyncEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;

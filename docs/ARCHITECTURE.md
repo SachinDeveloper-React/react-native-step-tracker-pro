@@ -17,8 +17,12 @@
  ┌───────▼──────┐ ┌─────▼──────┐ ┌─────▼───────┐ ┌─────▼─────────┐
  │ StepCounter  │ │StepRepo/   │ │HealthConnect│ │  StepEventBus │
  │   Engine     │ │  Room      │ │   Manager   │ │               │
- └───────▲──────┘ └────────────┘ └─────────────┘ └───────────────┘
-         │
+ └───────▲──────┘ └─────▲──────┘ └─────────────┘ └───────────────┘
+         │ onObserved   │
+         │       ┌──────┴────────────┐   ┌───────────────────┐
+         │       │ IntegrityMonitor  │◄──│ IntegritySignals  │ charging, clock,
+         │       │ timeline, detector│   │ (in the service)  │ Activity Recognition
+         │       └───────────────────┘   └───────────────────┘
  ┌───────┴────────────────┐        ┌──────────────┐
  │  StepTrackerService    │◄───────│ BootReceiver │
  │  (foreground, health)  │        └──────────────┘
@@ -260,9 +264,88 @@ transaction, and out on `motionWindow`. JVM tests feed synthetic walking at
 1.8 Hz and shaking at 4 Hz and assert the two separate on frequency,
 variance, crossing rate and purity, at 20 and 50 Hz alike.
 
+### Integrity checks
+
+Opt-in (`fraudDetection.enabled`). Four parts, each small, and none of them
+ever changes a count.
+
+**Minute buckets.** The engine reports every delta it *watched* — never one
+gap recovery credited in one go, never a paused one — through
+`onObserved(from, to, steps)`, where `from` and `to` are the previous and
+current samples' event times. `MinuteAttribution` places it: a delta after up
+to a minute of silence is split across the minutes it overlaps, in
+proportion, with cumulative rounding so the shares always sum back; a few
+steps after a longer silence are a walk starting and belong to the arrival
+minute; more than 20 after a longer silence is a lump — a hub FIFO that
+overflowed with the screen off, or the first sample after a dead process —
+and is parked as `untimedSteps` at the arrival minute. A lump is never spread
+across its gap: that would fabricate a perfectly steady cadence for the
+detector to find. Each share is tagged with whether the phone was charging
+and what Activity Recognition last said. `StepTimeline` holds the increments
+in memory, bounded, until the write lane drains them into `step_minute` on
+the next commit, where they are added to what each minute already holds.
+
+**The detector.** `FraudDetector.evaluate(minutes, windows, rules, zone)` is
+pure and JVM-tested with synthetic days. It flags minutes over the cadence
+cap; unbroken runs of active minutes (40+ timed steps, nothing untimed) whose
+count never moves by more than one step minute to minute for
+`steadyCadenceMinutes`; the excess of runs past `maxContinuousMinutes`;
+charging and vehicle tags grouped into runs; long walks starting in the small
+hours; and motion windows that read as a hand shake (3.3 Hz or faster,
+variance over 20, `peakRatio` at least 0.25 — the purity floor keeps a
+runner's harmonics out) or a swing (a near-pure tone between 0.8 and 2.6 Hz).
+`peakRatio` tops out near 0.5 for a pure tone at the sampler's 0.05 Hz bins
+over a 10-second window, and a smooth synthetic walk reads 0.46, so `swing`
+is weak — evidence, not a verdict. The union of the strong flags' minutes,
+each counted once, is the day's `flaggedSteps`; `suspectSteps` adds whatever
+the rest of the device count exceeds `maxDailySteps` by, computed at read
+time so a backfill that grows a day is judged against its new total.
+
+**Evaluation.** `IntegrityMonitor` re-judges today at most once a minute —
+from the sensor path while steps arrive and from the service heartbeat after
+they stop — on the write lane, after flushing, so a verdict always sees every
+minute flushed before it. The verdict is stored in `integrity_day`, replaced
+whole, and any flag not in the previous verdict is announced on
+`suspiciousActivity`, so an event fires once per flag across process
+restarts. A closing day gets a final verdict at rollover. Today's flagged
+total is also held in memory for the paths that cannot suspend — the sensor
+callback and the notification.
+
+**Exclude mode.** `mode: 'exclude'` takes `suspectSteps` out of this
+device's `DayTotals` *before* the resolver sees them, in `resolveDay`,
+`resolveFromCache` and `resolvedStats`, and in what goes to Health Connect
+and the remote endpoint. Doing it at the resolver's input rather than its
+output keeps every policy, pin and continuity baseline working on one
+consistent device count; a watch can still win the day. A change of mode
+clears the continuity baseline, like a policy change. The engine's own count,
+`step_history` and `deviceSteps` stay raw.
+
+**Signals and the log.** While the service runs with the checks on,
+`IntegritySignals` holds dynamic, unexported receivers for power
+connected/disconnected (the sticky battery broadcast seeds the state), clock
+and zone changes (the jump is measured as the boot id's move, since a clock
+edit moves the wall clock and not uptime), and — when the host app ships
+`play-services-location` — Activity Recognition transitions through an
+explicit mutable `PendingIntent` to an unexported receiver. Play Services is
+compile-only: `ActivityRecognitionBridge` probes for the class before any
+reference to it runs, and consumer ProGuard rules keep R8's missing-class
+check quiet for apps without it. Reboots are logged by `BootReceiver`,
+resets, clears and config changes by the core, sensor changes and recoveries
+by the service. The log lives in `integrity_event`, bounded to 2,000 rows and
+to retention, and survives `clearHistory()`.
+
+**Attestation and signing.** `DeviceAttestation` keeps one EC P-256 key in
+the Android Keystore under a fixed alias. `attestDevice(challenge)` replaces
+it with one generated with `setAttestationChallenge`, falling back to an
+unattested key on hardware that refuses, and returns the certificate chain
+for a server to verify. A signed snapshot is serialised once to JSON, signed
+with `SHA256withECDSA`, and returned with that exact text as
+`signedPayload`, so the server verifies bytes it did not have to rebuild.
+Remote uploads are signed over the exact body bytes once a key exists.
+
 ## Storage
 
-Three Room tables:
+Six Room tables:
 
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
@@ -275,6 +358,19 @@ Three Room tables:
   `sampleCount`, `dominantFrequencyHz`, `variance`, `zeroCrossingRate`,
   `peakRatio`, `stepsDuringWindow` (schema version 4). Bounded to
   `motionWindowRetention` rows by the insert transaction.
+- `step_minute` — `minuteStart` (PK), `date` (indexed), `steps`,
+  `untimedSteps`, `chargingSteps`, `stillSteps`, `vehicleSteps` (schema
+  version 5). Only minutes with steps; increments are added to a row, never
+  replace it, in a read-then-write transaction because API 26's SQLite
+  predates `ON CONFLICT DO UPDATE`. Pruned at `historyRetentionDays`.
+- `integrity_day` — `date` (PK), `flaggedSteps`, `flagsJson`, `evaluatedAt`
+  (schema version 5). The detector's last verdict per day, replaced whole.
+- `integrity_event` — `id`, `at` (indexed), `date`, `type`, `detailJson`
+  (schema version 5). Bounded to 2,000 rows and to retention; kept by
+  `clearHistory()`.
+
+`MIGRATION_4_5` creates the three integrity tables and touches nothing else;
+they start empty rather than being back-filled from history nobody timed.
 
 `saveDay()` refuses to lower an existing day's count. A re-anchored counter can
 briefly report fewer steps than were already committed; ignoring that write is
@@ -359,6 +455,8 @@ listening, it keeps writing to storage either way.
 `stepsChanged` is throttled by `eventThrottleMs`. `goalProgressChanged` fires
 only when the whole-percent bucket moves. `goalReached` is keyed on the period's
 start date, so it fires once per day/week/month and rearms by itself.
+`suspiciousActivity` fires once per flag, keyed on the flag's type and start,
+compared against the day's stored verdict.
 
 ## Sync
 

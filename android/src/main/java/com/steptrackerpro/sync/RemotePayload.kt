@@ -37,11 +37,38 @@ object RemotePayload {
      */
     class DayDetail(
         val stepSource: Map<String, Any?>,
-        val sources: List<Map<String, Any?>>
+        val sources: List<Map<String, Any?>>,
+        /**
+         * The day's integrity report, when `fraudDetection.enabled`. Its
+         * presence is what adds `suspectSteps` and `integrity` to a `full`
+         * record; without it the record is exactly the 1.4 shape.
+         */
+        val integrity: Map<String, Any?>? = null
     )
 
     /** The header carrying [idempotencyKey]. */
     const val IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+    /**
+     * The header carrying a signature over the exact body bytes, sent when
+     * the install has a Keystore key (see `attestDevice()`). A server checks
+     * it against the public key it stored when it accepted the attestation.
+     */
+    const val SIGNATURE_HEADER = "Step-Tracker-Signature"
+
+    /** `keyId=<hex>;alg=SHA256withECDSA;sig=<base64>`, the [SIGNATURE_HEADER] value. */
+    fun signatureHeader(keyId: String, algorithm: String, signature: String): String =
+        "keyId=$keyId;alg=$algorithm;sig=$signature"
+
+    /**
+     * The step count a record is sent with: this device's count, less the
+     * day's suspect steps when exclude mode is on.
+     */
+    fun sentSteps(record: DayTotals, suspects: Map<String, Int>, excludeSuspect: Boolean): Int {
+        if (!excludeSuspect) return record.steps
+        val suspect = (suspects[record.date] ?: 0).coerceIn(0, record.steps.coerceAtLeast(0))
+        return record.steps - suspect
+    }
 
     /**
      * A stable digest of what the batch says: the package, and every record's
@@ -73,7 +100,11 @@ object RemotePayload {
         records: List<DayTotals>,
         shape: Shape,
         sentAt: Long,
-        details: Map<String, DayDetail> = emptyMap()
+        details: Map<String, DayDetail> = emptyMap(),
+        /** Each day's suspect steps; empty when detection is off. */
+        suspects: Map<String, Int> = emptyMap(),
+        /** Take them out of `steps`, as `fraudDetection.mode: 'exclude'` does everywhere. */
+        excludeSuspect: Boolean = false
     ): JSONObject = JSONObject().apply {
         put("source", "react-native-step-tracker-pro")
         put("sentAt", sentAt)
@@ -81,12 +112,21 @@ object RemotePayload {
             "records",
             JSONArray().apply {
                 records.forEach { record ->
+                    val sent = sentSteps(record, suspects, excludeSuspect)
+                    // Distance and calories are proportional to steps, so
+                    // they scale down with an exclusion rather than being
+                    // re-derived from a stride this object does not know.
+                    val scale = if (record.steps > 0 && sent != record.steps) {
+                        sent.toDouble() / record.steps
+                    } else {
+                        1.0
+                    }
                     put(
                         JSONObject().apply {
                             put("date", record.date)
-                            put("steps", record.steps)
-                            put("distance", record.distance)
-                            put("calories", record.calories)
+                            put("steps", sent)
+                            put("distance", record.distance * scale)
+                            put("calories", record.calories * scale)
                             if (shape == Shape.FULL) {
                                 // The stored row is this device's own count,
                                 // whatever the policy showed the user.
@@ -102,6 +142,10 @@ object RemotePayload {
                                         detail?.sources?.forEach { put(JSONObject(it)) }
                                     }
                                 )
+                                detail?.integrity?.let { report ->
+                                    put("suspectSteps", suspects[record.date] ?: 0)
+                                    put("integrity", JSONObject(report))
+                                }
                             }
                         }
                     )
@@ -122,6 +166,7 @@ object RemotePayload {
         "usedExternal" to false,
         "merged" to false,
         "baselineSteps" to 0,
-        "manualStepsExcluded" to 0
+        "manualStepsExcluded" to 0,
+        "suspectStepsExcluded" to 0
     )
 }

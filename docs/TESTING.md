@@ -45,15 +45,23 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer (54 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload (92 tests, no device)
-npm run test:android:device   # instrumented engine and Room migration tests
+npm test                 # Jest, JS layer (66 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute attribution, integrity config (128 tests, no device)
+npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
+The JVM suite pins the fraud detector with synthetic days: an ordinary walk,
+a treadmill session and a run raise nothing; a swing gadget's metronomic
+count, minutes faster than anyone walks, a charger, a car ride and a hand
+shake are each flagged; lumps of untimed steps are never judged for
+cadence; and the daily cap takes only the excess.
+
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Thirty-one cases: twenty-nine drive the engine, two build the Room
-database as version 2 from the exported schema, migrate real rows to the
-current version and check every one survived. Among them:
+sensor. Thirty-nine cases: thirty-three drive the engine, three build the
+Room database as an older version from the exported schema, migrate real
+rows to the current version and check every one survived, and three run the
+integrity layer end to end through the real core, database and Keystore.
+Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -74,6 +82,11 @@ current version and check every one survived. Among them:
 | `resetTodayClearsTotalButKeepsCountingAfterwards` | QA reset replays the old count |
 | `metricsDeriveStrideFromHeightWhenNotOverridden` | distance/calories maths |
 | `calendarWeekIsMondayAnchoredAndSevenDaysLong` | weekly stats window |
+| `observedDeltasCarryTheSpanTheyWereTakenIn` | minute buckets land on the wrong minutes |
+| `stepsCreditedByRecoveryAreNotObserved` | a recovered lump is judged as if it were walked in one minute |
+| `migrate4To5KeepsMotionWindowsAndAddsTheIntegrityTables` | upgrading to 1.5 loses motion windows or history |
+| `aSwingGadgetIsFlaggedExcludedLoggedAndSigned` | the detector, exclude mode, the event log or snapshot signing is broken end to end |
+| `withoutPlayServicesActivityRecognitionIsUnavailableNotACrash` | an app without Play Services crashes, or believes it has Activity Recognition |
 
 Run one case:
 
@@ -268,6 +281,27 @@ Set `dailyGoal: 20` temporarily.
 - [ ] `goalReached` fires once, not on every step after the goal
 - [ ] killing and relaunching the app does not re-fire it for the same day
 
+### Integrity checks
+
+Turn on `fraudDetection: { enabled: true }` and `motionSampling: { enabled: true,
+intervalMinutes: 1 }`, then read `getIntegrityReport(today)` after each step.
+
+```sh
+# pretend a charger is plugged in, and undo it
+adb shell dumpsys battery set ac 1
+adb shell dumpsys battery reset
+```
+
+- [ ] walk 5 minutes normally: `suspectSteps` is 0, no strong flag
+- [ ] shake the phone hard in your hand for 2 minutes: a `cadence` flag, and with a motion window open a `shake` flag
+- [ ] walk 3 minutes with `dumpsys battery set ac 1`: a `charging` flag covering those steps, `charging_started` in `events`
+- [ ] with a swing gadget, or the phone on a pendulum, for 40 minutes: a `steady_cadence` flag
+- [ ] change the clock in Settings by an hour: a `clock_changed` event with `jumpMs` near ±3,600,000
+- [ ] `resetToday()`: a `reset_today` event, today's minutes gone
+- [ ] switch to `mode: 'exclude'`: the notification and `getTodaySteps()` drop by `suspectSteps`; `getHistory()` still shows the raw count
+- [ ] `attestDevice('test-challenge')` returns a chain; `getVerificationSnapshot(today, { sign: true, nonce: 'n' })` carries a `signature` that verifies against its `publicKey`
+- [ ] with `play-services-location` in the app and `activityRecognition: true`, 10 minutes as a car passenger: an `in_vehicle` flag
+
 ### Retention
 
 Set `historyRetentionDays: 2`, then `pruneHistory()`.
@@ -297,7 +331,8 @@ adb logcat -s StepTrackerService:V StepTrackerBoot:V
 ```
 
 For the Room tables use Android Studio → **View → Tool Windows → App
-Inspection → Database Inspector**. It reads a live database, which is far less
+Inspection → Database Inspector**. `step_minute`, `integrity_day` and
+`integrity_event` hold the integrity checks' minutes, verdicts and log. It reads a live database, which is far less
 painful than pulling the file.
 
 Reading `StepTrackerProState.xml`:

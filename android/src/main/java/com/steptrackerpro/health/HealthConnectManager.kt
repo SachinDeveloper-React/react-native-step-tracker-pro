@@ -317,6 +317,10 @@ class HealthConnectManager(
             // indistinguishable from a sensor's count without this split.
             val bucket = RecordingMethods.bucketOf(record.metadata.recordingMethod)
             acc.methods[bucket] += count
+            // Written long after the steps it describes. Evidence only.
+            if (record.metadata.lastModifiedTime.toEpochMilli() - recordEnd > LATE_WRITE_MS) {
+                acc.lateSteps += count
+            }
             if (date == coverageDate) {
                 // The part of this record that predates our coverage. A record
                 // straddling the instant is split by time; step records are
@@ -428,6 +432,7 @@ class HealthConnectManager(
             acc.steps += source.steps
             acc.distance += source.distance
             acc.calories += source.calories
+            if (source.lateWrittenSteps >= 0) acc.lateSteps += source.lateWrittenSteps
             // The method split is only as good as its worst day: one day
             // answered from the aggregate API has no split, and a partial sum
             // presented as the range's manual total would understate it.
@@ -497,6 +502,8 @@ class HealthConnectManager(
         val methods = IntArray(4)
         /** Manual-entry steps that fell before coverage; a subset of [stepsBefore]. */
         var manualBefore: Int = 0
+        /** Steps from records modified more than [LATE_WRITE_MS] after they ended. */
+        var lateSteps: Int = 0
         /**
          * False once any part of the total came from a read that carries no
          * per-record metadata (the aggregate path), at which point no split
@@ -535,7 +542,9 @@ class HealthConnectManager(
                     manualBefore.coerceIn(0, split.manual)
                 } else {
                     -1
-                }
+                },
+                // Known exactly when the per-record metadata was, like the method split.
+                lateWrittenSteps = if (methodsKnown) lateSteps.coerceIn(0, steps) else -1
             )
         }
     }
@@ -677,6 +686,9 @@ class HealthConnectManager(
 
         /** How long a granted-permissions answer is reused. */
         private const val GRANT_CACHE_MS = 5_000L
+
+        /** A record last modified this long after it ended counts as written late. */
+        const val LATE_WRITE_MS = 24L * 60 * 60 * 1000
 
         val READ_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),

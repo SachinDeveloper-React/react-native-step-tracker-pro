@@ -63,7 +63,8 @@ class StepDatabaseMigrationTest {
         // Run to the current version so the chain is what a 1.3 install
         // will actually go through.
         val db = helper.runMigrationsAndValidate(
-            NAME, StepDatabase.VERSION, true, StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4
+            NAME, StepDatabase.VERSION, true,
+            StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4, StepDatabase.MIGRATION_4_5
         )
 
         db.query("SELECT date, totalSteps, recoveredSteps FROM daily_summary ORDER BY date").use { cursor ->
@@ -86,6 +87,40 @@ class StepDatabaseMigrationTest {
         db.query("SELECT COUNT(*) FROM motion_window").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals(0, cursor.getInt(0))
+        }
+        // So do the integrity tables: no minute is back-filled from history nobody timed.
+        for (table in listOf("step_minute", "integrity_day", "integrity_event")) {
+            db.query("SELECT COUNT(*) FROM $table").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+            }
+        }
+        db.close()
+    }
+
+    @Test
+    fun migrate4To5KeepsMotionWindowsAndAddsTheIntegrityTables() {
+        // Version 4 as it shipped in 1.4.0.
+        helper.createDatabase(NAME, 4).apply {
+            execSQL(
+                "INSERT INTO daily_summary (date, totalSteps, totalDistance, totalCalories, recoveredSteps, updatedAt) " +
+                    "VALUES ('2026-09-14', 9000, 6500.0, 280.0, 400, 1)"
+            )
+            execSQL(
+                "INSERT INTO motion_window (date, startedAt, durationMs, sampleCount, dominantFrequencyHz, " +
+                    "variance, zeroCrossingRate, peakRatio, stepsDuringWindow) " +
+                    "VALUES ('2026-09-14', 1000, 10000, 250, 1.8, 2.0, 3.6, 0.4, 18)"
+            )
+            close()
+        }
+        val db = helper.runMigrationsAndValidate(NAME, 5, true, StepDatabase.MIGRATION_4_5)
+        db.query("SELECT recoveredSteps FROM daily_summary").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(400, cursor.getInt(0))
+        }
+        db.query("SELECT COUNT(*) FROM motion_window").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(1, cursor.getInt(0))
         }
         db.close()
     }
@@ -131,6 +166,24 @@ class StepDatabaseMigrationTest {
             dao.pruneToNewest(3)
             assertEquals(3, dao.count())
             assertEquals(listOf(1_002L, 1_003L, 1_004L), dao.findRange(0L, 2_000L).map { it.startedAt })
+
+            // Minute increments add up across flushes rather than replacing.
+            val minutes = room.stepMinuteDao()
+            val row = StepMinuteEntity(60_000L, "2026-09-03", 50, 0, 10, 0, 0)
+            minutes.addAll(listOf(row))
+            minutes.addAll(listOf(row.copy(steps = 30, untimedSteps = 5, chargingSteps = 0)))
+            val stored = minutes.findRange("2026-09-03", "2026-09-03").single()
+            assertEquals(80, stored.steps)
+            assertEquals(5, stored.untimedSteps)
+            assertEquals(10, stored.chargingSteps)
+
+            // The event log trims to its bound, newest kept.
+            val integrity = room.integrityDao()
+            repeat(5) { i ->
+                integrity.insertEvent(IntegrityEventEntity(at = 10L + i, date = "2026-09-03", type = "reboot", detailJson = "{}"))
+            }
+            integrity.pruneEventsToNewest(2)
+            assertEquals(listOf(13L, 14L), integrity.findEvents(0L, 100L).map { it.at })
         } finally {
             room.close()
         }

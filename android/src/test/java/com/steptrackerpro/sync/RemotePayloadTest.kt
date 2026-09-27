@@ -132,4 +132,64 @@ class RemotePayloadTest {
         assertEquals(8_000, first.getJSONObject("stepSource").getInt("deviceSteps"))
         assertEquals(0, first.getInt("recoveredSteps"))
     }
+
+    @Test
+    fun `a full record gains suspectSteps and integrity only when a report is attached`() {
+        val report = mapOf(
+            "enabled" to true,
+            "suspectSteps" to 900,
+            "flags" to listOf(mapOf("type" to "steady_cadence", "severity" to "strong", "steps" to 900))
+        )
+        val body = RemotePayload.body(
+            batch, RemotePayload.Shape.FULL, 1L,
+            mapOf("2026-09-13" to RemotePayload.DayDetail(emptyMap(), emptyList(), report)),
+            suspects = mapOf("2026-09-13" to 900)
+        )
+        val records = body.getJSONArray("records")
+        // No report, no new keys: the 1.4 full shape exactly.
+        assertFalse(records.getJSONObject(0).has("integrity"))
+        assertFalse(records.getJSONObject(0).has("suspectSteps"))
+        val second = records.getJSONObject(1)
+        assertEquals(900, second.getInt("suspectSteps"))
+        assertEquals(
+            "steady_cadence",
+            second.getJSONObject("integrity").getJSONArray("flags").getJSONObject(0).getString("type")
+        )
+        // Flag mode: the count is sent as counted.
+        assertEquals(11_204, second.getInt("steps"))
+        assertEquals(11_204, second.getInt("deviceSteps"))
+    }
+
+    @Test
+    fun `exclude mode sends the count less suspect steps, scaled distance, raw deviceSteps`() {
+        val suspects = mapOf("2026-09-13" to 1_204)
+        val totals = RemotePayload.body(batch, RemotePayload.Shape.TOTALS, 1L, suspects = suspects, excludeSuspect = true)
+        val record = totals.getJSONArray("records").getJSONObject(1)
+        assertEquals(setOf("date", "steps", "distance", "calories"), record.keySet())
+        assertEquals(10_000, record.getInt("steps"))
+        assertEquals(10_000 * 0.7, record.getDouble("distance"), 1e-6)
+        assertEquals(10_000 * 0.03, record.getDouble("calories"), 1e-6)
+        // A day with nothing suspect is untouched.
+        assertEquals(8_000, totals.getJSONArray("records").getJSONObject(0).getInt("steps"))
+
+        val full = RemotePayload.body(batch, RemotePayload.Shape.FULL, 1L, suspects = suspects, excludeSuspect = true)
+            .getJSONArray("records").getJSONObject(1)
+        assertEquals(10_000, full.getInt("steps"))
+        assertEquals(11_204, full.getInt("deviceSteps"))
+
+        // The key follows what is sent, so a growing exclusion is new content.
+        val sent = batch.map { it.copy(steps = RemotePayload.sentSteps(it, suspects, true)) }
+        assertNotEquals(RemotePayload.idempotencyKey(pkg, batch), RemotePayload.idempotencyKey(pkg, sent))
+        // More suspect than steps can never send a negative count.
+        assertEquals(0, RemotePayload.sentSteps(day("2026-09-14", 50), mapOf("2026-09-14" to 80), true))
+        assertEquals(50, RemotePayload.sentSteps(day("2026-09-14", 50), mapOf("2026-09-14" to 80), false))
+    }
+
+    @Test
+    fun `the signature header names the key and the algorithm`() {
+        assertEquals(
+            "keyId=abc;alg=SHA256withECDSA;sig=MEUCIQ==",
+            RemotePayload.signatureHeader("abc", "SHA256withECDSA", "MEUCIQ==")
+        )
+    }
 }

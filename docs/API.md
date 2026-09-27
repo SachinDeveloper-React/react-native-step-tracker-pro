@@ -112,6 +112,7 @@ climbing is the cue to show the OEM battery guidance; see
   source: 'step_counter',
   timestamp: 1757145600000,
   recoveredSteps: 0,     // of this device's count, credited by gap recovery
+  suspectSteps: 0,       // of this device's count, flagged by the integrity checks
   stepSource: { /* ResolvedStepSource, see Step sources */ }
 }
 ```
@@ -132,7 +133,7 @@ Health Connect round trip.
 
 ```ts
 { date: '2026-09-05', steps: 11204, distance: 7887.6, calories: 336.4, synced: true,
-  syncedRemote: false, recoveredSteps: 200 }
+  syncedRemote: false, recoveredSteps: 200, suspectSteps: 0 }
 ```
 
 `recoveredSteps` is how many of this device's steps for the day were
@@ -143,6 +144,12 @@ An apportionment is an estimate, so a server judging the day wants it
 separately. It grows when a past day is backfilled (`historyBackfilled`), is
 `0` for a day counted live and for every day stored before 1.4.0, and never
 includes anything from Health Connect. Also on `StepSnapshot`.
+
+`suspectSteps` is how many of this device's steps for the day the
+[integrity checks](#integrity-checks) flagged — `0` unless
+`fraudDetection.enabled`. Under `fraudDetection.mode: 'exclude'` a resolved
+record has already had them taken out of `steps`; `getHistory()` rows are
+stored counts and still include them.
 
 ### `getWeeklyStats(options?)` / `getMonthlyStats(options?)` / `getYearlyStats(options?)`
 
@@ -213,8 +220,16 @@ split out.
             batteryOptimizationEnabled: true, aggressiveOem: false },
   clock: { wallClockMs: 1757845200000, bootId: 1757800000000,
            timezone: 'Asia/Kolkata', utcOffsetMinutes: 330 },
+  suspectSteps: 0,            // of deviceSteps, flagged by the integrity checks
+  integrity: { /* IntegrityReport, see Integrity checks */ },
 }
 ```
+
+A second argument, `{ sign?: boolean, nonce?: string }`, signs the snapshot
+with the install's Keystore key and echoes a server-issued nonce inside what
+was signed; the result then carries `nonce`, `signedAt` and a `signature`
+block. See [Integrity checks](#attestdevicechallenge-string-promisedeviceattestation)
+for the key, the attestation and how a server verifies it.
 
 `resolved` is what the current policy chose, for comparison only. `sources`
 follows the same rules as every other Health Connect read — no provider, no
@@ -256,7 +271,11 @@ A server-side rule set that fits this shape:
   to honour it is policy, not arithmetic — `gapRecovery: 'today_capped'`
   or `'drop'` stops it happening at all;
 - use `health.recoveryCount` and `aggressiveOem` to explain a low day, not
-  to inflate one.
+  to inflate one;
+- with the [integrity checks](#integrity-checks) on, take `suspectSteps` off
+  the device count, read `integrity.flags` and `integrity.events` for why,
+  and only trust a snapshot whose `signature` verifies against a key your
+  server accepted from `attestDevice()`.
 
 The built-in uploader sends the same per-source detail with
 `remoteSyncPayload: 'full'` — see [Remote sync](#remote-sync).
@@ -299,6 +318,223 @@ On a phone counting over the accelerometer already, the window listens in on
 the samples that are arriving; nothing extra is registered. A window that saw
 too few samples to say anything is discarded rather than stored.
 
+## Integrity checks
+
+For apps that pay for steps. Off by default; nothing below records anything,
+and every figure it reports is zero, until `fraudDetection.enabled`.
+
+```ts
+await StepTracker.initialize({
+  fraudDetection: {
+    enabled: true,
+    mode: 'flag',              // 'flag' reports only; 'exclude' also takes suspect steps out
+    maxCadenceSpm: 200,        // 0 turns any threshold off
+    steadyCadenceMinutes: 30,
+    maxContinuousMinutes: 180,
+    maxDailySteps: 50000,
+    flagWhileCharging: true,
+    activityRecognition: false, // needs play-services-location in your app
+  },
+  motionSampling: { enabled: true }, // lets the detector tell a shake from a walk
+});
+```
+
+With it on, every step this phone watches being taken is placed on the
+minute it was taken in (`step_minute`), the service notes whether the phone
+is plugged in and when the clock or zone changes, and a detector re-judges
+the day about once a minute from those minutes and the day's motion windows.
+It never changes a count: the verdict is a list of flags with the numbers
+behind them, and `suspectSteps` — the strong flags' minutes, each counted
+once, plus whatever the rest of the day exceeds `maxDailySteps` by.
+
+| Flag | Severity | What it means |
+|---|---|---|
+| `cadence` | strong | a minute with more timed steps than `maxCadenceSpm` — faster than people walk or run; a hand shake |
+| `steady_cadence` | strong | `steadyCadenceMinutes` in a row whose counts never move by more than one step from one minute to the next, with no pause: a swing gadget or motor. A treadmill drifts by more |
+| `continuous` | strong | walking past `maxContinuousMinutes` with no pause; only the excess minutes |
+| `charging` | strong | steps counted while plugged in — gadgets and shakers are usually left on a charger |
+| `in_vehicle` | strong from 3 minutes, weak below | steps counted while Activity Recognition said in a vehicle |
+| `activity_still` | weak | steps counted while Activity Recognition said still |
+| `night` | weak | half an hour or more of walking starting between midnight and 5:00 |
+| `shake` | strong | a motion window at 3.3 Hz or faster, with variance over 20 and a tonal peak |
+| `swing` | weak | a motion window that is a near-pure tone at walking pace; a phone in a backpack can read the same, so it is evidence only |
+| `daily_volume` | strong | the day's count past `maxDailySteps`; only the excess |
+
+Only strong flags count towards `suspectSteps`. The defaults are starting
+points chosen to stay clear of honest walking, running and treadmill sessions;
+tune them on your own users' data before they cost anybody anything. A person
+walking with a power bank plugged in is flagged `charging`, and a marathon
+runs past `maxContinuousMinutes` — which is why the default `mode` is `'flag'`
+and the verdict is meant for a server that weighs several signals together.
+
+**What the timing rules protect.** Steps delivered in one lump after a
+silence — a sensor batch that overflowed with the screen off, or the first
+sample after a dead process — have no known minute. They are stored as
+`untimedSteps` at the minute they arrived in and never judged for cadence,
+steadiness or stamina: spreading them across the gap would invent exactly the
+metronomic count `steady_cadence` looks for. Steps credited by gap recovery
+are not in any minute at all; only the daily cap can reach them.
+
+**`mode: 'exclude'`** also takes `suspectSteps` out of every number this
+package shows or sends: `getTodaySteps()`, `stepsChanged`, the notification,
+goals, stats, the Health Connect mirror and the remote upload. They come out
+of this device's count *before* sources are resolved, so a watch can still
+win. The raw count stays available as `deviceSteps`, every record carries
+`suspectSteps`, and `ResolvedStepSource.suspectStepsExcluded` says how much
+came out. Because a run is judged as it grows, the shown number can go down
+when one is flagged after the fact; `stepsChanged` fires when it does.
+
+### `getIntegrityReport(date: string): Promise<IntegrityReport>`
+
+Everything the checks know about one day. Today is judged afresh on every
+call; a past day reads the verdict stored when it closed.
+
+```ts
+{
+  date: '2026-09-14',
+  enabled: true,
+  mode: 'flag',
+  deviceSteps: 14210,       // this phone's own count, before any exclusion
+  suspectSteps: 3960,
+  flags: [
+    { type: 'steady_cadence', severity: 'strong',
+      from: 1757834400000, to: 1757836560000, steps: 3960,
+      evidence: { minutes: 36, meanSpm: 110, minSpm: 110, maxSpm: 111 } },
+    { type: 'charging', severity: 'strong', from: 1757834400000, to: 1757836560000,
+      steps: 3960, evidence: { minutes: 36 } },
+  ],
+  events: [
+    { at: 1757834390000, type: 'charging_started', detail: {} },
+    { at: 1757840000000, type: 'clock_changed', detail: { jumpMs: -3600000 } },
+  ],
+  minutes: { count: 212, timedSteps: 13900, untimedSteps: 310, chargingSteps: 3960,
+             stillSteps: 0, vehicleSteps: 0 },
+  evaluatedAt: 1757845200000,
+  rules: { maxCadenceSpm: 200, steadyCadenceMinutes: 30, maxContinuousMinutes: 180,
+           maxDailySteps: 50000, flagWhileCharging: true },
+  charging: false,          // right now; false for a past day
+  activityRecognition: { requested: false, available: false, current: 'unknown' },
+  device: { emulator: false, testKeysBuild: false, suBinary: false, adbEnabled: false,
+            developerOptions: true, appDebuggable: false,
+            stepCounter: { name: 'step_counter', vendor: 'Qualcomm', version: 1, wakeUp: false } },
+}
+```
+
+`device` holds cheap hints — each can be faked on a rooted phone — and is
+reported even with the checks off. [`attestDevice()`](#attestdevicechallenge-string-promisedeviceattestation)
+is the check a server can trust.
+
+Events logged while the checks are on: `clock_changed` (`detail.jumpMs`),
+`timezone_changed`, `reboot`, `reset_today`, `history_cleared`,
+`config_changed` (`detail.keys` — the integrity-relevant settings that
+moved, logged even when the change turns the checks off), `sensor_changed`
+(`from`, `to`), `charging_started`, `charging_stopped`, `activity_changed`,
+`service_recovered` (`reason`) and `device_attested` (`keyId`). The log is
+bounded to 2,000 entries and to `historyRetentionDays`, and `clearHistory()`
+keeps it — logging the clear — so wiping history cannot wipe the record that
+it happened.
+
+### `getIntegrityEvents(startDate, endDate): Promise<IntegrityEvent[]>`
+
+The event log between two dates, inclusive, oldest first.
+
+### `getStepMinutes(startDate, endDate): Promise<StepMinute[]>`
+
+This phone's steps minute by minute, oldest first; only minutes with steps.
+
+```ts
+[{ minuteStart: 1757834400000, steps: 110, untimedSteps: 0,
+   chargingSteps: 110, stillSteps: 0, vehicleSteps: 0 }]
+```
+
+Counts only, never samples. Recorded while the checks are on and kept for
+`historyRetentionDays`. Post them with the snapshot if your server wants to
+run its own rules over the day.
+
+### `attestDevice(challenge: string): Promise<DeviceAttestation>`
+
+Generates a fresh EC P-256 key in the Android Keystore, bound to a challenge
+from your server, and returns its hardware attestation. Every signed snapshot
+and every remote upload afterwards is signed with it. Calling it again
+replaces the key.
+
+```ts
+const { challenge } = await api.post('/devices/challenge');
+const attestation = await StepTracker.attestDevice(challenge); // 1–128 bytes of UTF-8
+await api.post('/devices/attest', attestation);
+// { keyId, algorithm: 'SHA256withECDSA', publicKey, certificateChain: [leaf, ..., root],
+//   attested: true, securityLevel: 'tee' | 'strongbox' | 'software' | 'unknown', createdAt }
+```
+
+On the server, verify `certificateChain` up to Google's hardware attestation
+root, check that the leaf's attestation extension carries your challenge,
+your package name and signing certificate, a `verifiedBootState` of
+`Verified` and a locked bootloader, then store `publicKey` against the
+install. A rooted phone, an unlocked bootloader or an emulator fails there,
+on your server, where it cannot be patched out. A device that refuses
+attestation still gets a key, reported with `attested: false`; decide on the
+server what that is worth.
+
+**Signed snapshots.** Pass `{ sign: true, nonce }` to
+[`getVerificationSnapshot`](#getverificationsnapshotdate-string-promiseverificationsnapshot):
+
+```ts
+const { nonce } = await api.post('/steps/nonce');
+const snapshot = await StepTracker.getVerificationSnapshot(date, { sign: true, nonce });
+await api.post('/steps/verify', { userId, snapshot });
+```
+
+`snapshot.signature` is `{ keyId, algorithm, value, attested, signedPayload,
+payloadSha256 }`. Verify `value` (base64 DER ECDSA) over the UTF-8 bytes of
+`signedPayload` with the key stored for `keyId`, check that the parsed
+payload's `nonce` is the one you issued and has not been used, and then
+trust **the parsed `signedPayload`, not the unsigned fields around it**. A
+server never has to re-serialise anything the way the phone did. If you also
+use Play Integrity, pass `payloadSha256` as its `requestHash` and send the
+token alongside; the package itself has no Play Services dependency.
+
+Uploads to `remoteSyncUrl` carry the same kind of signature once a key exists
+— see [Remote sync](#remote-sync).
+
+### Activity Recognition
+
+`activityRecognition: true` tags steps with Google's Activity Recognition
+transitions — still, walking, running, on a bicycle, in a vehicle — so steps
+counted in a car or with the phone still are flagged. It needs Play
+Services, which this package declares compile-only so an app that does not
+want it never ships it. Add it to your app to turn it on:
+
+```gradle
+// android/app/build.gradle
+dependencies {
+  implementation "com.google.android.gms:play-services-location:21.3.0"
+}
+```
+
+No permission is needed beyond the `ACTIVITY_RECOGNITION` the package already
+holds to count steps, and nothing about location is read. Without the
+dependency, or on a phone without Play Services, it does nothing and
+`IntegrityReport.activityRecognition.available` is `false`.
+
+### What this cannot catch
+
+Everything above runs on a phone the user controls. A rooted phone can feed
+the sensor any numbers, hook this code, or edit its database; the checks
+raise the effort for everyone else. Key attestation and signed payloads are
+what move the final decision to your server, and a server rule set that
+fits:
+
+- credit nothing from an install whose attestation failed, or whose
+  snapshots stop verifying;
+- credit `deviceSteps - recoveredSteps - suspectSteps` outright; treat weak
+  flags, `untimedSteps` and recovered steps as lower confidence;
+- never reject on a single weak flag; send days with several flags, or a
+  large `suspectSteps`, to review;
+- look at the events: a `clock_changed` or `reset_today` next to a big day,
+  or `config_changed` turning the checks off, deserves a look;
+- keep your thresholds on the server, so they can change without a release.
+
+
 ---
 
 ## Writes
@@ -306,9 +542,14 @@ too few samples to say anything is discarded rather than stored.
 ### `resetToday(): Promise<boolean>`
 
 Zeroes today's counter and re-arms goal events. History is untouched. Meant for
-QA builds.
+QA builds. With the integrity checks on, today's minute buckets and verdict go
+with the count, and a `reset_today` event is logged.
 
 ### `clearHistory(): Promise<boolean>`
+
+Deletes every stored day, motion window, minute bucket and verdict. The
+integrity event log is kept, and records the clear.
+
 ### `pruneHistory(retentionDays?): Promise<number>`
 
 Deletes rows older than the window and returns how many were removed. Runs
@@ -613,11 +854,18 @@ Every app that published steps over the range, with what each contributed.
       manualSteps: 0,       // of `steps`, typed in by the user; -1 when not computed
       unknownMethodSteps: 0,
       recordingMethods: { active: 0, automatic: 8240, manual: 0, unknown: 0 },
+      lateWrittenSteps: 0,  // of `steps`, from records modified over a day after they ended
     },
   ],
   hasWearable: true,
 }
 ```
+
+`lateWrittenSteps` counts steps from records the writing app last modified
+more than a day after they ended — a history pushed into Health Connect after
+the fact, or a companion app that synced very late. It is evidence for a
+server and is never subtracted: a watch that was out of range for two days
+writes late too. `-1` on days answered through the aggregate API.
 
 `manualSteps`, `unknownMethodSteps` and `recordingMethods` split `steps` by
 Health Connect's `recordingMethod`, which the writing app stamps on every
@@ -670,6 +918,7 @@ Which source is answering for today, and what the alternatives counted.
   merged: false,        // true when steps = external baseline + phone delta ('auto')
   baselineSteps: 0,     // the external lead when the baseline was taken
   manualStepsExcluded: 0, // typed-in steps left out under healthConnectIgnoreManualEntries
+  suspectStepsExcluded: 0, // flagged steps taken out of deviceSteps under fraudDetection 'exclude'
   policy: 'auto',
   preferredPackage: null,
 }
@@ -718,6 +967,12 @@ saying where it came from.
 
 `getHistory()` is the exception: it returns this device's stored rows verbatim,
 because its `synced` / `syncedRemote` flags describe local records.
+
+Under `fraudDetection.mode: 'exclude'`, the flagged steps come out of this
+device's count before any source competes, everywhere above and in the
+Health Connect mirror and remote upload; `suspectStepsExcluded` on the
+resolution says how much. `getHistory()` rows still carry the stored count,
+with `suspectSteps` alongside.
 
 `state` and `source` on a snapshot keep describing **this device's** sensor even
 when the count came from a watch — whether the foreground service is running is
@@ -812,7 +1067,19 @@ server that never trusts a single number needs:
 
 `steps` and `deviceSteps` are the same number — the stored row is always this
 device's own count, whatever the policy showed the user; `stepSource` is what
-it showed. `sources` is read from Health Connect at upload time and is `[]`
+it showed. With `fraudDetection.enabled`, each record also carries
+`suspectSteps` and `integrity` — that day's [integrity report](#getintegrityreportdate-string-promiseintegrityreport)
+without the device hints — and under `fraudDetection.mode: 'exclude'`
+`steps`, `distance` and `calories` are sent with the suspect steps taken out
+(in either shape) while `deviceSteps` stays the raw count. The
+`Idempotency-Key` then follows the steps as sent.
+
+**Signed uploads.** Once `attestDevice()` has made a key, every upload also
+carries a `Step-Tracker-Signature` header:
+`keyId=<hex>;alg=SHA256withECDSA;sig=<base64>`, a signature over the exact
+request body bytes. Verify it with the key you stored for `keyId` before
+reading the body. An install that never called `attestDevice()` uploads
+exactly as before. `sources` is read from Health Connect at upload time and is `[]`
 when reads are not permitted, the provider is missing or `stepSource` is
 `'device'`; `stepSource` is then this device's. Each pending day costs one
 bounded, cached Health Connect read under `'full'`; pending is normally the
@@ -839,6 +1106,7 @@ StepTracker.removeListener();              // everything
 | `stepSourceChanged` | `ResolvedStepSource`. Fires when the app answering for the user's steps flips — a watch coming into range mid-morning, or a pin being changed. |
 | `healthConnectStatusChanged` | `HealthConnectStatus`. Fires after a permission request, a revoke, and on every foreground where the status moved — which is how you notice the user granting or revoking from outside the app. |
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
+| `suspiciousActivity` | `{ date, flags, deviceSteps, suspectSteps, mode }`. The [integrity checks](#integrity-checks) found something they had not reported for this day before; `flags` holds only the new ones. Only with `fraudDetection.enabled`. |
 | `motionWindow` | `MotionWindow`. One motion signature window was stored — see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Features only. |
 | `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it. Once per affected day, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
@@ -895,6 +1163,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `accelerometerThreshold` | `0.9` | m/s² of linear acceleration that counts as a step; raise for vehicle false positives, lower for missed gentle walks |
 | `motionSampling` | `{ enabled: false }` | `{ enabled, windowSeconds?: 10, intervalMinutes?: 5 }` — periodic accelerometer windows reduced to features on device; see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow) |
 | `motionWindowRetention` | 288 | how many motion windows to keep; a day at five-minute intervals |
+| `fraudDetection` | `{ enabled: false }` | `{ enabled, mode?: 'flag' \| 'exclude', maxCadenceSpm?: 200, steadyCadenceMinutes?: 30, maxContinuousMinutes?: 180, maxDailySteps?: 50000, flagWhileCharging?: true, activityRecognition?: false }` — per-minute buckets, the event log and the fraud detector; `0` turns a threshold off. See [Integrity checks](#integrity-checks) |
 
 ---
 
@@ -911,7 +1180,10 @@ const {
 
 Initialises once, subscribes to `stepsChanged` and `trackingStateChanged`, and
 re-reads the snapshot when the app returns to the foreground. Extra options:
-`autoStart` (default false) and `refreshOnForeground` (default true).
+`autoStart` (default false), `refreshOnForeground` (default true), and
+`onSuspiciousActivity`, called with each `suspiciousActivity` event — the
+snapshot is re-read then too, since under `mode: 'exclude'` the number can
+drop without a sensor sample to carry it.
 
 ### `useStepStats(period, options?)`
 

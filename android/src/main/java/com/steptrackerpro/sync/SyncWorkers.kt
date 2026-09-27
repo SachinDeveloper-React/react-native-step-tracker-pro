@@ -6,6 +6,7 @@ import androidx.work.WorkerParameters
 import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.SyncTarget
+import com.steptrackerpro.integrity.DeviceAttestation
 import com.steptrackerpro.util.StepEventBus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +94,8 @@ class RemoteSyncWorker(
         // is bounded too, and a day it did not reach uploads as this device's
         // own with no origins, exactly as a day whose read was not permitted.
         val shape = RemotePayload.Shape.from(config.remoteSyncPayload)
+        // Each day's suspect steps, from stored verdicts - one read for the batch.
+        val suspects = detailOrNull { core.integrity.suspects(pending) } ?: emptyMap()
         val details = HashMap<String, RemotePayload.DayDetail>()
         if (shape == RemotePayload.Shape.FULL) {
             withTimeoutOrNull(DETAIL_TIMEOUT_MS) {
@@ -100,14 +103,21 @@ class RemoteSyncWorker(
                     details[day.date] = RemotePayload.DayDetail(
                         stepSource = detailOrNull { core.resolveDay(day.date).toMap() } ?: emptyMap(),
                         sources = detailOrNull { core.unresolvedSources(day.date).map { it.toMap() } }
-                            ?: emptyList()
+                            ?: emptyList(),
+                        // The device hints are the same for every record and
+                        // travel with verification snapshots instead.
+                        integrity = if (config.fraudDetectionEnabled) {
+                            detailOrNull { core.integrity.report(day.date) - "device" }
+                        } else {
+                            null
+                        }
                     )
                 }
             }
         }
 
         val ok = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-            post(url, config.remoteSyncHeaders, pending, shape, details)
+            post(url, config.remoteSyncHeaders, pending, shape, details, suspects, config.excludeSuspect)
         } ?: false
 
         if (ok) {
@@ -157,11 +167,25 @@ class RemoteSyncWorker(
         headers: Map<String, String>,
         records: List<DayTotals>,
         shape: RemotePayload.Shape,
-        details: Map<String, RemotePayload.DayDetail>
+        details: Map<String, RemotePayload.DayDetail>,
+        suspects: Map<String, Int>,
+        excludeSuspect: Boolean
     ): Boolean = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
-            val body = RemotePayload.body(records, shape, System.currentTimeMillis(), details).toString()
+            val body = RemotePayload.body(
+                records, shape, System.currentTimeMillis(), details, suspects, excludeSuspect
+            ).toString()
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            // Keyed on what is sent, so an exclusion that grows is new content.
+            val sentRecords = records.map { it.copy(steps = RemotePayload.sentSteps(it, suspects, excludeSuspect)) }
+            // Signed only once the app has asked for a key; an install that
+            // never called attestDevice() uploads exactly as before.
+            val signature = if (DeviceAttestation.hasKey()) {
+                runCatching { DeviceAttestation.sign(applicationContext, bytes) }.getOrNull()
+            } else {
+                null
+            }
 
             connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -173,11 +197,19 @@ class RemoteSyncWorker(
                 // name the key itself can still override it.
                 setRequestProperty(
                     RemotePayload.IDEMPOTENCY_HEADER,
-                    RemotePayload.idempotencyKey(applicationContext.packageName, records)
+                    RemotePayload.idempotencyKey(applicationContext.packageName, sentRecords)
                 )
+                signature?.let {
+                    setRequestProperty(
+                        RemotePayload.SIGNATURE_HEADER,
+                        RemotePayload.signatureHeader(
+                            it["keyId"] as String, it["algorithm"] as String, it["value"] as String
+                        )
+                    )
+                }
                 headers.forEach { (key, value) -> setRequestProperty(key, value) }
             }
-            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            connection.outputStream.use { it.write(bytes) }
             val code = connection.responseCode
             if (code !in 200..299) {
                 connection.errorStream?.bufferedReader()?.use(BufferedReader::readText)

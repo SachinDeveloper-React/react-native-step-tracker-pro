@@ -3,8 +3,13 @@ package com.steptrackerpro.db
 import android.content.Context
 import androidx.room.withTransaction
 import com.steptrackerpro.core.DateKeys
+import com.steptrackerpro.core.DayEvaluation
 import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.IntegrityEvent
+import com.steptrackerpro.core.IntegrityFlag
+import com.steptrackerpro.core.JsonMaps
 import com.steptrackerpro.core.MetricsCalculator
+import com.steptrackerpro.core.MinuteSample
 import com.steptrackerpro.core.MotionFeatures
 import com.steptrackerpro.core.RangeStats
 import com.steptrackerpro.core.SyncTarget
@@ -19,6 +24,15 @@ class StepRepository(context: Context) {
     private val history = db.stepHistoryDao()
     private val summaries = db.dailySummaryDao()
     private val motion = db.motionWindowDao()
+    private val minuteRows = db.stepMinuteDao()
+    private val integrity = db.integrityDao()
+
+    /** The detector's stored verdict on one day. */
+    data class StoredEvaluation(
+        val flaggedSteps: Int,
+        val flags: List<IntegrityFlag>,
+        val evaluatedAt: Long
+    )
 
     /**
      * Writes a day, refusing to lower an existing count. Both tables move in one
@@ -154,14 +168,97 @@ class StepRepository(context: Context) {
     suspend fun prune(retentionDays: Int): Int {
         val cutoff = DateKeys.minusDays(DateKeys.today(), retentionDays.coerceAtLeast(1))
         summaries.deleteOlderThan(cutoff)
+        minuteRows.deleteOlderThan(cutoff)
+        integrity.deleteDaysOlderThan(cutoff)
+        integrity.deleteEventsOlderThan(cutoff)
         return history.deleteOlderThan(cutoff)
     }
 
+    /**
+     * Deletes the user's step data. The integrity event log is kept on
+     * purpose - the caller logs the clear itself into it - so a history wipe
+     * cannot also wipe the record that it happened. It holds no steps, and
+     * is bounded by count and by retention like everything else.
+     */
     suspend fun clear() {
         history.deleteAll()
         summaries.deleteAll()
         motion.deleteAll()
+        minuteRows.deleteAll()
+        integrity.deleteAllDays()
     }
+
+    // ---- integrity -----------------------------------------------------------
+
+    /** Adds per-minute increments on top of whatever each minute already holds. */
+    suspend fun addMinutes(samples: List<MinuteSample>) {
+        if (samples.isEmpty()) return
+        minuteRows.addAll(
+            samples.map {
+                StepMinuteEntity(
+                    minuteStart = it.minuteStart,
+                    date = DateKeys.of(it.minuteStart),
+                    steps = it.steps,
+                    untimedSteps = it.untimedSteps,
+                    chargingSteps = it.chargingSteps,
+                    stillSteps = it.stillSteps,
+                    vehicleSteps = it.vehicleSteps
+                )
+            }
+        )
+    }
+
+    /** Minutes with steps on the days between the two keys, inclusive, oldest first. */
+    suspend fun minutes(start: String, end: String): List<MinuteSample> =
+        minuteRows.findRange(start, end).map {
+            MinuteSample(
+                it.minuteStart, it.steps, it.untimedSteps,
+                it.chargingSteps, it.stillSteps, it.vehicleSteps
+            )
+        }
+
+    suspend fun saveEvaluation(date: String, evaluation: DayEvaluation, at: Long) {
+        integrity.putDay(
+            IntegrityDayEntity(
+                date = date,
+                flaggedSteps = evaluation.flaggedSteps,
+                flagsJson = IntegrityFlag.listToJson(evaluation.flags),
+                evaluatedAt = at
+            )
+        )
+    }
+
+    suspend fun evaluation(date: String): StoredEvaluation? =
+        integrity.findDay(date)?.let {
+            StoredEvaluation(it.flaggedSteps, IntegrityFlag.listFromJson(it.flagsJson), it.evaluatedAt)
+        }
+
+    /** Stored strong-flag totals per day; days never evaluated are absent. */
+    suspend fun flaggedSteps(start: String, end: String): Map<String, Int> =
+        integrity.findDays(start, end).associate { it.date to it.flaggedSteps }
+
+    /** Forgets one day's minutes and verdict - `resetToday()` zeroed the count they described. */
+    suspend fun clearIntegrityDay(date: String) = db.withTransaction {
+        minuteRows.deleteDate(date)
+        integrity.deleteDay(date)
+    }
+
+    /** Appends to the event log and trims it to the newest [MAX_EVENTS]. */
+    suspend fun addEvent(event: IntegrityEvent) = db.withTransaction {
+        integrity.insertEvent(
+            IntegrityEventEntity(
+                at = event.at,
+                date = DateKeys.of(event.at),
+                type = event.type,
+                detailJson = JsonMaps.toJson(event.detail)
+            )
+        )
+        integrity.pruneEventsToNewest(MAX_EVENTS)
+    }
+
+    /** Events between the two instants, oldest first. */
+    suspend fun events(fromMs: Long, toMs: Long): List<IntegrityEvent> =
+        integrity.findEvents(fromMs, toMs).map { IntegrityEvent(it.at, it.type, JsonMaps.parse(it.detailJson)) }
 
     // ---- motion windows ----------------------------------------------------
 
@@ -200,6 +297,15 @@ class StepRepository(context: Context) {
                 stepsDuringWindow = it.stepsDuringWindow
             )
         }
+
+    companion object {
+        /**
+         * The event log's hard bound, whatever the retention. A clock that
+         * is being changed in a loop, or a charger cable with a loose
+         * contact, cannot grow the table past this.
+         */
+        const val MAX_EVENTS = 2_000
+    }
 
     private fun StepHistoryEntity.toTotals(summary: DailySummaryEntity?) =
         DayTotals(

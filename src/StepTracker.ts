@@ -8,15 +8,19 @@ import type {
   CompanionApp,
   CurrentStepSource,
   DayRecord,
+  DeviceAttestation,
   DeviceCapabilities,
   EventSubscription,
   HealthConnectStatus,
+  IntegrityEvent,
+  IntegrityReport,
   MotionWindow,
   PermissionStatus,
   RangeOptions,
   RangeStats,
   RequestHealthConnectOptions,
   ResolvedStepSource,
+  StepMinute,
   StepSnapshot,
   StepSourceList,
   StepTrackerConfig,
@@ -26,6 +30,7 @@ import type {
   TrackingHealth,
   TrackingState,
   VerificationSnapshot,
+  VerificationSnapshotOptions,
 } from './types';
 
 const LINKING_ERROR =
@@ -119,6 +124,46 @@ function assertRange(startDate: string, endDate: string): void {
       `startDate (${startDate}) must be on or before endDate (${endDate})`
     );
   }
+}
+
+/** 0 turns a check off; anything else must fall inside the range where it means something. */
+function assertThreshold(
+  name: string,
+  value: number | undefined,
+  min: number,
+  max = Number.POSITIVE_INFINITY
+): void {
+  if (value == null) return;
+  if (value === 0) return;
+  if (!(Number.isInteger(value) && value >= min && value <= max)) {
+    const range = Number.isFinite(max) ? `${min}–${max}` : `>= ${min}`;
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      `fraudDetection.${name} must be 0 (off) or an integer ${range}`
+    );
+  }
+}
+
+function assertFraudDetection(config: StepTrackerConfig): void {
+  const fraud = config.fraudDetection;
+  if (fraud == null) return;
+  if (fraud.mode != null && fraud.mode !== 'flag' && fraud.mode !== 'exclude') {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      "fraudDetection.mode must be 'flag' or 'exclude'"
+    );
+  }
+  // The native side clamps as well - config is rebuilt from persisted JSON
+  // too - but a value it would silently move is a mistake worth reporting.
+  assertThreshold('maxCadenceSpm', fraud.maxCadenceSpm, 100, 400);
+  assertThreshold('steadyCadenceMinutes', fraud.steadyCadenceMinutes, 5, 1440);
+  assertThreshold('maxContinuousMinutes', fraud.maxContinuousMinutes, 30, 1440);
+  assertThreshold('maxDailySteps', fraud.maxDailySteps, 1000);
+}
+
+/** UTF-8 byte length without TextEncoder, which older Hermes builds lack. */
+function utf8Length(value: string): number {
+  return encodeURIComponent(value).replace(/%[0-9A-F]{2}/gi, 'x').length;
 }
 
 function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
@@ -215,6 +260,7 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
   if (config.motionWindowRetention != null && !(config.motionWindowRetention >= 1)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'motionWindowRetention must be >= 1');
   }
+  assertFraudDetection(config);
   // Only the keys the caller supplied cross the bridge. The native side holds
   // the same defaults and, more importantly, holds whatever the user set last
   // session: spreading DEFAULT_CONFIG here sent `height: 170` on every
@@ -352,11 +398,87 @@ export const StepTracker = {
    *
    * @param date yyyy-MM-dd
    */
-  async getVerificationSnapshot(date: string): Promise<VerificationSnapshot> {
+  async getVerificationSnapshot(
+    date: string,
+    options: VerificationSnapshotOptions = {}
+  ): Promise<VerificationSnapshot> {
+    assertDate(date);
+    if (
+      options.nonce != null &&
+      (typeof options.nonce !== 'string' || options.nonce.length > 512)
+    ) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'nonce must be a string of at most 512 characters'
+      );
+    }
+    return call(() =>
+      getNativeModule().getVerificationSnapshot(date, options)
+    ) as Promise<VerificationSnapshot>;
+  },
+
+  // ---- integrity -------------------------------------------------------
+
+  /**
+   * What the integrity checks found for one day: the flags and the numbers
+   * behind them, `suspectSteps`, the events logged that day, the per-minute
+   * totals and the device hints. Today is judged afresh on every call; a
+   * past day reads its stored verdict. Everything is zero or empty unless
+   * `fraudDetection.enabled`, except the device hints.
+   *
+   * @param date yyyy-MM-dd
+   */
+  async getIntegrityReport(date: string): Promise<IntegrityReport> {
     assertDate(date);
     return call(() =>
-      getNativeModule().getVerificationSnapshot(date)
-    ) as Promise<VerificationSnapshot>;
+      getNativeModule().getIntegrityReport(date)
+    ) as Promise<IntegrityReport>;
+  },
+
+  /** The integrity event log between two dates, inclusive, oldest first. */
+  async getIntegrityEvents(
+    startDate: string,
+    endDate: string
+  ): Promise<IntegrityEvent[]> {
+    assertRange(startDate, endDate);
+    const result = (await call(() =>
+      getNativeModule().getIntegrityEvents(startDate, endDate)
+    )) as { events: IntegrityEvent[] };
+    return result.events;
+  },
+
+  /**
+   * This phone's steps minute by minute between two dates, inclusive,
+   * oldest first. Only minutes with steps are listed. Recorded only while
+   * `fraudDetection.enabled`, and kept for `historyRetentionDays`.
+   */
+  async getStepMinutes(startDate: string, endDate: string): Promise<StepMinute[]> {
+    assertRange(startDate, endDate);
+    const result = (await call(() =>
+      getNativeModule().getStepMinutes(startDate, endDate)
+    )) as { minutes: StepMinute[] };
+    return result.minutes;
+  },
+
+  /**
+   * Generates a fresh Keystore key bound to a challenge from your server and
+   * returns its attestation chain for the server to verify. Snapshots signed
+   * afterwards, and every remote upload, carry signatures from this key.
+   * Calling it again replaces the key.
+   *
+   * @param challenge 1–128 bytes of UTF-8, random and single-use, from your server.
+   */
+  async attestDevice(challenge: string): Promise<DeviceAttestation> {
+    const bytes = typeof challenge === 'string' ? utf8Length(challenge) : 0;
+    if (bytes < 1 || bytes > 128) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'challenge must be 1–128 bytes of UTF-8'
+      );
+    }
+    return call(() =>
+      getNativeModule().attestDevice(challenge)
+    ) as Promise<DeviceAttestation>;
   },
 
   /**
@@ -674,6 +796,7 @@ export const StepTracker = {
           'dayChanged',
           'historyBackfilled',
           'motionWindow',
+          'suspiciousActivity',
           'syncCompleted',
           'stepSourceChanged',
           'healthConnectStatusChanged',

@@ -81,6 +81,12 @@ missing grant, stops the service, and emits `error` with
 Play data safety: *Health and fitness → Fitness info*, collected, "app
 functionality".
 
+The same grant covers Google's Activity Recognition API, which the
+integrity checks use when `fraudDetection.activityRecognition` is on and your
+app ships `play-services-location`. The integrity checks need no other
+permission: charging state and clock changes come from system broadcasts,
+and nothing reads location.
+
 ## 2. `POST_NOTIFICATIONS`
 
 Android 13+. Requested in the same `requestPermissions()` call. **Denying it

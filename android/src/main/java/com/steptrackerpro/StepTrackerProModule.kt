@@ -17,7 +17,10 @@ import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
 import com.steptrackerpro.health.HealthConnectManager
 import com.steptrackerpro.health.HealthPermissionActivity
+import com.steptrackerpro.core.IntegrityEvent
+import com.steptrackerpro.integrity.DeviceAttestation
 import com.steptrackerpro.service.ServiceCommands
+import com.steptrackerpro.service.StepTrackerService
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.Bridge
 import com.steptrackerpro.util.optBoolean
@@ -138,9 +141,16 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun initialize(config: ReadableMap, promise: Promise) {
         runSafely(promise) {
-            val merged = mergeConfig(core.config(), config)
-            core.updateConfig(merged)
+            val before = core.config()
+            val merged = mergeConfig(before, config)
+            val saved = core.updateConfig(merged)
             core.engine.reconcile()
+            // A live service picks up what changed - receivers for the
+            // integrity checks, the motion schedule - without waiting for a
+            // restart. Only on a real change: this runs on every app launch.
+            if (saved != before && StepTrackerService.isAlive) {
+                sendIfTracking(ServiceCommands.ACTION_CONFIG_CHANGED)
+            }
             if (core.serviceLooksDead() && PermissionHelper.canStartTracking(reactContext)) {
                 // The service may have been killed while JS was gone. This has
                 // to be START: every other command starts the service without
@@ -332,7 +342,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getHistory(startDate: String, endDate: String, promise: Promise) {
         launchSafely(promise) {
-            val days = core.repository.getRange(startDate, endDate)
+            val days = core.history(startDate, endDate)
             promise.resolve(Bridge.map(mapOf("records" to days.map { day ->
                 mapOf(
                     "date" to day.date,
@@ -341,7 +351,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                     "calories" to day.calories,
                     "synced" to day.synced,
                     "syncedRemote" to day.syncedRemote,
-                    "recoveredSteps" to day.recoveredSteps
+                    "recoveredSteps" to day.recoveredSteps,
+                    "suspectSteps" to day.suspectSteps
                 )
             })))
         }
@@ -353,9 +364,67 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
      * reaches here fails in DateKeys and rejects like any other bad input.
      */
     @ReactMethod
-    override fun getVerificationSnapshot(date: String, promise: Promise) {
+    override fun getVerificationSnapshot(date: String, options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(Bridge.map(core.verificationSnapshot(date)))
+            val sign = options.optBoolean("sign", false)
+            val nonce = options.optString("nonce", null)?.takeIf { it.isNotEmpty() }
+            promise.resolve(Bridge.map(core.verificationSnapshot(date, sign, nonce)))
+        }
+    }
+
+    /** What the integrity checks found for one day: flags, events, per-minute totals, device hints. */
+    @ReactMethod
+    override fun getIntegrityReport(date: String, promise: Promise) {
+        launchSafely(promise) {
+            promise.resolve(Bridge.map(core.integrity.report(date)))
+        }
+    }
+
+    /** The integrity event log between two dates, inclusive, oldest first. */
+    @ReactMethod
+    override fun getIntegrityEvents(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            val events = core.repository.events(
+                DateKeys.startOfDayMillis(startDate), DateKeys.endOfDayMillis(endDate)
+            )
+            promise.resolve(Bridge.map(mapOf("events" to events.map { it.toMap() })))
+        }
+    }
+
+    /** Per-minute step buckets between two dates, inclusive, oldest first. Only minutes with steps. */
+    @ReactMethod
+    override fun getStepMinutes(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            // Whatever is still in memory goes to storage first, so the read is current.
+            core.integrity.flush()
+            val minutes = core.repository.minutes(startDate, endDate)
+            promise.resolve(Bridge.map(mapOf("minutes" to minutes.map { it.toMap() })))
+        }
+    }
+
+    /**
+     * Generates a fresh Keystore key bound to the server's challenge and
+     * returns its attestation chain. Every later signed snapshot and upload
+     * uses this key. The challenge is validated in JS; a bad one reaching
+     * here is rejected by the Keystore wrapper like any other bad input.
+     */
+    @ReactMethod
+    override fun attestDevice(challenge: String, promise: Promise) {
+        launchSafely(promise) {
+            val bytes = challenge.toByteArray(Charsets.UTF_8)
+            if (bytes.isEmpty() || bytes.size > DeviceAttestation.MAX_CHALLENGE_BYTES) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "challenge must be 1-${DeviceAttestation.MAX_CHALLENGE_BYTES} bytes of UTF-8"
+                )
+                return@launchSafely
+            }
+            val attestation = DeviceAttestation.attest(reactContext, bytes)
+            core.integrity.log(
+                IntegrityEvent.DEVICE_ATTESTED,
+                mapOf("keyId" to attestation["keyId"], "attested" to attestation["attested"])
+            )
+            promise.resolve(Bridge.map(attestation))
         }
     }
 
@@ -647,7 +716,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                                 // An aggregate of other apps' records has no
                                 // recovered share; the field is there so the
                                 // row is a DayRecord like every other.
-                                "recoveredSteps" to 0
+                                "recoveredSteps" to 0,
+                                "suspectSteps" to 0
                             )
                         }
                     )
@@ -659,7 +729,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun writeHealthConnectSteps(date: String, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(core.healthConnect.writeDay(core.dayTotals(date)))
+            promise.resolve(core.healthConnect.writeDay(core.mirrorTotals(core.dayTotals(date))))
         }
     }
 
@@ -902,8 +972,35 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 ?: current.motionWindowSeconds,
             motionIntervalMinutes = motion(patch)?.optInt("intervalMinutes", current.motionIntervalMinutes)
                 ?: current.motionIntervalMinutes,
-            motionWindowRetention = patch.optInt("motionWindowRetention", current.motionWindowRetention)
+            motionWindowRetention = patch.optInt("motionWindowRetention", current.motionWindowRetention),
+            // JS groups these under `fraudDetection`, patched key by key like motionSampling.
+            fraudDetectionEnabled = fraud(patch)?.optBoolean("enabled", current.fraudDetectionEnabled)
+                ?: current.fraudDetectionEnabled,
+            fraudMode = fraud(patch)?.optString("mode", current.fraudMode) ?: current.fraudMode,
+            fraudMaxCadenceSpm = fraud(patch)?.optInt("maxCadenceSpm", current.fraudMaxCadenceSpm)
+                ?: current.fraudMaxCadenceSpm,
+            fraudSteadyCadenceMinutes = fraud(patch)
+                ?.optInt("steadyCadenceMinutes", current.fraudSteadyCadenceMinutes)
+                ?: current.fraudSteadyCadenceMinutes,
+            fraudMaxContinuousMinutes = fraud(patch)
+                ?.optInt("maxContinuousMinutes", current.fraudMaxContinuousMinutes)
+                ?: current.fraudMaxContinuousMinutes,
+            fraudMaxDailySteps = fraud(patch)?.optInt("maxDailySteps", current.fraudMaxDailySteps)
+                ?: current.fraudMaxDailySteps,
+            fraudFlagWhileCharging = fraud(patch)
+                ?.optBoolean("flagWhileCharging", current.fraudFlagWhileCharging)
+                ?: current.fraudFlagWhileCharging,
+            fraudActivityRecognition = fraud(patch)
+                ?.optBoolean("activityRecognition", current.fraudActivityRecognition)
+                ?: current.fraudActivityRecognition
         )
+
+    private fun fraud(patch: ReadableMap): ReadableMap? =
+        if (patch.hasKey("fraudDetection") && !patch.isNull("fraudDetection")) {
+            patch.getMap("fraudDetection")
+        } else {
+            null
+        }
 
     private fun motion(patch: ReadableMap): ReadableMap? =
         if (patch.hasKey("motionSampling") && !patch.isNull("motionSampling")) {
@@ -950,7 +1047,17 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             "windowSeconds" to config.motionWindowSeconds,
             "intervalMinutes" to config.motionIntervalMinutes
         ),
-        "motionWindowRetention" to config.motionWindowRetention
+        "motionWindowRetention" to config.motionWindowRetention,
+        "fraudDetection" to mapOf(
+            "enabled" to config.fraudDetectionEnabled,
+            "mode" to config.fraudMode,
+            "maxCadenceSpm" to config.fraudMaxCadenceSpm,
+            "steadyCadenceMinutes" to config.fraudSteadyCadenceMinutes,
+            "maxContinuousMinutes" to config.fraudMaxContinuousMinutes,
+            "maxDailySteps" to config.fraudMaxDailySteps,
+            "flagWhileCharging" to config.fraudFlagWhileCharging,
+            "activityRecognition" to config.fraudActivityRecognition
+        )
     )
 
     companion object {

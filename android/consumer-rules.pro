@@ -19,3 +19,15 @@
     java.lang.String PERMISSION_READ_HEALTH_DATA_HISTORY;
 }
 -keep class com.steptrackerpro.sync.** { *; }
+
+# Integrity checks. The manifest receiver and the Keystore wrapper are entry
+# points; the rest is plain code.
+-keep class com.steptrackerpro.integrity.ActivityTransitionReceiver { *; }
+
+# Activity Recognition is compile-only (see build.gradle): an app that does
+# not add play-services-location must still pass R8's missing-class check on
+# the references this package makes to it. They are only ever reached after a
+# runtime probe has found the classes.
+-dontwarn com.google.android.gms.location.**
+-dontwarn com.google.android.gms.tasks.**
+-dontwarn com.google.android.gms.common.api.**

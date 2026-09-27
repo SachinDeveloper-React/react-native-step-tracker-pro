@@ -42,6 +42,7 @@ the guide has all three side by side. Permissions in one place:
 | Health Connect | availability, permissions scoped to config, read, write, idempotent sync |
 | Watches        | reads a paired watch through Health Connect and never double-counts |
 | Continuity     | Health Connect says 6,000 → the phone keeps it moving: 6,001, 6,005, 6,010 |
+| Fraud checks   | opt-in: flags shaken phones, swing gadgets, charging, vehicles and implausible totals; event log; Keystore attestation and signed snapshots |
 | Offline        | everything works with no network; remote sync is queued           |
 | Bridge         | Turbo Module with an old-architecture shim, full TypeScript types |
 
@@ -83,6 +84,24 @@ An app that converts steps into anything of value adds
 screen — see [Watches and Health Connect](#watches-and-health-connect) and
 [docs/API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot).
 
+It also turns on the integrity checks, which flag the usual ways a count is
+faked — a phone shaken by hand, swung by a gadget, left on a charger,
+carried in a car, or a total nobody walks — and attests the device so the
+server can verify signed snapshots:
+
+```ts
+await StepTracker.initialize({
+  fraudDetection: { enabled: true, mode: "flag" }, // "exclude" also takes suspect steps out
+  motionSampling: { enabled: true },
+});
+await StepTracker.attestDevice(challengeFromYourServer);
+const snapshot = await StepTracker.getVerificationSnapshot(date, { sign: true, nonce });
+// snapshot.suspectSteps, snapshot.integrity.flags, snapshot.signature
+```
+
+The default `"flag"` mode changes no number; the verdict is evidence for your
+server. See [docs/API.md](docs/API.md#integrity-checks).
+
 Stride length defaults to `height × 0.415` (male) / `0.413` (female) /
 `0.414` (unspecified); pass `strideLength` in metres to override. Calories use
 `0.57 kcal × body mass (kg) × distance (km)`, adjustable via
@@ -100,8 +119,11 @@ getTrackingHealth()
 
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
-getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date)
+getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date, opts)
 getMotionWindows(from, to)
+
+getIntegrityReport(date)      getIntegrityEvents(from, to)  getStepMinutes(from, to)
+attestDevice(challenge)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
@@ -121,7 +143,8 @@ resetToday()                  clearHistory()            pruneHistory(days)
 
 Events: `stepsChanged`, `goalReached`, `goalProgressChanged`,
 `trackingStateChanged`, `dayChanged`, `historyBackfilled`, `motionWindow`,
-`syncCompleted`, `stepSourceChanged`, `healthConnectStatusChanged`, `error`.
+`suspiciousActivity`, `syncCompleted`, `stepSourceChanged`,
+`healthConnectStatusChanged`, `error`.
 
 ```ts
 const sub = StepTracker.addListener("goalReached", ({ type, goal }) => {});
@@ -261,33 +284,34 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Fifty-four Jest tests cover config validation and the flows in the JS
-layer. Ninety-two JVM tests cover step-source resolution, the `auto` merge
-and its coverage rule, manual-entry exclusion and wearable trust, gap
-splitting under all four policies, the accelerometer pedometer against
-synthetic gait, motion signatures against a synthetic walk and shake, and
+Sixty-six Jest tests cover config validation and the flows in the JS
+layer. A hundred and twenty-eight JVM tests cover step-source resolution,
+the `auto` merge and its coverage rule, manual-entry exclusion and wearable
+trust, gap splitting under all four policies, the accelerometer pedometer
+against synthetic gait, motion signatures against a synthetic walk and
+shake, the fraud detector against synthetic days, minute attribution, and
 the remote payload — chiefly that a phone and a watch are never added
 together, that a phone-side app cannot inflate a covered day, that a
-typed-in number never becomes the day's number, and that a car is not a
-walk. Thirty-one instrumented tests cover the reboot, midnight,
-overnight-kill, capped-recovery, sensor-jitter, pause and counter-reset
-paths by feeding samples to the engine directly, plus the Room migration
-against real rows, so they run on an emulator with no step hardware. CI
-runs all of it on every push.
+typed-in number never becomes the day's number, that a car is not a walk,
+and that a swing gadget is flagged while a treadmill is not. Thirty-nine
+instrumented tests cover the reboot, midnight, overnight-kill,
+capped-recovery, sensor-jitter, pause and counter-reset paths by feeding
+samples to the engine directly, the Room migrations against real rows, and
+the integrity layer end to end through the real core, database and
+Keystore, so they run on an emulator with no step hardware. CI runs all of
+it on every push.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **1.4.0** — the release for
-apps that pay for steps: Health Connect recording method per source with
-manual entries excludable from the resolved number, opt-in strict wearable
-trust under `auto`, auditable gap recovery (`recoveredSteps`,
-`historyBackfilled`, `today_capped`), one verification snapshot for
-server-side ingest, an idempotent and optionally richer remote upload, and
-opt-in motion signature windows. Nothing changes for a consumer who sets
-none of it.
+[CHANGELOG.md](CHANGELOG.md). Latest release **1.5.0** — integrity checks
+for apps that pay for steps: per-minute step buckets, a fraud detector for
+shaken phones, swing gadgets, charging, vehicles and implausible totals, an
+integrity event log, an optional exclude mode, and Keystore attestation with
+signed snapshots and uploads. All opt-in; nothing changes for a consumer who
+sets none of it.
 
 ## Licence
 

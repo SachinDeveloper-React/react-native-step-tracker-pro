@@ -209,14 +209,39 @@ policy if you enable this, and in the data safety form under fitness info
 if they leave the device through your own endpoint. The package's built-in
 uploader does not include them.
 
-## 7. Notification content
+## 7. Integrity checks
+
+With `fraudDetection.enabled`, the package keeps per-minute step counts, the
+detector's verdicts and a log of device events (clock changes, reboots,
+charging, resets). It reads no location and needs no new permission.
+
+- **Fitness info.** Per-minute counts are more granular fitness data than
+  daily totals. Name them in your privacy policy, and in the data safety
+  form if they leave the device through your own endpoint or through
+  `remoteSyncPayload: 'full'`, which then carries each day's integrity
+  report.
+- **Device or other IDs.** `attestDevice()` makes a per-install Keystore key
+  and hands your server its public key and certificate chain, and the
+  integrity report includes device hints (emulator, root indicators, ADB).
+  If you send these to your server, declare them under "Device or other
+  IDs" for fraud prevention and security.
+- **Activity Recognition.** `activityRecognition: true` uses Google's
+  Activity Recognition API through Play Services, which your app adds. It
+  runs under the `ACTIVITY_RECOGNITION` permission the package already needs
+  (section 4); say in your privacy policy that activity types are used to
+  check step counts.
+- **Fraud prevention is a stated purpose.** The data safety form lets you
+  mark data as collected for "Fraud prevention, security, and compliance";
+  use it for the integrity data rather than "App functionality" alone.
+
+## 8. Notification content
 
 Android 13+ makes notifications a runtime permission. Denying it hides the
 notification but does not stop the service, and `allGranted` in
 `checkPermissions()` reflects that deliberately. Do not block your onboarding on
 `POST_NOTIFICATIONS`.
 
-## 8. Package visibility (`<queries>`)
+## 9. Package visibility (`<queries>`)
 
 The library manifest declares `<queries>` for the Health Connect provider, the
 Play Store, ~25 wearable companion apps and ~20 OEM battery managers. These are
@@ -224,7 +249,7 @@ not permissions and need no declaration; they exist so the package can tell
 whether those apps are installed on Android 11+. Play's *package visibility*
 policy only restricts `QUERY_ALL_PACKAGES`, which the package does not use.
 
-## 9. Pre-launch checklist
+## 10. Pre-launch checklist
 
 - [ ] Picked a [usage mode](USAGE_MODES.md) and removed the manifest entries it does not need
 - [ ] Foreground service declaration submitted, with a video (Modes A, C)
@@ -234,6 +259,7 @@ policy only restricts `QUERY_ALL_PACKAGES`, which the package does not use.
 - [ ] `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` removed, or asked for in context with an explanation on screen
 - [ ] Unused `android.permission.health.*` entries removed with `tools:node="remove"`
 - [ ] Data safety form matches whether `remoteSyncUrl` is configured
+- [ ] With the integrity checks on: privacy policy and data safety form cover per-minute counts, device hints and attestation (section 7)
 - [ ] `ACTIVITY_RECOGNITION` requested in context, with an explanation on screen
 - [ ] In-app data deletion available
 - [ ] Tested on a Xiaomi/Redmi or Oppo/Realme device: force-stop, walk, reopen — steps present, `recoveryCount` moved

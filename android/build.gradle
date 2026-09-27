@@ -134,6 +134,13 @@ dependencies {
     implementation "androidx.work:work-runtime-ktx:$workVersion"
     implementation "androidx.health.connect:connect-client:$healthConnectVersion"
 
+    // Activity Recognition for the integrity checks, compile-only on purpose:
+    // an app that wants steps tagged "in a vehicle" or "still" adds
+    // play-services-location itself, and one that does not never ships Play
+    // Services because of this package. Nothing touches these classes until
+    // a runtime check has found them.
+    compileOnly "com.google.android.gms:play-services-location:21.3.0"
+
     testImplementation "junit:junit:4.13.2"
     // The SDK's org.json is a stub on the JVM (every method throws); the
     // real library stands in so the remote payload shape can be pinned by a

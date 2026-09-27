@@ -24,6 +24,11 @@ class BootReceiver : BroadcastReceiver() {
 
         val core = StepTrackerCore.get(context)
         if (!core.isInitialized()) return
+        // Logged whether or not tracking comes back: the counter restarted,
+        // and a server comparing snapshots wants to know why.
+        if (action != Intent.ACTION_MY_PACKAGE_REPLACED) {
+            core.integrity.log(com.steptrackerpro.core.IntegrityEvent.REBOOT)
+        }
         if (!core.config().autoStartOnBoot) return
         if (!core.state.shouldAutoStart) return
 

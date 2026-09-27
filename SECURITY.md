@@ -25,6 +25,14 @@ location, no network access unless `remoteSyncUrl` is configured.
 - `remoteSyncHeaders` are stored in the same place, in the clear. Put
   short-lived tokens in them, never long-lived secrets, and rotate them from
   your app. They are never returned by `getConfig()`.
+- With the integrity checks on, per-minute step counts, the detector's
+  verdicts and the integrity event log sit in the same database. Counts and
+  flags only - no samples, no location. They are what a rooted user would
+  edit, which is why a verdict that costs money belongs on a server, checked
+  against a signed snapshot.
+- The signing key made by `attestDevice()` lives in the Android Keystore,
+  in secure hardware where the device has it, and never leaves it. Nothing
+  about it is in SharedPreferences except whether it was attested.
 
 ### Data in transit
 
@@ -42,6 +50,12 @@ location, no network access unless `remoteSyncUrl` is configured.
 | `StepTrackerService` | no | | |
 | `HealthPermissionActivity` | no | | |
 | `NotificationActionReceiver` | no | | PendingIntents are `FLAG_IMMUTABLE` |
+| `ActivityTransitionReceiver` | no | Play Services delivers Activity Recognition results to it | reached only through an explicit `PendingIntent` this package creates; mutable because Play Services fills in the result, which an explicit, unexported target keeps from anyone else |
+
+The integrity checks' charging and clock receivers are registered at runtime
+with `RECEIVER_NOT_EXPORTED`, while the service runs. `BootReceiver` also logs
+a `reboot` integrity event; since `QUICKBOOT_POWERON` is unprotected, another
+app can add one to the log - the log is evidence, not proof.
 
 ### Input from the bridge
 
@@ -52,9 +66,20 @@ as validated in JS, because config is also rebuilt from persisted JSON.
 ### Step data integrity (rewards, leaderboards)
 
 This package counts what the sensors report. It does not, and cannot,
-prove the steps were walked:
+prove the steps were walked. With `fraudDetection.enabled` it flags the
+common ways the count is faked - a phone shaken by hand, swung by a gadget,
+left on a charger, carried in a car, totals no person walks - and with
+`attestDevice()` and signed snapshots it lets a server check that the
+numbers came unmodified from a genuine device. See
+[docs/API.md](docs/API.md#integrity-checks). What remains:
 
-- A rooted device can feed a mock sensor; a phone can be shaken.
+- A rooted device can feed a mock sensor, hook this code or edit its
+  database; attestation catches an unlocked bootloader and an emulator, and
+  a signature that stops verifying catches edits after signing, but nothing
+  on the device can stop a determined attacker before that.
+- A gadget tuned to vary its pace, or a person shaking a phone in bursts,
+  can stay under every threshold. The checks raise the effort; they are not
+  a proof of walking.
 - `resetToday()` and `clearHistory()` are part of the public API.
 - Steps recovered after a dead period across midnight are **apportioned by
   time** (`gapRecovery: 'split'`), which is an estimate. Use `'drop'` where an
@@ -65,10 +90,12 @@ prove the steps were walked:
   number, and check `StepSource.manualSteps` server-side; the recording
   method is the writing app's own statement, not proof.
 
-If steps have monetary value, verify server-side: rate-limit implausible
-daily totals, compare against `stepSource` and `getTrackingHealth()`
-(`recoveryCount`, `bestSensor`), and treat `'accelerometer'` and merged
-counts as lower-confidence.
+If steps have monetary value, verify server-side: turn on the integrity
+checks, attest the device and post signed verification snapshots, rate-limit
+implausible daily totals, compare against `stepSource` and
+`getTrackingHealth()` (`recoveryCount`, `bestSensor`), and treat
+`'accelerometer'`, merged counts, `untimedSteps` and weak flags as
+lower-confidence.
 
 ### Permissions
 
@@ -81,6 +108,7 @@ are meant to be removed with `tools:node="remove"` by apps that do not use them.
 
 Runtime: AndroidX core, lifecycle, activity, Room, WorkManager, the Health
 Connect client, and kotlinx-coroutines — all Google or JetBrains. No
-third-party network or analytics code. `npm audit` and Dependabot run on the
+third-party network or analytics code. `play-services-location` is
+compile-only: it ships only if your app adds it, for Activity Recognition. `npm audit` and Dependabot run on the
 JS toolchain, which is development-only; nothing from `node_modules` ships in
 the package.

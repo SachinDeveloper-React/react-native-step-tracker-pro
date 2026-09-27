@@ -45,6 +45,7 @@ class StepCounterEngineTest {
     private val rollovers = mutableListOf<Pair<DayTotals, String>>()
     private val backfills = mutableListOf<Map<String, Int>>()
     private val backfillReasons = mutableListOf<StepCounterEngine.BackfillReason>()
+    private val observed = mutableListOf<Triple<Long, Long, Int>>()
 
     private fun now() = fakeNow
 
@@ -72,6 +73,7 @@ class StepCounterEngineTest {
         rollovers.clear()
         backfills.clear()
         backfillReasons.clear()
+        observed.clear()
         engine = StepCounterEngine(
             state,
             MetricsCalculator(StepTrackerConfig()),
@@ -84,6 +86,56 @@ class StepCounterEngineTest {
             backfills += shares
             backfillReasons += reason
         }
+        engine.onObserved = { from, to, steps -> observed += Triple(from, to, steps) }
+    }
+
+    @Test
+    fun observedDeltasCarryTheSpanTheyWereTakenIn() {
+        val t1 = now()
+        engine.onCounterSample(50f, t1)
+        val t2 = t1 + 30_000L
+        engine.onCounterSample(120f, t2)
+        // The first delta has no previous sample to measure from.
+        assertEquals(Triple(0L, t1, 50), observed[0])
+        assertEquals(Triple(t1, t2, 70), observed[1])
+        // Nothing new, nothing observed.
+        engine.onCounterSample(120f, t2 + 1_000L)
+        assertEquals(2, observed.size)
+    }
+
+    @Test
+    fun stepsCreditedByRecoveryAreNotObserved() {
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.today(), 7)
+
+        // An install's since-boot claim is credited in one go, not watched.
+        assertEquals(3000, engine.onCounterSample(3000f, now())!!.steps)
+        assertTrue(observed.isEmpty())
+        engine.onCounterSample(3025f, now() + 10_000L)
+        assertEquals(listOf(25), observed.map { it.third })
+    }
+
+    @Test
+    fun pausedStepsAreNeverObserved() {
+        engine.onCounterSample(100f, now())
+        observed.clear()
+        engine.setPaused(true)
+        assertNull(engine.onCounterSample(400f, now()))
+        engine.setPaused(false)
+        engine.onCounterSample(410f, now())
+        engine.onCounterSample(420f, now() + 5_000L)
+        // The resume re-pin credits nothing; only the walk after it is seen.
+        assertEquals(listOf(10), observed.map { it.third })
+    }
+
+    @Test
+    fun detectorStepsAreObservedOneBatchAtATime() {
+        engine.onDetectorSample(1, now())
+        engine.onDetectorSample(3, now() + 2_000L)
+        assertEquals(listOf(1, 3), observed.map { it.third })
+        assertEquals(now(), observed[1].first)
     }
 
     @Test

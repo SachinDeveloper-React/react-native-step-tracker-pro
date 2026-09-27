@@ -25,6 +25,12 @@ object StepEventBus {
         const val HISTORY_BACKFILLED = "historyBackfilled"
         /** One motion signature window was stored. Payload is its features, never samples. */
         const val MOTION_WINDOW = "motionWindow"
+        /**
+         * The integrity checks found something they had not reported for
+         * this day before. Payload is the new flags, the day's device count
+         * and its suspect steps.
+         */
+        const val SUSPICIOUS_ACTIVITY = "suspiciousActivity"
         const val SYNC_COMPLETED = "syncCompleted"
         /** The app now counting for the user changed - watch on, watch off. */
         const val STEP_SOURCE_CHANGED = "stepSourceChanged"

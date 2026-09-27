@@ -29,8 +29,14 @@ export interface Spec extends TurboModule {
   getMonthlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getYearlyStats(options: UnsafeObject): Promise<UnsafeObject>;
   getHistory(startDate: string, endDate: string): Promise<UnsafeObject>;
-  getVerificationSnapshot(date: string): Promise<UnsafeObject>;
+  getVerificationSnapshot(date: string, options: UnsafeObject): Promise<UnsafeObject>;
   getMotionWindows(startDate: string, endDate: string): Promise<UnsafeObject>;
+
+  // ---- integrity -------------------------------------------------------
+  getIntegrityReport(date: string): Promise<UnsafeObject>;
+  getIntegrityEvents(startDate: string, endDate: string): Promise<UnsafeObject>;
+  getStepMinutes(startDate: string, endDate: string): Promise<UnsafeObject>;
+  attestDevice(challenge: string): Promise<UnsafeObject>;
 
   // ---- writes ----------------------------------------------------------
   resetToday(): Promise<boolean>;
