@@ -11,15 +11,28 @@ dependencyResolutionManagement {
     }
 }
 
-// build.gradle declares `com.facebook.react:react-android` without a version,
-// because the host app's React gradle plugin supplies it. Standalone there is
-// no host app, so pin it to the version in devDependencies.
+// The React Native version a standalone build compiles against: the one in
+// devDependencies.
+def standaloneReactNative = '0.77.0'
+
 gradle.beforeProject { project ->
+    // build.gradle declares `com.facebook.react:react-android` without a
+    // version, because the host app's React gradle plugin supplies it.
+    // Standalone there is no host app, so pin it.
     project.configurations.all {
         resolutionStrategy.eachDependency { details ->
             if (details.requested.group == 'com.facebook.react' && !details.requested.version) {
-                details.useVersion '0.77.0'
+                details.useVersion standaloneReactNative
             }
         }
+    }
+    // And tell build.gradle which version that is. It otherwise reads it from
+    // node_modules, which CI does not install for the Android jobs; with the
+    // version unknown it assumes the new architecture, which needs the React
+    // gradle plugin and codegen that only a host app has. Below 0.82 with
+    // newArchEnabled unset, the old architecture is built - the one a
+    // standalone build can compile.
+    if (!project.hasProperty('stpReactNativeVersion')) {
+        project.ext.stpReactNativeVersion = standaloneReactNative
     }
 }
