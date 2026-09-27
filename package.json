@@ -1,6 +1,6 @@
 {
   "name": "react-native-step-tracker-pro",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Production-grade Android step tracking for React Native: hardware step counter, foreground service, Room storage, Health Connect permissions and sync, wearable step sources, boot recovery and goals.",
   "repository": {
     "type": "git",

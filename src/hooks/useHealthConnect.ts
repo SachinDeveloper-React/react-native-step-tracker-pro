@@ -112,8 +112,10 @@ export function useHealthConnect(
       setStatus(next);
       setCompanionApps(await StepTracker.getInstalledCompanionApps());
       // Reading sources without the grant returns an empty list, so skip the
-      // round trip and keep whatever the last granted read produced.
-      if (next.canRead) {
+      // round trip and keep whatever the last granted read produced. Steps
+      // are the grant that matters: a user who unticked distance still has
+      // sources. (`canRead` for a native side older than 2.1.1.)
+      if (next.canReadSteps ?? next.canRead) {
         const list = await StepTracker.getStepSources(
           daysAgo(windowDays.current),
           today()

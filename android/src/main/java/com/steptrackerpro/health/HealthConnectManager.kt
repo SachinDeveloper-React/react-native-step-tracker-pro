@@ -66,13 +66,25 @@ class HealthConnectManager(
     @Volatile
     var readTypes: Set<ReadType> = ReadType.ALL
 
-    /** The record types `healthConnectReadTypes` can name. */
-    enum class ReadType(val jsValue: String, val permission: String) {
-        STEPS("steps", HealthPermission.getReadPermission(StepsRecord::class)),
-        DISTANCE("distance", HealthPermission.getReadPermission(DistanceRecord::class)),
+    /**
+     * The record types `healthConnectReadTypes` can name - also the three
+     * this package writes, so each carries its write permission too.
+     */
+    enum class ReadType(val jsValue: String, val permission: String, val writePermission: String) {
+        STEPS(
+            "steps",
+            HealthPermission.getReadPermission(StepsRecord::class),
+            HealthPermission.getWritePermission(StepsRecord::class)
+        ),
+        DISTANCE(
+            "distance",
+            HealthPermission.getReadPermission(DistanceRecord::class),
+            HealthPermission.getWritePermission(DistanceRecord::class)
+        ),
         TOTAL_CALORIES(
             "totalCalories",
-            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class)
+            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
+            HealthPermission.getWritePermission(TotalCaloriesBurnedRecord::class)
         );
 
         companion object {
@@ -165,6 +177,18 @@ class HealthConnectManager(
     @Volatile
     private var grantedCache: Pair<Long, Set<String>>? = null
 
+    /** The last grant set read, kept across cache invalidation so a change is noticed. */
+    @Volatile
+    private var lastGranted: Set<String>? = null
+
+    /**
+     * Called when a fresh read of the grants differs from the last one - the
+     * user allowed or refused something since. Set by the core, which drops
+     * whatever it cached under the old grants.
+     */
+    @Volatile
+    var onGrantsChanged: (() -> Unit)? = null
+
     /**
      * The grants this app holds. Cached briefly: every resolved read checks
      * them, the sensor path can trigger one a minute, and each check is a
@@ -180,8 +204,23 @@ class HealthConnectManager(
         val set = runCatching { client()?.permissionController?.getGrantedPermissions() }
             .getOrNull() ?: emptySet()
         grantedCache = System.currentTimeMillis() to set
+        val previous = lastGranted
+        lastGranted = set
+        if (previous != null && previous != set) onGrantsChanged?.invoke()
         return set
     }
+
+    /** See [access]. */
+    data class Access(
+        /** `READ_STEPS` is granted: Health Connect is read for the number. */
+        val readSteps: Boolean,
+        /** Of the configured read types, those granted - in declaration order. */
+        val readTypes: Set<ReadType>,
+        /** `WRITE_STEPS` is granted: this device's count is mirrored. */
+        val writeSteps: Boolean,
+        /** The types whose write permission is granted. */
+        val writeTypes: Set<ReadType>
+    )
 
     fun invalidatePermissionCache() {
         grantedCache = null
@@ -194,8 +233,26 @@ class HealthConnectManager(
         return required.isNotEmpty() && grantedPermissions().containsAll(required)
     }
 
-    /** Enough to display data, even when writing was refused: every configured read type. */
+    /**
+     * Every configured read type granted. What `HealthConnectStatus.canRead`
+     * reports; not what decides whether Health Connect is read - see
+     * [canReadSteps].
+     */
     suspend fun canRead(): Boolean = grantedPermissions().containsAll(ReadType.permissions(readTypes))
+
+    /**
+     * Steps can be read: the only grant resolving a day's number needs. The
+     * sheet lets the user untick any single permission, and a user who
+     * allowed steps but not distance must still get their watch's steps -
+     * distance is then derived from stride, as for a watch that writes none.
+     */
+    suspend fun canReadSteps(): Boolean = access(grantedPermissions(), readTypes).readSteps
+
+    /** Of the configured read types, the ones granted. */
+    suspend fun grantedReadTypes(): Set<ReadType> = access(grantedPermissions(), readTypes).readTypes
+
+    /** Steps can be written: all mirroring needs. Distance and calories go along when granted. */
+    suspend fun canWriteSteps(): Boolean = access(grantedPermissions(), readTypes).writeSteps
 
     /** Every read permission [types] need, granted. */
     suspend fun canReadRecords(types: Set<RecordType>): Boolean =
@@ -279,6 +336,7 @@ class HealthConnectManager(
         val required = scope.required
         val missing = scope.requested - granted
         val denials = state.healthPermissionDenials
+        val access = access(granted, scope.readTypes)
         return mapOf(
             "available" to (availability == Availability.AVAILABLE),
             "availability" to availability.jsValue,
@@ -289,6 +347,13 @@ class HealthConnectManager(
             // write-only grant is a full grant, and vice versa.
             "granted" to (required.isNotEmpty() && granted.containsAll(required)),
             "canRead" to granted.containsAll(scope.readPermissions),
+            // What the user actually allowed, type by type. The sheet lets
+            // them untick any one permission; steps alone is enough to read
+            // and to write, and the rest are used when present.
+            "canReadSteps" to access.readSteps,
+            "grantedReadTypes" to access.readTypes.map { it.jsValue },
+            "canWriteSteps" to access.writeSteps,
+            "grantedWriteTypes" to access.writeTypes.map { it.jsValue },
             "canWrite" to granted.containsAll(WRITE_PERMISSIONS),
             "readRequired" to scope.read,
             "writeRequired" to scope.write,
@@ -440,15 +505,19 @@ class HealthConnectManager(
         // Distance and calories are optional companions: an origin that wrote
         // steps but no distance keeps 0.0 here and has it derived from stride
         // by StepSourceResolver - as does every origin when the app does not
-        // read that type at all.
-        val types = readTypes
-        if (ReadType.DISTANCE in types) {
+        // read that type, or the user did not grant it. Only granted types
+        // are asked for: an ungranted one would fail every time.
+        val types = grantedReadTypes()
+        val distanceRead = ReadType.DISTANCE in types &&
             readAll(hc, DistanceRecord::class.java, start, end) { record ->
                 val date = DateKeys.of(record.startTime.toEpochMilli())
                 val pkg = record.metadata.dataOrigin.packageName
-                buckets[date]?.get(pkg)?.let { it.distance += record.distance.inMeters }
+                buckets[date]?.get(pkg)?.let {
+                    it.distance += record.distance.inMeters
+                    it.distanceSeen = true
+                }
             }
-        }
+        if (distanceRead) buckets.values.forEach { byPackage -> byPackage.values.forEach { it.distanceRead = true } }
         if (ReadType.TOTAL_CALORIES in types) {
             readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
                 val date = DateKeys.of(record.startTime.toEpochMilli())
@@ -505,6 +574,8 @@ class HealthConnectManager(
         }
         if (kinds.isEmpty()) return emptyMap()
 
+        // readDailySteps asks for distance only when it is granted.
+        val distanceRead = ReadType.DISTANCE in grantedReadTypes()
         val out = HashMap<String, ArrayList<StepSource>>()
         for ((pkg, kind) in kinds) {
             val perDay = readDailySteps(start, end, setOf(pkg))
@@ -521,7 +592,10 @@ class HealthConnectManager(
                         lastRecordAt = minOf(
                             DateKeys.endOfDayMillis(day.date), System.currentTimeMillis()
                         ),
-                        isSelf = pkg == self
+                        isSelf = pkg == self,
+                        distanceSource = DistanceSource.of(
+                            read = distanceRead, seen = day.distance > 0.0, isSelf = pkg == self
+                        )
                     )
                 )
             }
@@ -543,6 +617,13 @@ class HealthConnectManager(
             acc.steps += source.steps
             acc.distance += source.distance
             acc.calories += source.calories
+            // Read on any day counts as read, a distance on any day as seen.
+            if (source.distanceSource != DistanceSource.NOT_READ) acc.distanceRead = true
+            if (source.distanceSource == DistanceSource.HEALTH_CONNECT ||
+                source.distanceSource == DistanceSource.DERIVED
+            ) {
+                acc.distanceSeen = true
+            }
             if (source.lateWrittenSteps >= 0) acc.lateSteps += source.lateWrittenSteps
             // Hour-of-day profile across the range; unknown if any day lacks it.
             if (source.hourlySteps.any { it < 0 }) {
@@ -727,13 +808,14 @@ class HealthConnectManager(
      * day, which for step records is not rare - some watches write one record
      * per minute.
      */
+    /** @return whether every page was read; false when the read failed part way or at once. */
     private suspend fun <T : Record> readAll(
         hc: HealthConnectClient,
         type: Class<T>,
         start: Instant,
         end: Instant,
         onRecord: (T) -> Unit
-    ) {
+    ): Boolean {
         var token: String? = null
         var pages = 0
         do {
@@ -746,11 +828,12 @@ class HealthConnectManager(
                         pageToken = token
                     )
                 )
-            }.getOrNull() ?: return
+            }.getOrNull() ?: return false
             response.records.forEach(onRecord)
             token = response.pageToken
             pages++
         } while (token != null && pages < MAX_PAGES)
+        return true
     }
 
     private class Accumulator(val packageName: String, self: String) {
@@ -769,6 +852,10 @@ class HealthConnectManager(
         var manualBefore: Int = 0
         /** Steps from records modified more than [LATE_WRITE_MS] after they ended. */
         var lateSteps: Int = 0
+        /** Distance records were read for this origin's range. */
+        var distanceRead: Boolean = false
+        /** At least one distance record came from this origin. */
+        var distanceSeen: Boolean = false
         /** Steps per local hour of the day. */
         val hourly = IntArray(HourlySteps.HOURS)
         var hourlyKnown: Boolean = true
@@ -817,7 +904,8 @@ class HealthConnectManager(
                 // Known exactly when the per-record metadata was, like the method split.
                 lateWrittenSteps = if (methodsKnown) lateSteps.coerceIn(0, steps) else -1,
                 hourlySteps = if (methodsKnown && hourlyKnown) hourly.toList() else HourlySteps.UNKNOWN,
-                activeCalories = if (activeKnown) activeCalories else -1.0
+                activeCalories = if (activeKnown) activeCalories else -1.0,
+                distanceSource = DistanceSource.of(distanceRead, distanceSeen, isSelf)
             )
         }
     }
@@ -825,13 +913,17 @@ class HealthConnectManager(
     // ---- writes ----------------------------------------------------------
 
     /**
-     * Upserts one day. Returns false when the client is missing, permissions
-     * were revoked, or the provider rejected the write.
+     * Upserts one day. Returns false when the client is missing, steps may
+     * not be written, or the provider rejected the write. Distance and
+     * calories are written alongside when their grants are there and left
+     * out when not: one insert carrying an ungranted type fails as a whole,
+     * which stopped all mirroring for a user who unticked only distance.
      */
     suspend fun writeDay(totals: DayTotals): Boolean {
         val hc = client() ?: return false
         if (totals.steps <= 0) return true
-        if (!canWrite()) return false
+        val access = access(grantedPermissions(), readTypes)
+        if (!access.writeSteps) return false
 
         val zone = ZoneId.systemDefault()
         val start = DateKeys.startOfDayInstant(totals.date)
@@ -852,7 +944,7 @@ class HealthConnectManager(
         // Explicitly typed: the three record classes share only the
         // library-internal IntervalRecord supertype, which Kotlin 2.x refuses
         // to infer as a type argument.
-        val records = listOf<Record>(
+        val records = listOfNotNull<Record>(
             StepsRecord(
                 count = totals.steps.toLong(),
                 startTime = start,
@@ -865,7 +957,7 @@ class HealthConnectManager(
                     clientRecordVersion = version
                 )
             ),
-            DistanceRecord(
+            if (ReadType.DISTANCE !in access.writeTypes) null else DistanceRecord(
                 distance = Length.meters(totals.distance),
                 startTime = start,
                 endTime = end,
@@ -877,7 +969,7 @@ class HealthConnectManager(
                     clientRecordVersion = version
                 )
             ),
-            TotalCaloriesBurnedRecord(
+            if (ReadType.TOTAL_CALORIES !in access.writeTypes) null else TotalCaloriesBurnedRecord(
                 energy = Energy.kilocalories(totals.calories),
                 startTime = start,
                 endTime = end,
@@ -981,14 +1073,24 @@ class HealthConnectManager(
             else -> "unknown"
         }
 
+        /**
+         * What a set of grants lets this package do. Pure, so the partial
+         * grants the sheet allows - any single permission unticked - can be
+         * tested without a provider.
+         */
+        fun access(granted: Set<String>, configuredReadTypes: Set<ReadType>): Access = Access(
+            readSteps = ReadType.STEPS.permission in granted,
+            readTypes = ReadType.entries.filterTo(LinkedHashSet()) {
+                it in configuredReadTypes && it.permission in granted
+            },
+            writeSteps = ReadType.STEPS.writePermission in granted,
+            writeTypes = ReadType.entries.filterTo(LinkedHashSet()) { it.writePermission in granted }
+        )
+
         /** Every read type's permission: what reads need under the default `healthConnectReadTypes`. */
         val READ_PERMISSIONS: Set<String> = ReadType.permissions(ReadType.ALL)
 
-        val WRITE_PERMISSIONS: Set<String> = setOf(
-            HealthPermission.getWritePermission(StepsRecord::class),
-            HealthPermission.getWritePermission(DistanceRecord::class),
-            HealthPermission.getWritePermission(TotalCaloriesBurnedRecord::class)
-        )
+        val WRITE_PERMISSIONS: Set<String> = ReadType.entries.mapTo(LinkedHashSet()) { it.writePermission }
 
         val REQUIRED: Set<String> = READ_PERMISSIONS + WRITE_PERMISSIONS
 

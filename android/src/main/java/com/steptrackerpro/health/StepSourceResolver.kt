@@ -146,7 +146,15 @@ object StepSourceResolver {
          * before it competed, under `fraudDetection.mode: 'exclude'`. Zero
          * otherwise. `deviceSteps` is the count after the exclusion.
          */
-        val suspectStepsExcluded: Int = 0
+        val suspectStepsExcluded: Int = 0,
+        /**
+         * Where `totals.distance` came from: `health_connect` when it is the
+         * winning source's own distance, `derived` when it was estimated
+         * from the steps shown - this device's count, a source that wrote
+         * no distance or was not read for it, a merged count, or one with
+         * manual entries taken out.
+         */
+        val distanceSource: String = DistanceSource.DERIVED
     ) {
         fun toMap(): Map<String, Any?> = mapOf(
             "date" to totals.date,
@@ -160,7 +168,8 @@ object StepSourceResolver {
             "merged" to merged,
             "baselineSteps" to baselineSteps,
             "manualStepsExcluded" to manualStepsExcluded,
-            "suspectStepsExcluded" to suspectStepsExcluded
+            "suspectStepsExcluded" to suspectStepsExcluded,
+            "distanceSource" to distanceSource
         )
     }
 
@@ -337,6 +346,11 @@ object StepSourceResolver {
         usedExternal = true,
         merged = merged,
         baselineSteps = lead.coerceAtLeast(0),
-        manualStepsExcluded = excluded
+        manualStepsExcluded = excluded,
+        distanceSource = if (candidate.distance > 0.0 && !merged) {
+            DistanceSource.HEALTH_CONNECT
+        } else {
+            DistanceSource.DERIVED
+        }
     )
 }

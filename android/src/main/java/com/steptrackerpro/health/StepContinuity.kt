@@ -118,7 +118,9 @@ object StepContinuity {
             merged = true,
             baselineSteps = baseline.offset,
             manualStepsExcluded = raw.manualStepsExcluded,
-            suspectStepsExcluded = raw.suspectStepsExcluded
+            suspectStepsExcluded = raw.suspectStepsExcluded,
+            // Recomputed from the merged count above.
+            distanceSource = DistanceSource.DERIVED
         )
     }
 }

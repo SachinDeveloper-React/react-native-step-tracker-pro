@@ -21,6 +21,7 @@ import {
 import { StepTrackerError } from './errors';
 import type {
   DayRecord,
+  HealthConnectDataType,
   IntegrityReport,
   RangeStats,
   ResolvedStepSource,
@@ -59,6 +60,7 @@ function resolved(date = today()): ResolvedStepSource {
     baselineSteps: 0,
     manualStepsExcluded: 0,
     suspectStepsExcluded: 0,
+    distanceSource: 'derived',
   };
 }
 
@@ -159,6 +161,10 @@ const healthConnectStatus = {
   writeRequired: true,
   canRead: false,
   canWrite: false,
+  canReadSteps: false,
+  grantedReadTypes: [] as HealthConnectDataType[],
+  canWriteSteps: false,
+  grantedWriteTypes: [] as HealthConnectDataType[],
   backgroundReadGranted: false,
   historyReadGranted: false,
   grantedPermissions: [] as string[],

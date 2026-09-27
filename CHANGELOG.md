@@ -5,7 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.0] - Unreleased
+## [2.1.1] - 2026-09-28
+
+### Fixed
+
+- **A partial Health Connect grant no longer turns Health Connect off.** The
+  sheet lets the user untick any single permission, and every earlier
+  release read only when all three read permissions were granted and wrote
+  only when all three write permissions were: a user who allowed steps but
+  refused distance got no watch steps and no mirror, with no error. Steps
+  alone now suffice for both. Distance and calories are read and written
+  when granted and derived from stride when not, and ungranted types are no
+  longer asked for on every read.
+
+### Added
+
+- `HealthConnectStatus.canReadSteps`, `grantedReadTypes`, `canWriteSteps`
+  and `grantedWriteTypes`: what the user actually allowed. `useHealthConnect`
+  loads sources on `canReadSteps`. `granted` and `canRead` keep their
+  meaning.
+- `distanceSource` on every `StepSource` (`'health_connect' | 'derived' |
+  'none' | 'not_read'`) and on the resolved day (`'health_connect' |
+  'derived'`), so a server checks distance against steps only where the
+  distance was measured.
+
+### Changed
+
+- Cached Health Connect sources are dropped when the grants change, so a
+  distance the user allows later shows up at once instead of up to ten
+  minutes on for a past day.
+
+## [2.1.0] - 2026-09-27
+
+Published by hand, like 2.0.1, so it carries no npm provenance.
 
 Additive: the evidence a server-side verifier scores, signed with the
 totals; background upload failures that survive until the app looks; fewer
@@ -951,6 +983,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.1.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.1
 [2.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.0
 [2.0.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.1
 [2.0.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.0
