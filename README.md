@@ -112,7 +112,7 @@ An app that converts steps into anything of value adds
 `gapRecovery: "today_capped"` and `remoteSyncPayload: "full"`, and posts
 `getVerificationSnapshot(date)` to its server rather than the number on
 screen — see [Watches and Health Connect](#watches-and-health-connect) and
-[docs/API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot).
+[docs/API.md](docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot).
 
 It also turns on the integrity checks, which flag the usual ways a count is
 faked — a phone shaken by hand, swung by a gadget, left on a charger,
@@ -125,8 +125,12 @@ await StepTracker.initialize({
   motionSampling: { enabled: true },
 });
 await StepTracker.attestDevice(challengeFromYourServer);
-const snapshot = await StepTracker.getVerificationSnapshot(date, { sign: true, nonce });
-// snapshot.suspectSteps, snapshot.integrity.flags, snapshot.signature
+const snapshot = await StepTracker.getVerificationSnapshot(date, {
+  sign: true,
+  nonce,
+  include: ["minutes", "motionWindows"], // the evidence, under the same signature
+});
+// snapshot.suspectSteps, snapshot.integrity.flags, snapshot.minutes, snapshot.signature
 ```
 
 The default `"flag"` mode changes no number; the verdict is evidence for your
@@ -154,7 +158,7 @@ getMotionWindows(from, to)
 
 getIntegrityReport(date)      getIntegrityEvents(from, to)  getStepMinutes(from, to)
 attestDevice(challenge)       hasAttestationKey()       getAttestationKeyInfo()
-requestIntegrityToken(opts)
+requestIntegrityToken(opts)   prepareIntegrity(projectNumber)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
@@ -164,12 +168,12 @@ getBackgroundRestrictionStatus()                        requestBackgroundPermiss
 getHealthConnectStatus()      enableHealthConnect()     requestHealthConnectPermissions()
 installHealthConnect()        openHealthConnectSettings()   revokeHealthConnectPermissions()
 readHealthConnectSteps(a, b)  writeHealthConnectSteps(date)   syncWithHealthConnect()
-getHealthConnectRecords(a, b) getHealthConnectChangesToken()  getHealthConnectChanges(token)
+getHealthConnectRecords(a, b, opts)  getHealthConnectChangesToken(opts)  getHealthConnectChanges(token)
 
 getStepSources(from, to)      getCurrentStepSource()
 setPreferredStepSource(pkg)   getInstalledCompanionApps()
 
-syncNow()                     getPendingSyncCount()
+syncNow()                     getPendingSyncCount()     getSyncStatus()
 resetToday()                  clearHistory()            pruneHistory(days)
 ```
 
@@ -357,10 +361,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.0.1** — fixes `updateConfig()`
-(validation, and weekly and monthly goals following a new daily goal), builds
-the new architecture when the React Native version cannot be found, and adds
-an old-architecture compatibility build. **2.0.0** brought current toolchains
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.1.0** — signs the evidence
+behind a day's totals with them (`getVerificationSnapshot(date, { include })`:
+minutes, motion windows, raw Health Connect records), keeps background upload
+failures for `getSyncStatus()`, lets an app read steps alone from Health
+Connect (`healthConnectReadTypes`), adds distance to the raw records and
+change tracking, and adds `prepareIntegrity()` with retryable Play error
+codes. **2.0.1** fixed `updateConfig()` (validation, and weekly and monthly
+goals following a new daily goal). **2.0.0** brought current toolchains
 (AGP 9 with or without built-in Kotlin, Kotlin 2.2, compileSdk 37, React
 Native 0.82+ as new-architecture-only), a minimal manifest that declares only
 what sensor counting needs, typed codegen events, Play Integrity, raw Health

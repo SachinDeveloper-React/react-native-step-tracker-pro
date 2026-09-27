@@ -31,6 +31,7 @@ import java.time.Instant
 import java.time.LocalDateTime
 import java.time.Period
 import java.time.ZoneId
+import kotlin.reflect.KClass
 
 /**
  * Health Connect read/write, permissions and provider availability.
@@ -54,6 +55,57 @@ class HealthConnectManager(
      */
     @Volatile
     var readActiveCalories: Boolean = false
+
+    /**
+     * Which record types reads cover, from `healthConnectReadTypes`. Steps
+     * always; distance and total calories only when the app asked for them,
+     * so an app that wants steps alone declares and justifies one permission.
+     * A type left out reads as 0 - derived from stride where the resolver
+     * does that already - exactly as a source that never wrote it.
+     */
+    @Volatile
+    var readTypes: Set<ReadType> = ReadType.ALL
+
+    /** The record types `healthConnectReadTypes` can name. */
+    enum class ReadType(val jsValue: String, val permission: String) {
+        STEPS("steps", HealthPermission.getReadPermission(StepsRecord::class)),
+        DISTANCE("distance", HealthPermission.getReadPermission(DistanceRecord::class)),
+        TOTAL_CALORIES(
+            "totalCalories",
+            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class)
+        );
+
+        companion object {
+            val ALL: Set<ReadType> = entries.toSet()
+
+            /** Steps plus every recognised name; unknown names are dropped, steps can't be. */
+            fun parse(values: Collection<String>): Set<ReadType> = buildSet {
+                add(STEPS)
+                values.forEach { value -> entries.firstOrNull { it.jsValue == value }?.let(::add) }
+            }
+
+            fun permissions(types: Set<ReadType>): Set<String> = types.mapTo(LinkedHashSet()) { it.permission }
+        }
+    }
+
+    /**
+     * The record types the raw reads and change tracking return. A distance
+     * check per interval needs the distance records next to the step ones.
+     */
+    enum class RecordType(val jsValue: String, val type: KClass<out Record>, val permission: String) {
+        STEPS("steps", StepsRecord::class, HealthPermission.getReadPermission(StepsRecord::class)),
+        DISTANCE("distance", DistanceRecord::class, HealthPermission.getReadPermission(DistanceRecord::class));
+
+        companion object {
+            /** Recognised names in declaration order; null when one is unknown or none are given. */
+            fun parse(values: Collection<String>): Set<RecordType>? {
+                if (values.isEmpty()) return null
+                val out = LinkedHashSet<RecordType>()
+                for (value in values) out += entries.firstOrNull { it.jsValue == value } ?: return null
+                return entries.filterTo(LinkedHashSet()) { it in out }
+            }
+        }
+    }
 
     /**
      * Why Health Connect cannot be used, at the granularity the UI needs.
@@ -142,8 +194,12 @@ class HealthConnectManager(
         return required.isNotEmpty() && grantedPermissions().containsAll(required)
     }
 
-    /** Enough to display data, even when writing was refused. */
-    suspend fun canRead(): Boolean = grantedPermissions().containsAll(READ_PERMISSIONS)
+    /** Enough to display data, even when writing was refused: every configured read type. */
+    suspend fun canRead(): Boolean = grantedPermissions().containsAll(ReadType.permissions(readTypes))
+
+    /** Every read permission [types] need, granted. */
+    suspend fun canReadRecords(types: Set<RecordType>): Boolean =
+        grantedPermissions().containsAll(types.map { it.permission })
 
     suspend fun canWrite(): Boolean = grantedPermissions().containsAll(WRITE_PERMISSIONS)
 
@@ -167,12 +223,18 @@ class HealthConnectManager(
         val backgroundRead: Boolean = false,
         val historyRead: Boolean = false,
         /** Also read `ActiveCaloriesBurnedRecord`, per source. Only meaningful with [read]. */
-        val activeCalories: Boolean = false
+        val activeCalories: Boolean = false,
+        /** Which types [read] covers. Steps always. */
+        val readTypes: Set<ReadType> = ReadType.ALL
     ) {
+        /** The read permissions [readTypes] need. */
+        val readPermissions: Set<String>
+            get() = ReadType.permissions(readTypes + ReadType.STEPS)
+
         /** The required set: everything the app cannot do its job without. */
         val required: Set<String>
             get() = buildSet {
-                if (read) addAll(READ_PERMISSIONS)
+                if (read) addAll(readPermissions)
                 if (write) addAll(WRITE_PERMISSIONS)
             }
 
@@ -226,7 +288,7 @@ class HealthConnectManager(
             // Everything *this app* needs. With reads off in config a
             // write-only grant is a full grant, and vice versa.
             "granted" to (required.isNotEmpty() && granted.containsAll(required)),
-            "canRead" to granted.containsAll(READ_PERMISSIONS),
+            "canRead" to granted.containsAll(scope.readPermissions),
             "canWrite" to granted.containsAll(WRITE_PERMISSIONS),
             "readRequired" to scope.read,
             "writeRequired" to scope.write,
@@ -262,12 +324,17 @@ class HealthConnectManager(
     ): List<DayTotals> {
         val hc = client() ?: return emptyList()
         val zone = ZoneId.systemDefault()
+        // Only types the app reads and holds a grant for: an aggregate that
+        // names one ungranted metric fails as a whole, and a steps-only app
+        // would get nothing back at all.
+        val granted = grantedPermissions()
+        val types = readTypes.filter { it.permission in granted }.toSet()
         val request = AggregateGroupByPeriodRequest(
-            metrics = setOf(
-                StepsRecord.COUNT_TOTAL,
-                DistanceRecord.DISTANCE_TOTAL,
-                TotalCaloriesBurnedRecord.ENERGY_TOTAL
-            ),
+            metrics = buildSet {
+                add(StepsRecord.COUNT_TOTAL)
+                if (ReadType.DISTANCE in types) add(DistanceRecord.DISTANCE_TOTAL)
+                if (ReadType.TOTAL_CALORIES in types) add(TotalCaloriesBurnedRecord.ENERGY_TOTAL)
+            },
             timeRangeFilter = TimeRangeFilter.between(
                 LocalDateTime.ofInstant(start, zone),
                 LocalDateTime.ofInstant(end, zone)
@@ -372,16 +439,22 @@ class HealthConnectManager(
         }
         // Distance and calories are optional companions: an origin that wrote
         // steps but no distance keeps 0.0 here and has it derived from stride
-        // by StepSourceResolver.
-        readAll(hc, DistanceRecord::class.java, start, end) { record ->
-            val date = DateKeys.of(record.startTime.toEpochMilli())
-            val pkg = record.metadata.dataOrigin.packageName
-            buckets[date]?.get(pkg)?.let { it.distance += record.distance.inMeters }
+        // by StepSourceResolver - as does every origin when the app does not
+        // read that type at all.
+        val types = readTypes
+        if (ReadType.DISTANCE in types) {
+            readAll(hc, DistanceRecord::class.java, start, end) { record ->
+                val date = DateKeys.of(record.startTime.toEpochMilli())
+                val pkg = record.metadata.dataOrigin.packageName
+                buckets[date]?.get(pkg)?.let { it.distance += record.distance.inMeters }
+            }
         }
-        readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
-            val date = DateKeys.of(record.startTime.toEpochMilli())
-            val pkg = record.metadata.dataOrigin.packageName
-            buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
+        if (ReadType.TOTAL_CALORIES in types) {
+            readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
+                val date = DateKeys.of(record.startTime.toEpochMilli())
+                val pkg = record.metadata.dataOrigin.packageName
+                buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
+            }
         }
         // Opt-in, and only once granted: an ungranted type would fail the read.
         if (readActiveCalories && grantedPermissions().contains(READ_ACTIVE_CALORIES)) {
@@ -507,64 +580,109 @@ class HealthConnectManager(
 
     // ---- raw records and change tracking ----------------------------------
 
-    /** One step record as Health Connect stores it, for a server that wants the evidence itself. */
-    fun recordMap(record: StepsRecord): Map<String, Any?> = mapOf(
-        "id" to record.metadata.id,
-        "clientRecordId" to record.metadata.clientRecordId,
-        "clientRecordVersion" to record.metadata.clientRecordVersion,
-        "packageName" to record.metadata.dataOrigin.packageName,
-        "recordingMethod" to RecordingMethods.nameOf(record.metadata.recordingMethod),
-        "device" to record.metadata.device?.let {
+    /**
+     * What every raw record carries, whatever its type: who wrote it, how,
+     * on what device, when, and when it was last changed.
+     */
+    private fun metadataMap(
+        recordType: RecordType,
+        metadata: Metadata,
+        startTime: Instant,
+        endTime: Instant,
+        startZoneOffset: java.time.ZoneOffset?,
+        endZoneOffset: java.time.ZoneOffset?
+    ): LinkedHashMap<String, Any?> = linkedMapOf(
+        "recordType" to recordType.jsValue,
+        "id" to metadata.id,
+        "clientRecordId" to metadata.clientRecordId,
+        "clientRecordVersion" to metadata.clientRecordVersion,
+        "packageName" to metadata.dataOrigin.packageName,
+        "recordingMethod" to RecordingMethods.nameOf(metadata.recordingMethod),
+        "device" to metadata.device?.let {
             mapOf("type" to deviceTypeName(it.type), "manufacturer" to it.manufacturer, "model" to it.model)
         },
-        "startTime" to record.startTime.toEpochMilli(),
-        "endTime" to record.endTime.toEpochMilli(),
-        "startZoneOffsetSeconds" to record.startZoneOffset?.totalSeconds,
-        "endZoneOffsetSeconds" to record.endZoneOffset?.totalSeconds,
-        "lastModifiedTime" to record.metadata.lastModifiedTime.toEpochMilli(),
-        "count" to record.count
+        "startTime" to startTime.toEpochMilli(),
+        "endTime" to endTime.toEpochMilli(),
+        "startZoneOffsetSeconds" to startZoneOffset?.totalSeconds,
+        "endZoneOffsetSeconds" to endZoneOffset?.totalSeconds,
+        "lastModifiedTime" to metadata.lastModifiedTime.toEpochMilli()
     )
 
+    /** One step record as Health Connect stores it, for a server that wants the evidence itself. */
+    fun recordMap(record: StepsRecord): Map<String, Any?> = metadataMap(
+        RecordType.STEPS, record.metadata, record.startTime, record.endTime,
+        record.startZoneOffset, record.endZoneOffset
+    ).apply { put("count", record.count) }
+
+    /** One distance record as stored. */
+    fun recordMap(record: DistanceRecord): Map<String, Any?> = metadataMap(
+        RecordType.DISTANCE, record.metadata, record.startTime, record.endTime,
+        record.startZoneOffset, record.endZoneOffset
+    ).apply { put("distanceMeters", record.distance.inMeters) }
+
+    /** A record of one of the [RecordType]s, or null for any other. */
+    private fun anyRecordMap(record: Record): Map<String, Any?>? = when (record) {
+        is StepsRecord -> recordMap(record)
+        is DistanceRecord -> recordMap(record)
+        else -> null
+    }
+
     /**
-     * Every step record between two instants, every origin, as stored.
-     * Bounded by [MAX_RAW_PAGES] pages; `truncated` says a token was left
-     * unread, so the caller narrows the window rather than trusting a short
-     * list. Throws when Health Connect cannot be read; the module checks first.
+     * Every record of [types] between two instants, every origin, as stored,
+     * oldest first. Each type is bounded by [MAX_RAW_PAGES] pages;
+     * `truncated` says a token was left unread for at least one of them, so
+     * the caller narrows the window rather than trusting a short list.
+     * Throws when Health Connect cannot be read; callers check first.
      */
-    suspend fun readStepRecords(start: Instant, end: Instant): Map<String, Any?> {
+    suspend fun readRecords(
+        start: Instant,
+        end: Instant,
+        types: Set<RecordType> = setOf(RecordType.STEPS)
+    ): Map<String, Any?> {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val out = ArrayList<Map<String, Any?>>()
-        var token: String? = null
-        var pages = 0
-        do {
-            val response = hc.readRecords(
-                ReadRecordsRequest(
-                    recordType = StepsRecord::class,
-                    timeRangeFilter = TimeRangeFilter.between(start, end),
-                    pageSize = PAGE_SIZE,
-                    pageToken = token
+        var truncated = false
+        for (type in types) {
+            var token: String? = null
+            var pages = 0
+            do {
+                val response = hc.readRecords(
+                    ReadRecordsRequest(
+                        recordType = type.type,
+                        timeRangeFilter = TimeRangeFilter.between(start, end),
+                        pageSize = PAGE_SIZE,
+                        pageToken = token
+                    )
                 )
-            )
-            response.records.forEach { out += recordMap(it) }
-            token = response.pageToken
-            pages++
-        } while (token != null && pages < MAX_RAW_PAGES)
-        return mapOf("records" to out, "truncated" to (token != null))
+                response.records.forEach { record -> anyRecordMap(record)?.let { out += it } }
+                token = response.pageToken
+                pages++
+            } while (token != null && pages < MAX_RAW_PAGES)
+            if (token != null) truncated = true
+        }
+        // One list, in time order, whichever type each record is.
+        out.sortBy { it["startTime"] as Long }
+        return mapOf("records" to out, "truncated" to truncated)
     }
 
-    /** A cursor for [changes], starting now. Valid for 30 days, per Health Connect. */
-    suspend fun changesToken(): String {
+    /** Step records only - the 2.0 shape. */
+    suspend fun readStepRecords(start: Instant, end: Instant): Map<String, Any?> =
+        readRecords(start, end, setOf(RecordType.STEPS))
+
+    /** A cursor for [changes] over [types], starting now. Valid for 30 days, per Health Connect. */
+    suspend fun changesToken(types: Set<RecordType> = setOf(RecordType.STEPS)): String {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
-        return hc.getChangesToken(ChangesTokenRequest(recordTypes = setOf(StepsRecord::class)))
+        return hc.getChangesToken(ChangesTokenRequest(recordTypes = types.map { it.type }.toSet()))
     }
 
     /**
-     * Step records inserted, updated or deleted since [token], across every
-     * origin, and the token to use next. An expired token - Health Connect
-     * keeps changes for 30 days - comes back as `tokenExpired: true` with no
-     * changes: the caller takes a new token and re-reads the window with
-     * [readStepRecords]. At most [MAX_CHANGE_PAGES] pages per call;
-     * `hasMore` says to call again with `nextToken`.
+     * Records inserted, updated or deleted since [token], across every
+     * origin, and the token to use next - of whichever types the token was
+     * taken for. An expired token - Health Connect keeps changes for 30 days
+     * - comes back as `tokenExpired: true` with no changes: the caller takes
+     * a new token and re-reads the window with [readRecords]. At most
+     * [MAX_CHANGE_PAGES] pages per call; `hasMore` says to call again with
+     * `nextToken`.
      */
     suspend fun changes(token: String): Map<String, Any?> {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
@@ -586,7 +704,7 @@ class HealthConnectManager(
             }
             response.changes.forEach { change ->
                 when (change) {
-                    is UpsertionChange -> (change.record as? StepsRecord)?.let { upserted += recordMap(it) }
+                    is UpsertionChange -> anyRecordMap(change.record)?.let { upserted += it }
                     is DeletionChange -> deleted += change.recordId
                 }
             }
@@ -863,11 +981,8 @@ class HealthConnectManager(
             else -> "unknown"
         }
 
-        val READ_PERMISSIONS: Set<String> = setOf(
-            HealthPermission.getReadPermission(StepsRecord::class),
-            HealthPermission.getReadPermission(DistanceRecord::class),
-            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class)
-        )
+        /** Every read type's permission: what reads need under the default `healthConnectReadTypes`. */
+        val READ_PERMISSIONS: Set<String> = ReadType.permissions(ReadType.ALL)
 
         val WRITE_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getWritePermission(StepsRecord::class),

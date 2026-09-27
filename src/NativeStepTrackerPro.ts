@@ -65,6 +65,7 @@ export interface Spec extends TurboModule {
   hasAttestationKey(): Promise<boolean>;
   getAttestationKeyInfo(): Promise<UnsafeObject | null>;
   requestIntegrityToken(options: UnsafeObject): Promise<UnsafeObject>;
+  prepareIntegrity(cloudProjectNumber: number): Promise<boolean>;
 
   // ---- writes ----------------------------------------------------------
   resetToday(): Promise<boolean>;
@@ -93,8 +94,12 @@ export interface Spec extends TurboModule {
   readHealthConnectSteps(startIso: string, endIso: string): Promise<UnsafeObject>;
   writeHealthConnectSteps(date: string): Promise<boolean>;
   syncWithHealthConnect(): Promise<UnsafeObject>;
-  getHealthConnectRecords(startIso: string, endIso: string): Promise<UnsafeObject>;
-  getHealthConnectChangesToken(): Promise<string>;
+  getHealthConnectRecords(
+    startIso: string,
+    endIso: string,
+    options: UnsafeObject
+  ): Promise<UnsafeObject>;
+  getHealthConnectChangesToken(options: UnsafeObject): Promise<string>;
   getHealthConnectChanges(token: string): Promise<UnsafeObject>;
 
   // ---- step sources ----------------------------------------------------
@@ -105,6 +110,7 @@ export interface Spec extends TurboModule {
 
   // ---- sync ------------------------------------------------------------
   getPendingSyncCount(): Promise<number>;
+  getSyncStatus(): Promise<UnsafeObject>;
   syncNow(): Promise<UnsafeObject>;
 
   // ---- event emitter plumbing -----------------------------------------

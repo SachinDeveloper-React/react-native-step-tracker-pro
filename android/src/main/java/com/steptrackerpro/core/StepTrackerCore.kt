@@ -55,6 +55,7 @@ class StepTrackerCore private constructor(context: Context) {
     val goals = GoalTracker(appContext)
     val healthConnect = HealthConnectManager(appContext, state).apply {
         readActiveCalories = configStore.get().healthConnectReadActiveCalories
+        readTypes = HealthConnectManager.ReadType.parse(configStore.get().healthConnectReadTypes)
     }
 
     /** Per-minute buckets, the detector, the event log and suspect-step arithmetic. */
@@ -96,6 +97,7 @@ class StepTrackerCore private constructor(context: Context) {
         val saved = configStore.save(config)
         metrics.config = saved
         healthConnect.readActiveCalories = saved.healthConnectReadActiveCalories
+        healthConnect.readTypes = HealthConnectManager.ReadType.parse(saved.healthConnectReadTypes)
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
         engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
         // A different policy or pin changes what the baseline means, so it is
@@ -111,11 +113,21 @@ class StepTrackerCore private constructor(context: Context) {
             previous.wearableAllowlist != saved.wearableAllowlist ||
             // Exclude mode lowers the device count the baseline was measured against.
             previous.excludeSuspect != saved.excludeSuspect ||
-            // Cached sources were read without (or with) active calories.
-            previous.healthConnectReadActiveCalories != saved.healthConnectReadActiveCalories
+            // Cached sources were read without (or with) active calories,
+            // or with a different set of types.
+            previous.healthConnectReadActiveCalories != saved.healthConnectReadActiveCalories ||
+            previous.healthConnectReadTypes != saved.healthConnectReadTypes
         ) {
             state.clearContinuity()
             sourceCache.invalidate()
+        }
+        // What `getSyncStatus().remote.authFailed` measures against: new
+        // credentials clear a refusal until they are refused in turn.
+        if (previous.remoteSyncUrl != saved.remoteSyncUrl ||
+            previous.remoteSyncHeaders != saved.remoteSyncHeaders ||
+            previous.remoteSyncAuth != saved.remoteSyncAuth
+        ) {
+            state.recordRemoteCredentialsChanged()
         }
         val changed = integrityRelevantChanges(previous, saved)
         if (changed.isNotEmpty()) {
@@ -151,7 +163,8 @@ class StepTrackerCore private constructor(context: Context) {
             write = config.healthConnectWriteEnabled,
             backgroundRead = backgroundRead ?: config.healthConnectBackgroundRead,
             historyRead = historyRead ?: config.healthConnectHistoryRead,
-            activeCalories = config.healthConnectReadActiveCalories
+            activeCalories = config.healthConnectReadActiveCalories,
+            readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes)
         )
     }
 
@@ -615,7 +628,9 @@ class StepTrackerCore private constructor(context: Context) {
     suspend fun verificationSnapshot(
         date: String,
         sign: Boolean = false,
-        nonce: String? = null
+        nonce: String? = null,
+        include: Set<SnapshotPart> = emptySet(),
+        recordTypes: Set<HealthConnectManager.RecordType> = setOf(HealthConnectManager.RecordType.STEPS)
     ): Map<String, Any?> {
         val today = date == DateKeys.today()
         if (today) engine.reconcile()
@@ -674,9 +689,60 @@ class StepTrackerCore private constructor(context: Context) {
             "suspectSteps" to report["suspectSteps"],
             "integrity" to report
         )
+        // The evidence behind the totals, when asked for. Inside the signed
+        // body, so one signature - and one Play Integrity requestHash - covers
+        // the minutes, the motion windows and the records a server scores,
+        // not only the totals built from them.
+        if (include.isNotEmpty()) {
+            // Echoed like the nonce, so "asked for and empty" is told apart
+            // from "never asked for".
+            snapshot["include"] = SnapshotPart.entries.filter { it in include }.map { it.jsValue }
+        }
+        if (SnapshotPart.MINUTES in include) {
+            integrity.flush()
+            snapshot["minutes"] = repository.minutes(date, date).map { it.toMap() }
+        }
+        if (SnapshotPart.MOTION_WINDOWS in include) {
+            snapshot["motionWindows"] = motionWindows(date, date).map { it.toMap() }
+        }
+        if (SnapshotPart.HEALTH_CONNECT_RECORDS in include) {
+            snapshot["healthConnectRecords"] = snapshotRecords(date, recordTypes)
+        }
         if (nonce != null) snapshot["nonce"] = nonce
         if (!sign) return snapshot
         return signed(snapshot, now)
+    }
+
+    /**
+     * One day's raw Health Connect records for a snapshot, and whether they
+     * could be read. An explicit ask, so unlike `sources` it does not follow
+     * the step-source policy - only the provider, the grants for [types] and
+     * `healthConnectEnabled` decide. Never throws: a snapshot is still worth
+     * signing without the records, and `status` says why they are missing.
+     */
+    private suspend fun snapshotRecords(
+        date: String,
+        types: Set<HealthConnectManager.RecordType>
+    ): Map<String, Any?> {
+        val names = types.map { it.jsValue }
+        fun result(status: String, records: Any? = emptyList<Any>(), truncated: Any? = false) =
+            linkedMapOf("status" to status, "recordTypes" to names, "records" to records, "truncated" to truncated)
+
+        if (!config().healthConnectEnabled) return result("disabled")
+        if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return result("unavailable")
+        if (!healthConnect.canReadRecords(types)) return result("not_granted")
+        val start = DateKeys.startOfDayInstant(date)
+        val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
+        if (!end.isAfter(start)) return result("read")
+        val read = try {
+            withTimeoutOrNull(HC_RECORDS_TIMEOUT_MS) { healthConnect.readRecords(start, end, types) }
+                ?: return result("timeout")
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return result("failed")
+        }
+        return result("read", read["records"], read["truncated"])
     }
 
     /**
@@ -1198,6 +1264,9 @@ class StepTrackerCore private constructor(context: Context) {
          * phone's own count is the answer, and the read is retried next time.
          */
         const val HC_READ_TIMEOUT_MS = 4_000L
+
+        /** A snapshot's raw records: up to 10,000 per type, so longer than a total's read. */
+        const val HC_RECORDS_TIMEOUT_MS = 20_000L
 
         /**
          * The service stamps [StepStateStore.lastHeartbeatAt] this often even

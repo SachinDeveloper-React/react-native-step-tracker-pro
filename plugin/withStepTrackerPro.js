@@ -4,6 +4,8 @@
  *   "plugins": [
  *     ["react-native-step-tracker-pro", {
  *       "healthConnect": { "read": true, "write": true, "backgroundRead": true },
+ *       // or, for an app that reads steps alone:
+ *       // "healthConnect": { "readTypes": ["steps"], "write": false },
  *       "batteryOptimizationPrompt": false
  *     }]
  *   ]

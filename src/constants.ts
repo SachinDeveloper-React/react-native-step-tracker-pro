@@ -23,6 +23,7 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectHistoryRead'
     | 'healthConnectIgnoreManualEntries'
     | 'healthConnectReadActiveCalories'
+    | 'healthConnectReadTypes'
     | 'stepSource'
     | 'wearableTrust'
     | 'remoteSyncPayload'
@@ -57,6 +58,7 @@ export const DEFAULT_CONFIG: Required<
   healthConnectHistoryRead: false,
   healthConnectIgnoreManualEntries: false,
   healthConnectReadActiveCalories: false,
+  healthConnectReadTypes: ['steps', 'distance', 'totalCalories'],
   stepSource: 'auto',
   wearableTrust: 'metadata',
   remoteSyncPayload: 'totals',

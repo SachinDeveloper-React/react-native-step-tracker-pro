@@ -6,11 +6,21 @@
  * From 2.0 the library's own manifest carries only what sensor-only counting
  * needs. These add what an app opts into:
  *
- *   healthConnect: true | { read, write, backgroundRead, historyRead, activeCalories }
+ *   healthConnect: true | { read, write, readTypes, backgroundRead, historyRead, activeCalories }
+ *
+ * `readTypes` matches the `healthConnectReadTypes` config option: the read
+ * permissions declared are the ones for those types, steps always.
  *   batteryOptimizationPrompt: true
  */
 
 const HEALTH = 'android.permission.health.';
+
+/** Health Connect's permission suffix for each `healthConnectReadTypes` name. */
+const READ_TYPE_PERMISSIONS = {
+  steps: 'STEPS',
+  distance: 'DISTANCE',
+  totalCalories: 'TOTAL_CALORIES_BURNED',
+};
 
 /** The permissions a set of plugin options needs, in manifest order. */
 function permissionsFor(options = {}) {
@@ -21,7 +31,7 @@ function permissionsFor(options = {}) {
     const read = scope.read !== false;
     const write = scope.write !== false;
     const types = ['STEPS', 'DISTANCE', 'TOTAL_CALORIES_BURNED'];
-    if (read) types.forEach((t) => out.push(`${HEALTH}READ_${t}`));
+    if (read) readTypesFor(scope.readTypes).forEach((t) => out.push(`${HEALTH}READ_${t}`));
     if (write) types.forEach((t) => out.push(`${HEALTH}WRITE_${t}`));
     if (read && scope.backgroundRead) out.push(`${HEALTH}READ_HEALTH_DATA_IN_BACKGROUND`);
     if (read && scope.historyRead) out.push(`${HEALTH}READ_HEALTH_DATA_HISTORY`);
@@ -31,6 +41,27 @@ function permissionsFor(options = {}) {
     out.push('android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS');
   }
   return out;
+}
+
+/**
+ * The permission suffixes for a `readTypes` option: all three when it is
+ * absent, as before 2.1; steps always, as the library requires them.
+ */
+function readTypesFor(readTypes) {
+  if (readTypes == null) return Object.values(READ_TYPE_PERMISSIONS);
+  if (!Array.isArray(readTypes)) {
+    throw new Error('react-native-step-tracker-pro: healthConnect.readTypes must be an array');
+  }
+  const unknown = readTypes.filter((t) => !(t in READ_TYPE_PERMISSIONS));
+  if (unknown.length > 0) {
+    throw new Error(
+      `react-native-step-tracker-pro: unknown healthConnect.readTypes ${unknown.join(', ')}; ` +
+        `use ${Object.keys(READ_TYPE_PERMISSIONS).join(', ')}`
+    );
+  }
+  return Object.keys(READ_TYPE_PERMISSIONS)
+    .filter((t) => t === 'steps' || readTypes.includes(t))
+    .map((t) => READ_TYPE_PERMISSIONS[t]);
 }
 
 /** Adds each permission the options need that the manifest does not declare yet. */

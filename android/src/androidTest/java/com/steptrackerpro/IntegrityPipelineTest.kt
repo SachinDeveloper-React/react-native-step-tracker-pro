@@ -8,6 +8,8 @@ import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.IntegrityFlag
 import com.steptrackerpro.core.JsonMaps
+import com.steptrackerpro.core.RemoteSyncStatus
+import com.steptrackerpro.core.SnapshotPart
 import com.steptrackerpro.core.StepStateStore
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
@@ -136,6 +138,62 @@ class IntegrityPipelineTest {
         assertEquals(snapshot.keys.first(), "schemaVersion")
         assertEquals(device, (signed["deviceSteps"] as Number).toInt())
         assertEquals(suspect, (signed["suspectSteps"] as Number).toInt())
+        // A 2.0-shaped call carries none of the evidence parts.
+        assertFalse("include" in signed || "minutes" in signed)
+
+        // With include, the evidence is inside the signed payload itself.
+        val full = core.verificationSnapshot(
+            today, sign = true, nonce = "n-43",
+            include = SnapshotPart.entries.toSet(),
+            recordTypes = HealthConnectManager.RecordType.entries.toSet()
+        )
+        @Suppress("UNCHECKED_CAST")
+        val fullPayload = JsonMaps.parse((full["signature"] as Map<String, Any?>)["signedPayload"] as String)
+        assertEquals(listOf("minutes", "motionWindows", "healthConnectRecords"), fullPayload["include"])
+        @Suppress("UNCHECKED_CAST")
+        val minutes = fullPayload["minutes"] as List<Map<String, Any?>>
+        // The swing gadget's minutes, each with its steps, are what was signed.
+        assertTrue(minutes.size >= 35)
+        assertTrue(minutes.all { (it["steps"] as Number).toInt() + (it["untimedSteps"] as Number).toInt() > 0 })
+        assertEquals(emptyList<Any>(), fullPayload["motionWindows"])
+        // This test app declares no Health Connect permission, so the
+        // records are absent - and the snapshot says why.
+        @Suppress("UNCHECKED_CAST")
+        val records = fullPayload["healthConnectRecords"] as Map<String, Any?>
+        assertTrue(records["status"] in setOf("unavailable", "not_granted"))
+        assertEquals(listOf("steps", "distance"), records["recordTypes"])
+        assertEquals(emptyList<Any>(), records["records"])
+    }
+
+    @Test
+    fun aRefusedUploadIsKeptUntilTheCredentialsChange() {
+        val state = core.state
+        core.updateConfig(core.config().copy(remoteSyncUrl = "https://api.example.com/steps"))
+        val refusedAt = System.currentTimeMillis() + 1
+        state.recordRemoteFailure(refusedAt, RemoteSyncStatus.UNAUTHORIZED, 401, "Upload refused: HTTP 401", retryable = false)
+        var status = state.remoteSyncStatus()
+        assertTrue(status.authFailed)
+        assertEquals(1, status.consecutiveFailures)
+        assertEquals(401, status.lastFailure?.status)
+
+        // Another refusal counts up; a server error is not an auth failure.
+        state.recordRemoteFailure(refusedAt + 1, RemoteSyncStatus.HTTP_ERROR, 503, "Upload failed: HTTP 503", retryable = true)
+        status = state.remoteSyncStatus()
+        assertEquals(2, status.consecutiveFailures)
+        assertFalse(status.authFailed)
+
+        // Refused again, then new headers from JS clear it.
+        state.recordRemoteFailure(refusedAt + 2, RemoteSyncStatus.FORBIDDEN, 403, "Upload refused: HTTP 403", retryable = false)
+        assertTrue(state.remoteSyncStatus().authFailed)
+        Thread.sleep(5)
+        core.updateConfig(core.config().copy(remoteSyncHeaders = mapOf("Authorization" to "Bearer new")))
+        assertFalse(state.remoteSyncStatus().authFailed)
+
+        // An accepted upload resets the count and keeps the failure as history.
+        state.recordRemoteSuccess(System.currentTimeMillis())
+        status = state.remoteSyncStatus()
+        assertEquals(0, status.consecutiveFailures)
+        assertEquals(RemoteSyncStatus.FORBIDDEN, status.lastFailure?.reason)
     }
 
     @Test

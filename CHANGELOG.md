@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - Unreleased
+
+Additive: the evidence a server-side verifier scores, signed with the
+totals; background upload failures that survive until the app looks; fewer
+Health Connect permissions for apps that read steps alone. Nothing existing
+changes shape unless asked.
+
+### Added
+
+- **`getVerificationSnapshot(date, { include })`** puts the evidence behind
+  a day's totals inside the signed payload: `'minutes'` (the per-minute
+  buckets), `'motionWindows'` and `'healthConnectRecords'` (the raw records,
+  of `healthConnectRecordTypes`, default steps). One signature and one Play
+  Integrity `requestHash` then cover what a server scores for cadence or
+  motion, where before only the totals were signed and a modified app could
+  send doctored minutes beside them. `include` is echoed; the records carry
+  a `status` that says why they are missing when they are. Without
+  `include` the snapshot is the 2.0 shape, and `schemaVersion` stays 2.
+- **`getSyncStatus()`** returns what remote uploads last did, stored across
+  process deaths: last attempt and success, consecutive failures, the last
+  failure with its reason and HTTP status, pending days, and `authFailed` -
+  the credentials were refused and nothing has changed since. Uploads run
+  in WorkManager, usually with no JS to hear `syncAuthFailed`; the refusal
+  used to be lost, and every later run failed the same way unnoticed.
+- **`healthConnectReadTypes`** config, default
+  `['steps', 'distance', 'totalCalories']`. An app that reads steps alone
+  sets `['steps']` and declares and asks for `READ_STEPS` only; distance and
+  calories on a day answered from Health Connect are then derived from the
+  step count. The Expo plugin takes the same list as `healthConnect.readTypes`.
+- **Distance records** in `getHealthConnectRecords(start, end, { recordTypes })`
+  and in change tracking through
+  `getHealthConnectChangesToken({ recordTypes })`, for per-interval distance
+  checks. Records now carry `recordType`; distance ones carry
+  `distanceMeters` in place of `count`. Steps alone remains the default, and
+  each type needs its own read grant.
+- **`prepareIntegrity(cloudProjectNumber)`** prepares Play Integrity's token
+  provider ahead of the first `requestIntegrityToken()`, which otherwise pays
+  for it.
+- **`StepTrackerError.details`.** `E_INTEGRITY_FAILED` carries
+  `{ playErrorCode, playError, retryable }`, and the docs list which of
+  Play's codes are temporary.
+
+### Changed
+
+- `HealthConnectStatus.canRead` is measured against `healthConnectReadTypes`;
+  with the default it is the same three permissions as before.
+- A raw Health Connect read whose grant is revoked mid-call rejects with
+  `E_HEALTH_CONNECT_DENIED` rather than `E_UNKNOWN`, and the message names
+  the missing permission.
+
 ## [2.0.1] - 2026-09-27
 
 Fixes from a review of 2.0.0. No API changes.
@@ -45,7 +95,9 @@ Fixes from a review of 2.0.0. No API changes.
 
 - A fourth compatibility build: React Native 0.77.3 with the new architecture
   turned off, the path events take on the old architecture.
-- Published by the tag workflow, with npm provenance.
+- The tag workflow stopped at `npm publish` for want of an `NPM_TOKEN`
+  secret, so 2.0.1 was published by hand and carries no npm provenance,
+  like 2.0.0.
 
 ## [2.0.0] - 2026-09-27
 
@@ -424,7 +476,7 @@ events, the same remote payload. Everything is opt-in or additive.
   `elapsedRealtime`-derived boot id so a server can spot clock edits. Apps
   that verify server-side were stitching this together from four calls.
   The JS wrapper rejects a malformed date with `E_INVALID_CONFIG` before
-  touching native, like the range reads. [API.md](docs/API.md#getverificationsnapshotdate-string-promiseverificationsnapshot)
+  touching native, like the range reads. [API.md](docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot)
   has a worked example of posting it and a rule set for the other end.
 
 #### Remote sync: idempotent, and optionally richer
@@ -899,6 +951,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.0
 [2.0.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.1
 [2.0.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.0
 [1.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.5.0

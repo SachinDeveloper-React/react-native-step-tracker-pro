@@ -149,6 +149,11 @@ restored onto a new phone the sealed headers cannot be opened there (the
 Keystore key does not travel), so the first upload is refused and the same
 event asks for fresh ones.
 
+The event only reaches a running app, and uploads usually run with the app
+closed. From 2.1 the refusal is stored: check `getSyncStatus()` when the app
+comes up, and act when `remote.authFailed` is true - `lastFailure.reason`
+says which of the three it was.
+
 ## `ForegroundServiceDidNotStartInTimeException`
 
 Something in your app is delaying the service start past the 5-second window,

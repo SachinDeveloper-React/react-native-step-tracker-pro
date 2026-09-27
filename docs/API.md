@@ -197,7 +197,7 @@ by days that have not happened yet.
 Raw rows, zero-filled. Use this to draw charts; use `getStatsForRange` when you
 want the aggregates computed for you.
 
-### `getVerificationSnapshot(date: string): Promise<VerificationSnapshot>`
+### `getVerificationSnapshot(date: string, options?): Promise<VerificationSnapshot>`
 
 Everything a server needs to judge one day, with **nothing resolved for it**.
 An app that converts steps into anything of value should post this rather
@@ -244,11 +244,47 @@ from 1.x: the 1.5 shape if it carries `integrity` (and `suspectSteps`), the
 parse as version 2 with those fields missing.
 `libraryVersion` says which release of this package produced it.
 
-A second argument, `{ sign?: boolean, nonce?: string }`, signs the snapshot
-with the install's Keystore key and echoes a server-issued nonce inside what
-was signed; the result then carries `nonce`, `signedAt` and a `signature`
-block. See [Integrity checks](#attestdevicechallenge-string-promisedeviceattestation)
+The second argument, `{ sign?, nonce?, include?, healthConnectRecordTypes? }`,
+signs the snapshot with the install's Keystore key and echoes a server-issued
+nonce inside what was signed; the result then carries `nonce`, `signedAt` and
+a `signature` block. See [Integrity checks](#attestdevicechallenge-string-promisedeviceattestation)
 for the key, the attestation and how a server verifies it.
+
+**The evidence, signed with the totals** (2.1). The totals above are built
+from finer data - the per-minute buckets, the motion windows, the raw Health
+Connect records - and a server that scores cadence or motion needs that data
+under the same signature, or a modified app could send doctored minutes next
+to genuine totals. `include` puts it inside the signed payload, so one
+signature and one Play Integrity `requestHash` cover all of it:
+
+```ts
+const snapshot = await StepTracker.getVerificationSnapshot(date, {
+  sign: true,
+  nonce,
+  include: ['minutes', 'motionWindows', 'healthConnectRecords'],
+  healthConnectRecordTypes: ['steps', 'distance'], // default ['steps']
+});
+// snapshot.include              ['minutes', 'motionWindows', 'healthConnectRecords']
+// snapshot.minutes              StepMinute[]   - as getStepMinutes(date, date)
+// snapshot.motionWindows        MotionWindow[] - as getMotionWindows(date, date)
+// snapshot.healthConnectRecords { status: 'read', recordTypes, records, truncated }
+```
+
+- `minutes` is recorded only while `fraudDetection.enabled`, and
+  `motionWindows` only while `motionSampling.enabled`; otherwise each is `[]`.
+- `healthConnectRecords` has the `getHealthConnectRecords()` shape plus a
+  `status`: `'read'`, or why the records are missing - `'disabled'`,
+  `'unavailable'`, `'not_granted'` (a read permission for `recordTypes`),
+  `'timeout'` or `'failed'`. The snapshot is still returned and signed. Unlike
+  `sources`, it does not follow the step-source policy: an explicit ask reads
+  whenever the provider and the grant allow.
+- `include` is echoed in a fixed order, so a server can tell "asked for and
+  empty" from "not asked for". Without `include` the snapshot is exactly the
+  2.0 shape, and `schemaVersion` stays `2` - these are new fields.
+
+A day of per-minute buckets is at most 1,440 entries, but a watch writing a
+record a minute adds as many again per type, so ask for what the server
+actually scores.
 
 `resolved` is what the current policy chose, for comparison only. `sources`
 follows the same rules as every other Health Connect read — no provider, no
@@ -495,7 +531,7 @@ attestation still gets a key, reported with `attested: false`; decide on the
 server what that is worth.
 
 **Signed snapshots.** Pass `{ sign: true, nonce }` to
-[`getVerificationSnapshot`](#getverificationsnapshotdate-string-promiseverificationsnapshot):
+[`getVerificationSnapshot`](#getverificationsnapshotdate-string-options-promiseverificationsnapshot):
 
 ```ts
 const { nonce } = await api.post('/steps/nonce');
@@ -566,8 +602,50 @@ dependencies {
 ```
 
 Without it the call rejects with `E_INTEGRITY_UNAVAILABLE`; when Play refuses,
-with `E_INTEGRITY_FAILED` and Play's error code in the message. `requestHash`
-is at most 500 characters.
+with `E_INTEGRITY_FAILED`. `requestHash` is at most 500 characters.
+
+### `prepareIntegrity(cloudProjectNumber: number): Promise<void>`
+
+Prepares the token provider ahead of time (2.1). Preparing warms Play's side
+up and can take seconds, and without this the first `requestIntegrityToken()`
+pays for it. Call it at app start, or when the screen that will need a token
+opens:
+
+```ts
+StepTracker.prepareIntegrity(123456789012).catch(() => {
+  // Not fatal: requestIntegrityToken() prepares on its own if this failed.
+});
+```
+
+It is idempotent - a provider already prepared is reused - and rejects exactly
+like `requestIntegrityToken()`.
+
+**Which failures to retry.** On `E_INTEGRITY_FAILED` from either call,
+`error.details` is an `IntegrityErrorDetails`:
+`{ playErrorCode, playError, retryable }`. Back off exponentially and try
+again only when `retryable` is true:
+
+| Play error | Code | Retry? | What fixes it |
+|---|---|---|---|
+| `NETWORK_ERROR` | -3 | yes | connectivity |
+| `TOO_MANY_REQUESTS` | -8 | yes | backing off |
+| `CANNOT_BIND_TO_SERVICE` | -9 | yes | backing off; an old Play Store can also cause it |
+| `GOOGLE_SERVER_UNAVAILABLE` | -12 | yes | backing off |
+| `CLIENT_TRANSIENT_ERROR` | -18 | yes | backing off |
+| `INTEGRITY_TOKEN_PROVIDER_INVALID` | -19 | yes | already re-prepared and retried once here |
+| `INTERNAL_ERROR` | -100 | yes | backing off |
+| `API_NOT_AVAILABLE` | -1 | no | the user updating the Play Store |
+| `PLAY_STORE_NOT_FOUND` | -2 | no | the official Play Store on the device |
+| `PLAY_SERVICES_NOT_FOUND` | -6 | no | Play services on the device |
+| `PLAY_STORE_VERSION_OUTDATED` | -14 | no | the user updating the Play Store |
+| `PLAY_SERVICES_VERSION_OUTDATED` | -15 | no | the user updating Play services |
+| `APP_NOT_INSTALLED` | -5 | no | the app coming from Play |
+| `APP_UID_MISMATCH` | -7 | no | the app coming from Play |
+| `CLOUD_PROJECT_NUMBER_IS_INVALID` | -16 | no | the right project number |
+| `REQUEST_HASH_TOO_LONG` | -17 | no | a hash of at most 500 characters |
+
+A code this release does not know reads `playError: 'UNKNOWN'` and
+`retryable: false`, so an app never retries blindly.
 
 
 ### Activity Recognition
@@ -837,7 +915,7 @@ Days a wearable already owns are skipped rather than written, and counted in
 `skippedRecords`. Writing this phone's parallel count of the same walk would
 leave every other app reading Health Connect with both copies of it.
 
-### `getHealthConnectRecords(startIso, endIso): Promise<HealthConnectRecordList>`
+### `getHealthConnectRecords(startIso, endIso, options?): Promise<HealthConnectRecordList>`
 
 Every step record Health Connect holds between two instants, from every app,
 as stored - for a server that wants the evidence rather than a total.
@@ -845,6 +923,7 @@ as stored - for a server that wants the evidence rather than a total.
 ```ts
 {
   records: [{
+    recordType: 'steps',                       // from 2.1
     id: 'a1b2…',
     clientRecordId: 'stp-steps-2026-09-14',   // null when the writer set none
     clientRecordVersion: 1757845200000,
@@ -864,7 +943,27 @@ ISO-8601 instants with a zone, start before end. Unlike the aggregated reads
 it does not fall back quietly: it rejects with
 `E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`.
 
-### `getHealthConnectChangesToken(): Promise<string>`
+**Distance records** (2.1). A server checking distance against steps per
+interval needs both. `{ recordTypes: ['steps', 'distance'] }` returns them in
+one list, oldest first; narrow each on `recordType`:
+
+```ts
+const { records } = await StepTracker.getHealthConnectRecords(from, to, {
+  recordTypes: ['steps', 'distance'],
+});
+for (const record of records) {
+  if (record.recordType === 'distance') use(record.distanceMeters);
+  else use(record.count);
+}
+```
+
+A distance record has every field a step record has except `count`, and
+`distanceMeters` instead. Each type needs its own read permission granted -
+`READ_DISTANCE` for distance - or the call rejects with
+`E_HEALTH_CONNECT_DENIED` naming what is missing. Up to 10,000 records of
+each type; `truncated` is true when any type had more.
+
+### `getHealthConnectChangesToken(options?): Promise<string>`
 ### `getHealthConnectChanges(token: string): Promise<HealthConnectChanges>`
 
 Change tracking for step records: what was inserted, updated or deleted
@@ -891,6 +990,11 @@ await storage.set('hcToken', token);
 `upserted` holds records in the `getHealthConnectRecords()` shape; `deletedIds`
 the ids of deleted ones. Each call reads at most 20 pages; `hasMore` says to
 call again straight away. Same rejections as `getHealthConnectRecords()`.
+
+A token covers the record types it was taken for: steps by default, or
+`getHealthConnectChangesToken({ recordTypes: ['steps', 'distance'] })` for
+both (2.1). The changes then mix both types, as the records call does; tell
+the type checker with `getHealthConnectChanges<AnyHealthConnectRecord>(token)`.
 
 ### `openHealthConnectSettings(): Promise<boolean>`
 
@@ -1144,6 +1248,52 @@ network.
 
 Days written locally but not yet mirrored. Non-zero offline is normal.
 
+### `getSyncStatus(): Promise<SyncStatus>`
+
+What remote uploads last did, kept across process deaths (2.1). Uploads run
+in a WorkManager job, usually with no JS alive to hear `syncAuthFailed` or
+`syncCompleted`; this is where the app finds out when it next comes up.
+
+```ts
+{
+  remote: {
+    configured: true,           // remoteSyncUrl is set
+    pendingRecords: 3,          // days the endpoint has not accepted yet
+    lastAttemptAt: 1757845200000,
+    lastSuccessAt: 1757800000000,
+    consecutiveFailures: 2,
+    lastFailure: {              // null when none; kept after a later success
+      at: 1757845200000,
+      reason: 'unauthorized',   // | 'forbidden' | 'no_key' | 'insecure_url'
+                                // | 'http_error' | 'no_response'
+      status: 401,              // null when the server did not answer
+      message: 'Upload refused: HTTP 401',
+      retryable: false,         // the worker retries http_error and no_response itself
+    },
+    authFailed: true,
+  },
+}
+```
+
+`authFailed` is the one to act on: the last attempt was refused over its
+credentials, and nothing has changed since - no new `remoteSyncHeaders`,
+`remoteSyncUrl` or `remoteSyncAuth`, no `attestDevice()`, no accepted upload.
+Every scheduled upload would be refused the same way until the app acts:
+
+```ts
+const { remote } = await StepTracker.getSyncStatus();
+if (remote.authFailed) {
+  if (remote.lastFailure?.reason === 'no_key') {
+    await registerKey(await StepTracker.attestDevice(await api.challenge()));
+  } else {
+    await StepTracker.updateConfig({
+      remoteSyncHeaders: { Authorization: `Bearer ${await refreshToken()}` },
+    });
+  }
+  await StepTracker.syncNow();
+}
+```
+
 ### Remote sync
 
 With `remoteSyncUrl` set, a WorkManager job POSTs every day not yet uploaded
@@ -1157,7 +1307,9 @@ Android Keystore before they are stored, never written in the clear; headers
 a 1.x release stored in the clear are sealed on first read. A 401 or 403 is
 not retried with the same credentials: `syncAuthFailed` fires with the
 status, and the app refreshes them with `updateConfig({ remoteSyncHeaders })`
-and calls `syncNow()`. `remoteSyncAuth: 'signature'` sends no headers at all
+and calls `syncNow()`. The refusal is also stored, so an app that was not
+running reads it from [`getSyncStatus()`](#getsyncstatus-promisesyncstatus)
+as `remote.authFailed`. `remoteSyncAuth: 'signature'` sends no headers at all
 and authenticates with the `Step-Tracker-Signature` header alone - the key
 from `attestDevice()`, checked against the public key your server stored -
 so no secret lives on the device. Without a key it does not upload, and
@@ -1312,6 +1464,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
 | `healthConnectReadActiveCalories` | `false` | also read active calories per source (`StepSource.activeCalories`); one more permission to declare |
+| `healthConnectReadTypes` | `['steps', 'distance', 'totalCalories']` | which record types reads cover, each one read permission to declare; `'steps'` is required. `['steps']` asks for `READ_STEPS` alone, and a day answered from Health Connect then derives distance and calories from the step count. See [PERMISSIONS.md](PERMISSIONS.md) |
 | `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |

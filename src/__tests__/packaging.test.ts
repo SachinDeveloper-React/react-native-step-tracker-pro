@@ -39,6 +39,23 @@ describe('Expo config plugin', () => {
     ]);
   });
 
+  it('declares only the read types asked for, steps always', () => {
+    expect(
+      manifest.permissionsFor({ healthConnect: { readTypes: ['steps'], write: false } })
+    ).toEqual(['android.permission.health.READ_STEPS']);
+    expect(
+      manifest.permissionsFor({
+        healthConnect: { readTypes: ['totalCalories'], write: false },
+      })
+    ).toEqual([
+      'android.permission.health.READ_STEPS',
+      'android.permission.health.READ_TOTAL_CALORIES_BURNED',
+    ]);
+    expect(() =>
+      manifest.permissionsFor({ healthConnect: { readTypes: ['heartRate'] } })
+    ).toThrow(/heartRate/);
+  });
+
   it('adds only what the manifest does not already declare', () => {
     const result = manifest.applyPermissions(
       {

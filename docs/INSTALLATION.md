@@ -200,8 +200,11 @@ opt-in permissions and raises `android.minSdkVersion` to 26:
 ```
 
 `healthConnect` takes `true` for the default read and write sets, or an object
-with `read`, `write` (both default `true`), `backgroundRead`, `historyRead` and
-`activeCalories`. Leave it out for sensor-only counting.
+with `read`, `write` (both default `true`), `readTypes`, `backgroundRead`,
+`historyRead` and `activeCalories`. `readTypes` matches the
+`healthConnectReadTypes` config option - `["steps"]` declares `READ_STEPS`
+alone - so pass the same list to both. Leave `healthConnect` out for
+sensor-only counting.
 `batteryOptimizationPrompt: true` adds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
 
 ## 5. Custom notification icon (recommended)

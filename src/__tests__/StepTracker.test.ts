@@ -119,6 +119,16 @@ const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
   [{ remoteSyncPayload: 'all' as 'full' }, /remoteSyncPayload/],
   [{ sex: 'other' as 'unspecified' }, /sex/],
   [{ dailyGoal: Number.NaN }, /dailyGoal/],
+  [{ healthConnectReadTypes: [] }, /healthConnectReadTypes/],
+  [
+    { healthConnectReadTypes: ['steps', 'heartRate' as 'steps'] },
+    /healthConnectReadTypes/,
+  ],
+  [{ healthConnectReadTypes: ['distance'] }, /include 'steps'/],
+  [
+    { healthConnectReadTypes: 'steps' as unknown as Array<'steps'> },
+    /healthConnectReadTypes/,
+  ],
 ];
 
 describe('initialize()', () => {
@@ -358,6 +368,43 @@ describe('date validation', () => {
     });
   });
 
+  it('getVerificationSnapshot() validates include and record types before native', async () => {
+    for (const bad of [
+      { include: ['minutes', 'steps'] },
+      { include: 'minutes' },
+      { healthConnectRecordTypes: [] },
+      { healthConnectRecordTypes: ['heartRate'] },
+    ]) {
+      await expect(
+        StepTracker.getVerificationSnapshot('2026-09-14', bad as never)
+      ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    }
+    expect(native.calls).toHaveLength(0);
+  });
+
+  it('getVerificationSnapshot() sends only the options that are set', async () => {
+    await StepTracker.getVerificationSnapshot('2026-09-14', {
+      sign: true,
+      include: ['minutes', 'motionWindows', 'healthConnectRecords'],
+      healthConnectRecordTypes: ['steps', 'distance'],
+    });
+    await StepTracker.getVerificationSnapshot('2026-09-14', {
+      sign: undefined,
+      nonce: undefined,
+    });
+    expect(native.calledWith('getVerificationSnapshot')).toEqual([
+      [
+        '2026-09-14',
+        {
+          sign: true,
+          include: ['minutes', 'motionWindows', 'healthConnectRecords'],
+          healthConnectRecordTypes: ['steps', 'distance'],
+        },
+      ],
+      ['2026-09-14', {}],
+    ]);
+  });
+
   it('getMotionWindows() validates the range and unwraps the list', async () => {
     await expect(
       StepTracker.getMotionWindows('2026-09-10', '2026-09-09')
@@ -371,6 +418,24 @@ describe('date validation', () => {
     await expect(
       StepTracker.getMotionWindows('2026-09-09', '2026-09-09')
     ).resolves.toEqual([{ startedAt: 1, dominantFrequencyHz: 1.8 }]);
+  });
+
+  it('passes healthConnectReadTypes through, all three by default', async () => {
+    await StepTracker.initialize({ healthConnectReadTypes: ['steps'] });
+    await StepTracker.updateConfig({
+      healthConnectReadTypes: ['steps', 'totalCalories'],
+    });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      healthConnectReadTypes: ['steps'],
+    });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      healthConnectReadTypes: ['steps', 'totalCalories'],
+    });
+    expect(DEFAULT_CONFIG.healthConnectReadTypes).toEqual([
+      'steps',
+      'distance',
+      'totalCalories',
+    ]);
   });
 
   it('passes motionSampling through as one object', async () => {
@@ -459,6 +524,39 @@ describe('date validation', () => {
     ]);
   });
 
+  it('prepareIntegrity() validates the project number and passes it through', async () => {
+    for (const bad of [0, -3, 1.5, Number.NaN, '123' as unknown as number]) {
+      await expect(StepTracker.prepareIntegrity(bad)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+      });
+    }
+    expect(native.calls).toHaveLength(0);
+    native.when('prepareIntegrity', true);
+    await expect(StepTracker.prepareIntegrity(123456789012)).resolves.toBeUndefined();
+    expect(native.calledWith('prepareIntegrity')).toEqual([[123456789012]]);
+  });
+
+  it("carries Play's error code and retryability in details", async () => {
+    native.when(
+      'prepareIntegrity',
+      Object.assign(
+        new Error('Play Integrity failed (error -3 NETWORK_ERROR): offline'),
+        {
+          code: 'E_INTEGRITY_FAILED',
+          userInfo: { playErrorCode: -3, playError: 'NETWORK_ERROR', retryable: true },
+        }
+      )
+    );
+    const error = await StepTracker.prepareIntegrity(42).catch((e) => e);
+    expect(error).toBeInstanceOf(StepTrackerError);
+    expect(error.code).toBe('E_INTEGRITY_FAILED');
+    expect(error.details).toEqual({
+      playErrorCode: -3,
+      playError: 'NETWORK_ERROR',
+      retryable: true,
+    });
+  });
+
   it('the attestation key getters pass through', async () => {
     native.when('hasAttestationKey', true);
     await expect(StepTracker.hasAttestationKey()).resolves.toBe(true);
@@ -485,10 +583,88 @@ describe('date validation', () => {
     await expect(
       StepTracker.getHealthConnectRecords('2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z')
     ).resolves.toEqual({ records: [], truncated: false });
+    expect(native.calledWith('getHealthConnectRecords')).toEqual([
+      ['2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z', { recordTypes: ['steps'] }],
+    ]);
     native.when('getHealthConnectChanges', { tokenExpired: true, nextToken: null });
     await expect(StepTracker.getHealthConnectChanges('tok')).resolves.toMatchObject({
       tokenExpired: true,
     });
+  });
+
+  it('raw records and change tracking take record types, steps by default', async () => {
+    for (const bad of [[], ['heartRate'], 'distance']) {
+      await expect(
+        StepTracker.getHealthConnectRecords(
+          '2026-09-01T00:00:00Z',
+          '2026-09-02T00:00:00Z',
+          {
+            recordTypes: bad as never,
+          }
+        )
+      ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG', message: /recordTypes/ });
+      await expect(
+        StepTracker.getHealthConnectChangesToken({ recordTypes: bad as never })
+      ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    }
+    expect(native.calls).toHaveLength(0);
+
+    const distance = {
+      recordType: 'distance',
+      id: 'd1',
+      startTime: 1,
+      distanceMeters: 812.5,
+    };
+    native.when('getHealthConnectRecords', { records: [distance], truncated: false });
+    const list = await StepTracker.getHealthConnectRecords(
+      '2026-09-01T00:00:00Z',
+      '2026-09-02T00:00:00Z',
+      { recordTypes: ['steps', 'distance'] }
+    );
+    const first = list.records[0]!;
+    // The union narrows on recordType.
+    expect(first.recordType === 'distance' ? first.distanceMeters : first.count).toBe(
+      812.5
+    );
+
+    native.when('getHealthConnectChangesToken', 'tok');
+    await expect(StepTracker.getHealthConnectChangesToken()).resolves.toBe('tok');
+    await StepTracker.getHealthConnectChangesToken({
+      recordTypes: ['steps', 'distance'],
+    });
+    expect(native.calledWith('getHealthConnectRecords')).toEqual([
+      [
+        '2026-09-01T00:00:00Z',
+        '2026-09-02T00:00:00Z',
+        { recordTypes: ['steps', 'distance'] },
+      ],
+    ]);
+    expect(native.calledWith('getHealthConnectChangesToken')).toEqual([
+      [{ recordTypes: ['steps'] }],
+      [{ recordTypes: ['steps', 'distance'] }],
+    ]);
+  });
+
+  it('getSyncStatus() passes the stored outcome through', async () => {
+    const status = {
+      remote: {
+        configured: true,
+        pendingRecords: 3,
+        lastAttemptAt: 10,
+        lastSuccessAt: 0,
+        consecutiveFailures: 2,
+        lastFailure: {
+          at: 10,
+          reason: 'unauthorized',
+          status: 401,
+          message: 'Upload refused: HTTP 401',
+          retryable: false,
+        },
+        authFailed: true,
+      },
+    };
+    native.when('getSyncStatus', status);
+    await expect(StepTracker.getSyncStatus()).resolves.toEqual(status);
   });
 
   it('unwraps history records', async () => {
@@ -722,6 +898,15 @@ describe('errors', () => {
     const error = await StepTracker.startTracking().catch((e) => e);
     expect(error).toBeInstanceOf(StepTrackerError);
     expect(error.code).toBe('E_PERMISSION_DENIED');
+  });
+
+  it('leaves details undefined when the native side attached no userInfo', async () => {
+    native.when(
+      'startTracking',
+      Object.assign(new Error('nope'), { code: 'E_UNKNOWN', userInfo: null })
+    );
+    const error = await StepTracker.startTracking().catch((e) => e);
+    expect(error.details).toBeUndefined();
   });
 
   it('reports an unsupported platform without touching native', async () => {

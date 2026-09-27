@@ -204,3 +204,7 @@ fun ReadableMap.optString(key: String, fallback: String?): String? =
 
 fun ReadableArray.toStringList(): List<String> =
     (0 until size()).mapNotNull { getString(it) }
+
+/** The string list at [key], or null when it is absent or null. */
+fun ReadableMap.optStringList(key: String): List<String>? =
+    if (hasKey(key) && !isNull(key)) getArray(key)?.toStringList() else null

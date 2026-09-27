@@ -4,6 +4,7 @@ import type { Spec } from './NativeStepTrackerPro';
 import { DEFAULT_CONFIG, MODULE_NAME, STRIDE_COEFFICIENT } from './constants';
 import { StepTrackerError, toStepTrackerError } from './errors';
 import type {
+  AnyHealthConnectRecord,
   BackgroundRestrictionStatus,
   CompanionApp,
   CurrentStepSource,
@@ -12,7 +13,10 @@ import type {
   DeviceCapabilities,
   EventSubscription,
   HealthConnectChanges,
+  HealthConnectRecord,
   HealthConnectRecordList,
+  HealthConnectRecordOptions,
+  HealthConnectRecordType,
   HealthConnectStatus,
   IntegrityEvent,
   IntegrityReport,
@@ -31,10 +35,12 @@ import type {
   StepTrackerEvent,
   StepTrackerEventMap,
   SyncEvent,
+  SyncStatus,
   TrackingHealth,
   TrackingState,
   VerificationSnapshot,
   VerificationSnapshotOptions,
+  VerificationSnapshotPart,
 } from './types';
 
 const LINKING_ERROR =
@@ -280,6 +286,91 @@ function assertAtLeast(name: string, value: number | undefined, min: number): vo
  * @param allowHttp whether a plain `http://` remoteSyncUrl is allowed; the
  *   patch's own `remoteSyncAllowHttp` unless the caller knows the stored one.
  */
+/**
+ * A list option: an array of known names. Duplicates are harmless and kept;
+ * the native side reads a set.
+ */
+function assertList(
+  name: string,
+  value: unknown,
+  allowed: readonly string[],
+  { nonEmpty = false }: { nonEmpty?: boolean } = {}
+): void {
+  if (value == null) return;
+  if (
+    !Array.isArray(value) ||
+    (nonEmpty && value.length === 0) ||
+    !value.every((item) => allowed.includes(item as string))
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      `${name} must be ${nonEmpty ? 'a non-empty' : 'an'} array of ${allowed.join(', ')}`
+    );
+  }
+}
+
+const READ_TYPES = ['steps', 'distance', 'totalCalories'] as const;
+const RECORD_TYPES: readonly HealthConnectRecordType[] = ['steps', 'distance'];
+const SNAPSHOT_PARTS: readonly VerificationSnapshotPart[] = [
+  'minutes',
+  'motionWindows',
+  'healthConnectRecords',
+];
+
+function assertCloudProjectNumber(value: unknown): void {
+  if (!(Number.isSafeInteger(value) && (value as number) > 0)) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'cloudProjectNumber must be a positive integer'
+    );
+  }
+}
+
+/** `{ recordTypes }` for the native side, steps when absent. */
+function recordTypesOption(options: HealthConnectRecordOptions | undefined): {
+  recordTypes: HealthConnectRecordType[];
+} {
+  const recordTypes = options?.recordTypes ?? ['steps'];
+  assertList('recordTypes', recordTypes, RECORD_TYPES, { nonEmpty: true });
+  return { recordTypes };
+}
+
+/**
+ * Every step record Health Connect holds between two instants, from every
+ * app, as stored: id, client record id, source app, recording method,
+ * device, start and end with their zone offsets, last-modified time and
+ * count. Up to 10,000 records; `truncated` says to narrow the window.
+ * Rejects with `E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`
+ * rather than returning an empty list.
+ */
+async function getHealthConnectRecords(
+  startIso: string,
+  endIso: string
+): Promise<HealthConnectRecordList>;
+/**
+ * Every record of `options.recordTypes` between two instants, from every
+ * app, as stored, in one list oldest first; narrow each on `recordType`.
+ * Distance records carry `distanceMeters` where step records carry `count`.
+ * Up to 10,000 records of each type. Each type needs its read permission
+ * granted, or the call rejects with `E_HEALTH_CONNECT_DENIED` naming it.
+ */
+async function getHealthConnectRecords(
+  startIso: string,
+  endIso: string,
+  options: HealthConnectRecordOptions
+): Promise<HealthConnectRecordList<AnyHealthConnectRecord>>;
+async function getHealthConnectRecords(
+  startIso: string,
+  endIso: string,
+  options?: HealthConnectRecordOptions
+): Promise<HealthConnectRecordList<AnyHealthConnectRecord>> {
+  assertInstantRange(startIso, endIso);
+  const native = recordTypesOption(options);
+  return call(() =>
+    getNativeModule().getHealthConnectRecords(startIso, endIso, native)
+  ) as Promise<HealthConnectRecordList<AnyHealthConnectRecord>>;
+}
+
 function normaliseConfig(
   config: StepTrackerConfig,
   allowHttp: boolean | undefined = config.remoteSyncAllowHttp
@@ -315,6 +406,18 @@ function normaliseConfig(
     'drop',
   ]);
   assertOneOf('remoteSyncPayload', config.remoteSyncPayload, ['totals', 'full']);
+  assertList('healthConnectReadTypes', config.healthConnectReadTypes, READ_TYPES, {
+    nonEmpty: true,
+  });
+  if (
+    config.healthConnectReadTypes != null &&
+    !config.healthConnectReadTypes.includes('steps')
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      "healthConnectReadTypes must include 'steps'"
+    );
+  }
   if (config.height != null && (config.height < 50 || config.height > 260)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'height must be 50–260 cm');
   }
@@ -572,8 +675,22 @@ export const StepTracker = {
         'nonce must be a string of at most 512 characters'
       );
     }
+    assertList('include', options.include, SNAPSHOT_PARTS);
+    assertList(
+      'healthConnectRecordTypes',
+      options.healthConnectRecordTypes,
+      RECORD_TYPES,
+      {
+        nonEmpty: true,
+      }
+    );
+    // Only the keys that are set, so a 2.0-shaped call sends a 2.0-shaped map.
+    const native: Record<string, unknown> = {};
+    for (const key of ['sign', 'nonce', 'include', 'healthConnectRecordTypes'] as const) {
+      if (options[key] !== undefined) native[key] = options[key];
+    }
     return call(() =>
-      getNativeModule().getVerificationSnapshot(date, options)
+      getNativeModule().getVerificationSnapshot(date, native)
     ) as Promise<VerificationSnapshot>;
   },
 
@@ -683,15 +800,24 @@ export const StepTracker = {
         'requestHash must be a string of 1–500 characters'
       );
     }
-    if (!(Number.isSafeInteger(cloudProjectNumber) && cloudProjectNumber > 0)) {
-      throw new StepTrackerError(
-        'E_INVALID_CONFIG',
-        'cloudProjectNumber must be a positive integer'
-      );
-    }
+    assertCloudProjectNumber(cloudProjectNumber);
     return call(() =>
       getNativeModule().requestIntegrityToken({ requestHash, cloudProjectNumber })
     ) as Promise<IntegrityToken>;
+  },
+
+  /**
+   * Prepares Play Integrity's token provider for `cloudProjectNumber`, so
+   * the first `requestIntegrityToken()` does not pay for it - preparing
+   * warms Play's side up and can take seconds. Call it at app start or
+   * before the screen that will need a token. Idempotent: a provider already
+   * prepared is reused. Rejects like `requestIntegrityToken()`; on
+   * `E_INTEGRITY_FAILED`, `error.details.retryable` says whether backing off
+   * and calling again can succeed.
+   */
+  async prepareIntegrity(cloudProjectNumber: number): Promise<void> {
+    assertCloudProjectNumber(cloudProjectNumber);
+    await call(() => getNativeModule().prepareIntegrity(cloudProjectNumber));
   },
 
   /**
@@ -915,43 +1041,41 @@ export const StepTracker = {
     return call(() => getNativeModule().syncWithHealthConnect()) as Promise<SyncEvent>;
   },
 
+  // Overloaded, so it is declared as a function above; documented there.
+  getHealthConnectRecords,
+
   /**
-   * Every step record Health Connect holds between two instants, from every
-   * app, as stored: id, client record id, source app, recording method,
-   * device, start and end with their zone offsets, last-modified time and
-   * count. Up to 10,000 records; `truncated` says to narrow the window.
-   * Rejects with `E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`
-   * rather than returning an empty list.
+   * A change-tracking cursor, starting now, for `options.recordTypes` -
+   * step records by default. Valid for 30 days.
    */
-  async getHealthConnectRecords(
-    startIso: string,
-    endIso: string
-  ): Promise<HealthConnectRecordList> {
-    assertInstantRange(startIso, endIso);
-    return call(() =>
-      getNativeModule().getHealthConnectRecords(startIso, endIso)
-    ) as Promise<HealthConnectRecordList>;
-  },
-
-  /** A change-tracking cursor for step records, starting now. Valid for 30 days. */
-  async getHealthConnectChangesToken(): Promise<string> {
-    return call(() => getNativeModule().getHealthConnectChangesToken());
+  async getHealthConnectChangesToken(
+    options?: HealthConnectRecordOptions
+  ): Promise<string> {
+    const native = recordTypesOption(options);
+    return call(() => getNativeModule().getHealthConnectChangesToken(native));
   },
 
   /**
-   * Step records inserted, updated or deleted since `token`, and the cursor
-   * to use next. `tokenExpired: true` means Health Connect no longer has the
+   * Records inserted, updated or deleted since `token`, and the cursor to
+   * use next - of the types the token was taken for, step records by
+   * default. `tokenExpired: true` means Health Connect no longer has the
    * changes since that cursor: take a new token and re-read the window with
    * `getHealthConnectRecords()`. `hasMore: true` means call again with
    * `nextToken` straight away.
+   *
+   * A token taken with `recordTypes: ['steps', 'distance']` returns both;
+   * say so to the type checker with
+   * `getHealthConnectChanges<AnyHealthConnectRecord>(token)`.
    */
-  async getHealthConnectChanges(token: string): Promise<HealthConnectChanges> {
+  async getHealthConnectChanges<R extends AnyHealthConnectRecord = HealthConnectRecord>(
+    token: string
+  ): Promise<HealthConnectChanges<R>> {
     if (typeof token !== 'string' || token.length === 0) {
       throw new StepTrackerError('E_INVALID_CONFIG', 'token must be a non-empty string');
     }
-    return call(() =>
-      getNativeModule().getHealthConnectChanges(token)
-    ) as Promise<HealthConnectChanges>;
+    return call(() => getNativeModule().getHealthConnectChanges(token)) as Promise<
+      HealthConnectChanges<R>
+    >;
   },
 
   // ---- step sources ----------------------------------------------------
@@ -1009,6 +1133,17 @@ export const StepTracker = {
   },
 
   // ---- sync ------------------------------------------------------------
+
+  /**
+   * What remote uploads last did, kept across process deaths: when they
+   * ran, whether they were accepted, the last failure, and `authFailed` -
+   * the credentials were refused and nothing has changed since. Uploads run
+   * in the background, usually with no JS alive to hear `syncAuthFailed`,
+   * so read this when the app comes up.
+   */
+  async getSyncStatus(): Promise<SyncStatus> {
+    return call(() => getNativeModule().getSyncStatus()) as Promise<SyncStatus>;
+  },
 
   async getPendingSyncCount(): Promise<number> {
     return call(() => getNativeModule().getPendingSyncCount());

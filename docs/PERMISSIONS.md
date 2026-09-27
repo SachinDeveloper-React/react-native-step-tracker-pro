@@ -34,7 +34,7 @@ side of the split a permission is on.
 | `POST_NOTIFICATIONS` | the library | the ongoing notification, Android 13+ | the notification is invisible; counting continues |
 | `RECEIVE_BOOT_COMPLETED` | the library | restarting after a reboot | tracking stays off until the app is opened |
 | `WAKE_LOCK` | the library | sync jobs and the accelerometer fallback | background work can stop mid-run |
-| Health Connect read set: `READ_STEPS`, `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` | **your app**, with `healthConnectReadEnabled` (default on) | reading watches and other apps | `E_HEALTH_CONNECT_NOT_DECLARED` |
+| Health Connect read set: `READ_STEPS`, and `READ_DISTANCE` and `READ_TOTAL_CALORIES_BURNED` unless `healthConnectReadTypes` leaves them out | **your app**, with `healthConnectReadEnabled` (default on) | reading watches and other apps | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | Health Connect write set: `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_TOTAL_CALORIES_BURNED` | **your app**, with `healthConnectWriteEnabled` (default on) | mirroring this phone's count | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_HEALTH_DATA_IN_BACKGROUND` | **your app**, with `healthConnectBackgroundRead` | background reads of a watch | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_HEALTH_DATA_HISTORY` | **your app**, with `healthConnectHistoryRead` | reads past 30 days | `E_HEALTH_CONNECT_NOT_DECLARED` |
@@ -77,6 +77,7 @@ Add the Health Connect entries your config uses to
 ```xml
 <!-- healthConnectReadEnabled (default true): reading other apps and watches -->
 <uses-permission android:name="android.permission.health.READ_STEPS" />
+<!-- These two only while healthConnectReadTypes includes them (the default) -->
 <uses-permission android:name="android.permission.health.READ_DISTANCE" />
 <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
 
@@ -245,7 +246,7 @@ needs:
 
 | Config | Adds to the sheet |
 |---|---|
-| `healthConnectReadEnabled: true` (default) | `READ_STEPS`, `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` |
+| `healthConnectReadEnabled: true` (default) | `READ_STEPS`, `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` - or only the types in `healthConnectReadTypes` |
 | `healthConnectWriteEnabled: true` (default) | `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_TOTAL_CALORIES_BURNED` |
 | `healthConnectBackgroundRead: true` | `READ_HEALTH_DATA_IN_BACKGROUND` |
 | `healthConnectHistoryRead: true` | `READ_HEALTH_DATA_HISTORY` |
@@ -255,7 +256,26 @@ Each one has to be declared in your manifest as well - see
 [What the library declares](#what-the-library-declares-and-what-you-add).
 
 `getHealthConnectStatus().granted` is true when everything *your config* needs
-is granted; `canRead` / `canWrite` report the raw capability regardless.
+is granted; `canRead` / `canWrite` report the capability whether or not
+config turns reads or writes on - `canRead` against the types in
+`healthConnectReadTypes`.
+
+**Reading steps alone** (2.1). Distance and calories are two more
+permissions to declare and justify, and one more reason for a user to refuse
+the sheet. An app that shows steps only can drop them:
+
+```ts
+await StepTracker.initialize({
+  healthConnectReadTypes: ['steps'],
+  healthConnectWriteEnabled: false, // and no WRITE_* either, if you do not mirror
+});
+```
+
+It then declares `READ_STEPS` alone, and the sheet asks for nothing else. A
+day answered from Health Connect derives its distance and calories from the
+step count - stride and `calorieCoefficient` - as it already does for a
+watch that writes no distance. With the Expo plugin, pass the same list as
+`healthConnect.readTypes`.
 
 ### The flow
 

@@ -41,8 +41,9 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun hasAttestationKey(promise: Promise)
     abstract fun getAttestationKeyInfo(promise: Promise)
     abstract fun requestIntegrityToken(options: ReadableMap, promise: Promise)
-    abstract fun getHealthConnectRecords(startIso: String, endIso: String, promise: Promise)
-    abstract fun getHealthConnectChangesToken(promise: Promise)
+    abstract fun prepareIntegrity(cloudProjectNumber: Double, promise: Promise)
+    abstract fun getHealthConnectRecords(startIso: String, endIso: String, options: ReadableMap, promise: Promise)
+    abstract fun getHealthConnectChangesToken(options: ReadableMap, promise: Promise)
     abstract fun getHealthConnectChanges(token: String, promise: Promise)
 
     abstract fun resetToday(promise: Promise)
@@ -75,6 +76,7 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun getInstalledCompanionApps(promise: Promise)
 
     abstract fun getPendingSyncCount(promise: Promise)
+    abstract fun getSyncStatus(promise: Promise)
     abstract fun syncNow(promise: Promise)
 
     abstract fun addListener(eventName: String)

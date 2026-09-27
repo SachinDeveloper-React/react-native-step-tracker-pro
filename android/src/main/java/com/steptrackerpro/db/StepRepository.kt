@@ -156,6 +156,12 @@ class StepRepository(context: Context) {
 
     suspend fun countUnsynced(): Int = history.countUnsynced()
 
+    /** Days not yet accepted by [target]. */
+    suspend fun countUnsynced(target: SyncTarget): Int = when (target) {
+        SyncTarget.HEALTH_CONNECT -> history.countUnsyncedHealth()
+        SyncTarget.REMOTE -> history.countUnsyncedRemote()
+    }
+
     suspend fun markSynced(target: SyncTarget, dates: List<String>) {
         if (dates.isEmpty()) return
         when (target) {

@@ -65,6 +65,13 @@ data class StepTrackerConfig(
      * Connect permission, which the app must declare and justify.
      */
     val healthConnectReadActiveCalories: Boolean = false,
+    /**
+     * Which record types reads cover, by [com.steptrackerpro.health.HealthConnectManager.ReadType]
+     * `jsValue`. All three by default, as every earlier release read them.
+     * `steps` is always kept; an app that wants steps alone asks for - and
+     * declares - one read permission instead of three.
+     */
+    val healthConnectReadTypes: List<String> = DEFAULT_READ_TYPES,
     /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
@@ -233,6 +240,10 @@ data class StepTrackerConfig(
         preferredStepSourcePackage = preferredStepSourcePackage?.takeIf { it.isNotBlank() },
         wearableTrust = com.steptrackerpro.health.WearableTrust.from(wearableTrust).jsValue,
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+        healthConnectReadTypes = com.steptrackerpro.health.HealthConnectManager.ReadType
+            .parse(healthConnectReadTypes)
+            .sortedBy { it.ordinal }
+            .map { it.jsValue },
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
         remoteSyncPayload = com.steptrackerpro.sync.RemotePayload.Shape.from(remoteSyncPayload).jsValue,
         remoteSyncAuth = if (remoteSyncAuth == RemoteSyncAuth.SIGNATURE) RemoteSyncAuth.SIGNATURE else RemoteSyncAuth.HEADERS,
@@ -290,6 +301,7 @@ data class StepTrackerConfig(
         put("healthConnectHistoryRead", healthConnectHistoryRead)
         put("healthConnectIgnoreManualEntries", healthConnectIgnoreManualEntries)
         put("healthConnectReadActiveCalories", healthConnectReadActiveCalories)
+        put("healthConnectReadTypes", JSONArray(healthConnectReadTypes))
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
         put("wearableTrust", wearableTrust)
@@ -322,6 +334,9 @@ data class StepTrackerConfig(
     }
 
     companion object {
+        /** `healthConnectReadTypes` when unset: all three, as before 2.1. */
+        val DEFAULT_READ_TYPES: List<String> = listOf("steps", "distance", "totalCalories")
+
         fun fromJson(json: JSONObject): StepTrackerConfig {
             val fallback = StepTrackerConfig()
             val headers = HashMap<String, String>()
@@ -332,6 +347,10 @@ data class StepTrackerConfig(
             json.optJSONArray("wearableAllowlist")?.let { arr ->
                 for (i in 0 until arr.length()) arr.optString(i)?.let { allowlist.add(it) }
             }
+            // Absent in config written before 2.1: everything, as then.
+            val readTypes = json.optJSONArray("healthConnectReadTypes")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optString(it) }
+            } ?: fallback.healthConnectReadTypes
             return StepTrackerConfig(
                 heightCm = json.optDouble("height", fallback.heightCm),
                 weightKg = json.optDouble("weight", fallback.weightKg),
@@ -392,6 +411,7 @@ data class StepTrackerConfig(
                     json.optStringOrNull("preferredStepSourcePackage"),
                 wearableTrust = json.optString("wearableTrust", fallback.wearableTrust),
                 wearableAllowlist = allowlist,
+                healthConnectReadTypes = readTypes,
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,

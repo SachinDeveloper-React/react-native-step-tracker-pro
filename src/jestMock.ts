@@ -259,6 +259,7 @@ export const StepTracker = {
     token: 'mock-integrity-token',
     requestHash: options.requestHash,
   })),
+  prepareIntegrity: fn(async (..._args: never[]) => undefined),
 
   resetToday: done(true),
   clearHistory: done(true),
@@ -329,6 +330,17 @@ export const StepTracker = {
   setPreferredStepSource: fn(async (..._args: never[]) => resolved()),
   getInstalledCompanionApps: done([]),
 
+  getSyncStatus: fn(async () => ({
+    remote: {
+      configured: false,
+      pendingRecords: 0,
+      lastAttemptAt: 0,
+      lastSuccessAt: 0,
+      consecutiveFailures: 0,
+      lastFailure: null,
+      authFailed: false,
+    },
+  })),
   getPendingSyncCount: done(0),
   syncNow: done([]),
 

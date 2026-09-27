@@ -11,6 +11,8 @@ import com.facebook.react.modules.core.PermissionAwareActivity
 import com.facebook.react.modules.core.PermissionListener
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.SnapshotPart
+import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.TrackingState
@@ -28,6 +30,7 @@ import com.steptrackerpro.util.optDouble
 import com.steptrackerpro.util.optInt
 import com.steptrackerpro.util.optLong
 import com.steptrackerpro.util.optString
+import com.steptrackerpro.util.optStringList
 import com.steptrackerpro.util.toStringList
 import com.steptrackerpro.util.BatteryOptimizationHelper
 import com.steptrackerpro.util.PermissionHelper
@@ -389,7 +392,22 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         launchSafely(promise) {
             val sign = options.optBoolean("sign", false)
             val nonce = options.optString("nonce", null)?.takeIf { it.isNotEmpty() }
-            promise.resolve(Bridge.map(core.verificationSnapshot(date, sign, nonce)))
+            val include = SnapshotPart.parse(options.optStringList("include").orEmpty())
+            val typeNames = options.optStringList("healthConnectRecordTypes")
+            val recordTypes = if (typeNames == null) {
+                setOf(HealthConnectManager.RecordType.STEPS)
+            } else {
+                HealthConnectManager.RecordType.parse(typeNames)
+            }
+            if (include == null || recordTypes == null) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "include takes minutes, motionWindows and healthConnectRecords; " +
+                        "healthConnectRecordTypes takes steps and distance"
+                )
+                return@launchSafely
+            }
+            promise.resolve(Bridge.map(core.verificationSnapshot(date, sign, nonce, include, recordTypes)))
         }
     }
 
@@ -456,13 +474,60 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 val token = PlayIntegrityBridge.requestToken(reactContext, project, hash)
                 promise.resolve(Bridge.map(mapOf("token" to token, "requestHash" to hash)))
             } catch (failure: PlayIntegrityBridge.Failure) {
-                promise.reject(
-                    "E_INTEGRITY_FAILED",
-                    "Play Integrity failed" + (failure.errorCode?.let { " (error $it)" } ?: "") + ": ${failure.message}",
-                    failure
-                )
+                rejectIntegrity(promise, failure)
             }
         }
+    }
+
+    /**
+     * Prepares the Play Integrity token provider for a cloud project ahead
+     * of the first [requestIntegrityToken], which otherwise pays for it.
+     * Idempotent: a provider already prepared is reused.
+     */
+    @ReactMethod
+    override fun prepareIntegrity(cloudProjectNumber: Double, promise: Promise) {
+        launchSafely(promise) {
+            val project = cloudProjectNumber.toLong()
+            if (project <= 0L || project.toDouble() != cloudProjectNumber) {
+                promise.reject("E_INVALID_CONFIG", "cloudProjectNumber must be a positive integer")
+                return@launchSafely
+            }
+            if (!PlayIntegrityBridge.isAvailable()) {
+                promise.reject(
+                    "E_INTEGRITY_UNAVAILABLE",
+                    "Add com.google.android.play:integrity to your app's dependencies to use Play Integrity"
+                )
+                return@launchSafely
+            }
+            try {
+                PlayIntegrityBridge.prepare(reactContext, project)
+                promise.resolve(true)
+            } catch (failure: PlayIntegrityBridge.Failure) {
+                rejectIntegrity(promise, failure)
+            }
+        }
+    }
+
+    /**
+     * `E_INTEGRITY_FAILED` with Play's code in the message and, for code,
+     * in `userInfo`: `playErrorCode`, `playError` (Play's name for it) and
+     * `retryable` - whether backing off and calling again can succeed.
+     */
+    private fun rejectIntegrity(promise: Promise, failure: PlayIntegrityBridge.Failure) {
+        promise.reject(
+            "E_INTEGRITY_FAILED",
+            "Play Integrity failed" +
+                (failure.errorCode?.let { " (error $it ${failure.errorName})" } ?: "") +
+                ": ${failure.message}",
+            failure,
+            Bridge.map(
+                mapOf(
+                    "playErrorCode" to failure.errorCode,
+                    "playError" to failure.errorName,
+                    "retryable" to failure.retryable
+                )
+            )
+        )
     }
 
     /** Whether the install already has a signing key, so an app attests once rather than every launch. */
@@ -501,6 +566,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@launchSafely
             }
             val attestation = DeviceAttestation.attest(reactContext, bytes)
+            // A new key: a signature-auth refusal is no longer the current state.
+            core.state.recordRemoteCredentialsChanged()
             core.integrity.log(
                 IntegrityEvent.DEVICE_ATTESTED,
                 mapOf("keyId" to attestation["keyId"], "attested" to attestation["attested"])
@@ -819,49 +886,79 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    /** Every step record in the window, as Health Connect stores it. */
+    /** Every record of the asked-for types in the window, as Health Connect stores it. */
     @ReactMethod
-    override fun getHealthConnectRecords(startIso: String, endIso: String, promise: Promise) {
+    override fun getHealthConnectRecords(startIso: String, endIso: String, options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
-            if (!requireHealthConnectRead(promise)) return@launchSafely
-            val result = core.healthConnect.readStepRecords(Instant.parse(startIso), Instant.parse(endIso))
-            promise.resolve(Bridge.map(result))
+            val types = recordTypes(options, promise) ?: return@launchSafely
+            if (!requireHealthConnectRead(promise, types)) return@launchSafely
+            healthConnectRead(promise) {
+                Bridge.map(core.healthConnect.readRecords(Instant.parse(startIso), Instant.parse(endIso), types))
+            }
         }
     }
 
-    /** A change-tracking cursor for step records, starting now. */
+    /** A change-tracking cursor for the asked-for record types, starting now. */
     @ReactMethod
-    override fun getHealthConnectChangesToken(promise: Promise) {
+    override fun getHealthConnectChangesToken(options: ReadableMap, promise: Promise) {
         launchSafely(promise) {
-            if (!requireHealthConnectRead(promise)) return@launchSafely
-            promise.resolve(core.healthConnect.changesToken())
+            val types = recordTypes(options, promise) ?: return@launchSafely
+            if (!requireHealthConnectRead(promise, types)) return@launchSafely
+            healthConnectRead(promise) { core.healthConnect.changesToken(types) }
         }
     }
 
-    /** Step records inserted, updated and deleted since a cursor, and the next cursor. */
+    /** Records inserted, updated and deleted since a cursor, and the next cursor. */
     @ReactMethod
     override fun getHealthConnectChanges(token: String, promise: Promise) {
         launchSafely(promise) {
-            if (!requireHealthConnectRead(promise)) return@launchSafely
-            promise.resolve(Bridge.map(core.healthConnect.changes(token)))
+            // The token knows its types; steps are in every one this package hands out.
+            if (!requireHealthConnectRead(promise, setOf(HealthConnectManager.RecordType.STEPS))) return@launchSafely
+            healthConnectRead(promise) { Bridge.map(core.healthConnect.changes(token)) }
+        }
+    }
+
+    /** `recordTypes` from [options], steps when absent; rejects and returns null on an unknown one. */
+    private fun recordTypes(options: ReadableMap, promise: Promise): Set<HealthConnectManager.RecordType>? {
+        val names = options.optStringList("recordTypes") ?: return setOf(HealthConnectManager.RecordType.STEPS)
+        return HealthConnectManager.RecordType.parse(names) ?: run {
+            promise.reject("E_INVALID_CONFIG", "recordTypes takes steps and distance")
+            null
         }
     }
 
     /**
-     * Rejects, and returns false, when raw Health Connect reads cannot work:
-     * no provider, or no read grant. The aggregated reads fall back to this
-     * device quietly; a raw read asked for specifically says why it cannot.
+     * Rejects, and returns false, when raw Health Connect reads of [types]
+     * cannot work: no provider, or a read grant missing. The aggregated
+     * reads fall back to this device quietly; a raw read asked for
+     * specifically says why it cannot.
      */
-    private suspend fun requireHealthConnectRead(promise: Promise): Boolean {
+    private suspend fun requireHealthConnectRead(
+        promise: Promise,
+        types: Set<HealthConnectManager.RecordType>
+    ): Boolean {
         if (core.healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) {
             promise.reject("E_HEALTH_CONNECT_UNAVAILABLE", "Health Connect is not available on this device")
             return false
         }
-        if (!core.healthConnect.canRead()) {
-            promise.reject("E_HEALTH_CONNECT_DENIED", "Health Connect read permission is not granted")
+        if (!core.healthConnect.canReadRecords(types)) {
+            promise.reject(
+                "E_HEALTH_CONNECT_DENIED",
+                "Health Connect read permission is not granted: " +
+                    types.joinToString(", ") { it.permission }
+            )
             return false
         }
         return true
+    }
+
+    /** A grant revoked between the check and the read rejects as denied, not as unknown. */
+    private suspend fun healthConnectRead(promise: Promise, read: suspend () -> Any?) {
+        try {
+            promise.resolve(read())
+        } catch (denied: SecurityException) {
+            promise.reject("E_HEALTH_CONNECT_DENIED", denied.message ?: "Health Connect read permission is not granted", denied)
+        }
     }
 
     @ReactMethod
@@ -944,6 +1041,24 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     }
 
     // ---- sync ------------------------------------------------------------
+
+    /**
+     * What remote uploads last did, kept across process deaths: when, whether
+     * they were accepted, the last failure and whether it was the
+     * credentials. A background upload's refusal usually happens with no JS
+     * to hear `syncAuthFailed`; this is where the app finds it.
+     */
+    @ReactMethod
+    override fun getSyncStatus(promise: Promise) {
+        launchSafely(promise) {
+            val config = core.config()
+            val remote = core.state.remoteSyncStatus().toMap(
+                configured = !config.remoteSyncUrl.isNullOrEmpty(),
+                pendingRecords = core.repository.countUnsynced(SyncTarget.REMOTE)
+            )
+            promise.resolve(Bridge.map(mapOf("remote" to remote)))
+        }
+    }
 
     @ReactMethod
     override fun getPendingSyncCount(promise: Promise) {
@@ -1071,6 +1186,11 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectReadActiveCalories = patch.optBoolean(
                 "healthConnectReadActiveCalories", current.healthConnectReadActiveCalories
             ),
+            healthConnectReadTypes = if (patch.hasKey("healthConnectReadTypes") && !patch.isNull("healthConnectReadTypes")) {
+                patch.getArray("healthConnectReadTypes")?.toStringList() ?: current.healthConnectReadTypes
+            } else {
+                current.healthConnectReadTypes
+            },
             stepSource = patch.optString("stepSource", current.stepSource) ?: current.stepSource,
             preferredStepSourcePackage = patch.optString(
                 "preferredStepSourcePackage", current.preferredStepSourcePackage
@@ -1171,6 +1291,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "healthConnectHistoryRead" to config.healthConnectHistoryRead,
         "healthConnectIgnoreManualEntries" to config.healthConnectIgnoreManualEntries,
         "healthConnectReadActiveCalories" to config.healthConnectReadActiveCalories,
+        "healthConnectReadTypes" to config.healthConnectReadTypes,
         "stepSource" to config.stepSource,
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
         "wearableTrust" to config.wearableTrust,

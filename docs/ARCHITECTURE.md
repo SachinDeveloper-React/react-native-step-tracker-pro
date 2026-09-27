@@ -341,6 +341,10 @@ unattested key on hardware that refuses, and returns the certificate chain
 for a server to verify. A signed snapshot is serialised once to JSON, signed
 with `SHA256withECDSA`, and returned with that exact text as
 `signedPayload`, so the server verifies bytes it did not have to rebuild.
+Asked for with `include`, the day's minute buckets, motion windows and raw
+Health Connect records go into that same text before it is signed, so the
+evidence a server scores carries the signature the totals do, and a Play
+Integrity token bound to `payloadSha256` covers it too.
 Remote uploads are signed over the exact body bytes once a key exists.
 
 ## Storage
@@ -497,7 +501,11 @@ stays in retention.
 Remote uploads classify the response: 2xx marks the rows uploaded; 401 and
 403 raise `syncAuthFailed` and end the attempt without a retry, because the
 same credentials would be refused again; anything else, or no response, is
-retried with backoff. `remoteSyncHeaders` live sealed in SharedPreferences -
+retried with backoff. Every outcome is also written to `StepStateStore`, filed
+under the moment the attempt read its credentials, because the worker
+usually runs with no JS to hear the event. `getSyncStatus()` reads it back;
+`authFailed` holds until the URL, headers, auth mode or key change after that
+moment, or an upload is accepted. `remoteSyncHeaders` live sealed in SharedPreferences -
 AES-GCM with a Keystore key (`SecretVault`) - and are opened when config is
 read. Under `remoteSyncAuth: 'signature'` none are sent and the request
 authenticates with the `Step-Tracker-Signature` header alone.

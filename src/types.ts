@@ -106,6 +106,19 @@ export interface StepTrackerConfig {
    */
   healthConnectReadActiveCalories?: boolean;
   /**
+   * Which Health Connect record types reads cover. Default all three:
+   * `['steps', 'distance', 'totalCalories']`, as before 2.1.
+   *
+   * Each is one read permission your app declares and justifies to Play, so
+   * an app that only wants steps sets `['steps']` and asks for
+   * `READ_STEPS` alone. `'steps'` is required. A type left out is not
+   * read: a day answered from Health Connect derives it from the step count
+   * instead - distance from stride, calories from `calorieCoefficient` - as
+   * it already does for a watch that writes no distance, and per-source
+   * figures (`getStepSources()`, `readHealthConnectSteps()`) show 0.
+   */
+  healthConnectReadTypes?: HealthConnectReadType[];
+  /**
    * How to reconcile this phone's sensor with what other apps published to
    * Health Connect. Default 'auto'. See {@link StepSourcePolicy}.
    */
@@ -288,6 +301,9 @@ export interface FraudDetectionConfig {
 
 export type IntegrityMode = 'flag' | 'exclude';
 
+/** A record type `healthConnectReadTypes` can name. */
+export type HealthConnectReadType = 'steps' | 'distance' | 'totalCalories';
+
 /**
  * What a flag says about a stretch of the day.
  *
@@ -449,6 +465,10 @@ export interface DeviceAttestation {
   createdAt: number;
 }
 
+/** Evidence `getVerificationSnapshot()` can add next to the totals. */
+export type VerificationSnapshotPart =
+  'minutes' | 'motionWindows' | 'healthConnectRecords';
+
 export interface VerificationSnapshotOptions {
   /**
    * Sign the snapshot with the install's Keystore key (made by
@@ -457,6 +477,39 @@ export interface VerificationSnapshotOptions {
   sign?: boolean;
   /** A server-issued value echoed inside the signed payload, so it cannot be replayed. */
   nonce?: string;
+  /**
+   * The evidence behind the day's totals, added inside the signed payload
+   * so one signature - and one Play Integrity `requestHash` - covers it:
+   *
+   * - `'minutes'`: the day's per-minute buckets, as `getStepMinutes()`.
+   *   Recorded only while `fraudDetection.enabled`.
+   * - `'motionWindows'`: the day's motion signature windows, as
+   *   `getMotionWindows()`. Recorded only while `motionSampling.enabled`.
+   * - `'healthConnectRecords'`: the day's raw Health Connect records, as
+   *   `getHealthConnectRecords()`, of `healthConnectRecordTypes`.
+   *
+   * Default none: the snapshot is exactly the 2.0 shape.
+   */
+  include?: VerificationSnapshotPart[];
+  /** Record types for `include: ['healthConnectRecords']`. Default `['steps']`. */
+  healthConnectRecordTypes?: HealthConnectRecordType[];
+}
+
+/** `VerificationSnapshot.healthConnectRecords`. */
+export interface SnapshotHealthConnectRecords {
+  /**
+   * `'read'` when the records were read - an empty list then means there
+   * were none. Otherwise why not: `'disabled'` (`healthConnectEnabled`
+   * false), `'unavailable'` (no provider), `'not_granted'` (a read
+   * permission for `recordTypes` is missing), `'timeout'` or `'failed'`.
+   * The step-source policy does not matter here: an explicit ask reads
+   * whenever it can.
+   */
+  status: 'read' | 'disabled' | 'unavailable' | 'not_granted' | 'timeout' | 'failed';
+  recordTypes: HealthConnectRecordType[];
+  records: AnyHealthConnectRecord[];
+  /** More than 10,000 records of one type that day. */
+  truncated: boolean;
 }
 
 /**
@@ -489,8 +542,37 @@ export interface IntegrityToken {
   requestHash: string;
 }
 
-/** One step record as Health Connect stores it. */
-export interface HealthConnectRecord {
+/**
+ * `StepTrackerError.details` on an `E_INTEGRITY_FAILED` rejection from
+ * `requestIntegrityToken()` or `prepareIntegrity()`.
+ */
+export interface IntegrityErrorDetails {
+  /** Play's `StandardIntegrityErrorCode`, or null when Play gave none. */
+  playErrorCode: number | null;
+  /** Play's name for the code, such as `'NETWORK_ERROR'`; `'UNKNOWN'` for a code this version does not know. */
+  playError: string | null;
+  /**
+   * Back off and call again: the same call can succeed without anything
+   * changing (`NETWORK_ERROR`, `TOO_MANY_REQUESTS`,
+   * `CANNOT_BIND_TO_SERVICE`, `GOOGLE_SERVER_UNAVAILABLE`,
+   * `CLIENT_TRANSIENT_ERROR`, `INTEGRITY_TOKEN_PROVIDER_INVALID`,
+   * `INTERNAL_ERROR`). False means something has to change first - the
+   * user updates the Play Store or Play services, the app comes from Play,
+   * or the cloud project number or hash is fixed.
+   */
+  retryable: boolean;
+}
+
+/** A record type the raw Health Connect reads and change tracking return. */
+export type HealthConnectRecordType = 'steps' | 'distance';
+
+export interface HealthConnectRecordOptions {
+  /** Default `['steps']`. Each needs its own read permission granted. */
+  recordTypes?: HealthConnectRecordType[];
+}
+
+/** What every raw Health Connect record carries, whatever its type. */
+export interface HealthConnectRecordBase {
   id: string;
   clientRecordId: string | null;
   clientRecordVersion: number;
@@ -519,24 +601,52 @@ export interface HealthConnectRecord {
   endZoneOffsetSeconds: number | null;
   /** Epoch ms of the last write to the record. */
   lastModifiedTime: number;
+}
+
+/** One step record as Health Connect stores it. */
+export interface HealthConnectRecord extends HealthConnectRecordBase {
+  /**
+   * Always sent from 2.1. Optional in the type only so step records built
+   * by hand against 2.0 - in a test, say - still type-check; narrow a mixed
+   * list with `record.recordType === 'distance'`.
+   */
+  recordType?: 'steps';
   count: number;
 }
 
-export interface HealthConnectRecordList {
-  records: HealthConnectRecord[];
-  /** More records exist than one call returns (10,000); narrow the window. */
+/** {@link HealthConnectRecord}, by the name that says which type it is. */
+export type HealthConnectStepRecord = HealthConnectRecord;
+
+/** One distance record as Health Connect stores it. */
+export interface HealthConnectDistanceRecord extends HealthConnectRecordBase {
+  recordType: 'distance';
+  distanceMeters: number;
+}
+
+/** A raw record of any {@link HealthConnectRecordType}; narrow on `recordType`. */
+export type AnyHealthConnectRecord =
+  HealthConnectStepRecord | HealthConnectDistanceRecord;
+
+export interface HealthConnectRecordList<
+  R extends AnyHealthConnectRecord = HealthConnectRecord,
+> {
+  /** Oldest first, whichever type each is. */
+  records: R[];
+  /** More records of some type exist than one call returns (10,000 each); narrow the window. */
   truncated: boolean;
 }
 
-export interface HealthConnectChanges {
+export interface HealthConnectChanges<
+  R extends AnyHealthConnectRecord = HealthConnectRecord,
+> {
   /**
    * Health Connect no longer has the changes since this token - it keeps
    * them 30 days. Take a new token and re-read with
    * `getHealthConnectRecords()`.
    */
   tokenExpired: boolean;
-  /** Inserted or updated records. */
-  upserted: HealthConnectRecord[];
+  /** Inserted or updated records, of the types the token was taken for. */
+  upserted: R[];
   /** Ids of deleted records. */
   deletedIds: string[];
   /** The cursor for the next call; null when `tokenExpired`. */
@@ -551,6 +661,56 @@ export interface HealthConnectChanges {
  * them with `updateConfig({ remoteSyncHeaders })`, or call `attestDevice()`,
  * then `syncNow()`.
  */
+/** `getSyncStatus()`. */
+export interface SyncStatus {
+  remote: RemoteSyncStatus;
+}
+
+/**
+ * What remote uploads last did, kept across process deaths. Uploads run in
+ * the background, usually with no JS alive to hear `syncAuthFailed`; read
+ * this when the app comes up.
+ */
+export interface RemoteSyncStatus {
+  /** `remoteSyncUrl` is set. */
+  configured: boolean;
+  /** Days not yet accepted by the endpoint. */
+  pendingRecords: number;
+  /** Epoch ms the last upload began, or was refused before sending. 0 when never. */
+  lastAttemptAt: number;
+  /** Epoch ms of the last accepted upload. 0 when never. */
+  lastSuccessAt: number;
+  /** Failed attempts since the last accepted one. */
+  consecutiveFailures: number;
+  /** The most recent failure, kept after a later success as history; null when none. */
+  lastFailure: RemoteSyncFailure | null;
+  /**
+   * The last attempt was refused over its credentials - 401, 403, or
+   * signature auth with no key - and nothing has changed since: no new
+   * `remoteSyncHeaders`, URL or `remoteSyncAuth`, no `attestDevice()`, no
+   * accepted upload. Every scheduled upload would be refused the same way,
+   * so refresh the credentials and call `syncNow()`.
+   */
+  authFailed: boolean;
+}
+
+export interface RemoteSyncFailure {
+  /** Epoch ms the failed attempt began. */
+  at: number;
+  reason:
+    | 'unauthorized'
+    | 'forbidden'
+    | 'no_key'
+    | 'insecure_url'
+    | 'http_error'
+    | 'no_response';
+  /** The HTTP status, when the server answered. */
+  status: number | null;
+  message: string;
+  /** The worker retries this one on its own. */
+  retryable: boolean;
+}
+
 export interface SyncAuthFailedEvent {
   target: 'remote';
   /** The HTTP status, or null for `'no_key'`. */
@@ -807,6 +967,14 @@ export interface VerificationSnapshot {
   suspectSteps: number;
   /** The flags, events, minute totals and device hints behind `suspectSteps`. */
   integrity: IntegrityReport;
+  /** Echoed from `options.include`, in a fixed order; absent when nothing was asked for. */
+  include?: VerificationSnapshotPart[];
+  /** With `include: ['minutes']`. */
+  minutes?: StepMinute[];
+  /** With `include: ['motionWindows']`. */
+  motionWindows?: MotionWindow[];
+  /** With `include: ['healthConnectRecords']`. */
+  healthConnectRecords?: SnapshotHealthConnectRecords;
   /** Echoed from `options.nonce`. */
   nonce?: string;
   /** Epoch ms the snapshot was signed; only on a signed snapshot. */

@@ -27,6 +27,12 @@ interface StepHistoryDao {
     @Query("SELECT COUNT(*) FROM step_history WHERE synced = 0 OR syncedRemote = 0")
     suspend fun countUnsynced(): Int
 
+    @Query("SELECT COUNT(*) FROM step_history WHERE syncedRemote = 0")
+    suspend fun countUnsyncedRemote(): Int
+
+    @Query("SELECT COUNT(*) FROM step_history WHERE synced = 0")
+    suspend fun countUnsyncedHealth(): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(entity: StepHistoryEntity): Long
 

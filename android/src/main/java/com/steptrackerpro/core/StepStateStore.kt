@@ -260,6 +260,58 @@ class StepStateStore(context: Context) {
         prefs.edit().putInt(KEY_STATE_VERSION, STATE_VERSION).apply()
     }
 
+    // ---- remote sync outcome ------------------------------------------
+
+    /** What remote uploads last did. See [RemoteSyncStatus]. */
+    fun remoteSyncStatus(): RemoteSyncStatus {
+        val failedAt = prefs.getLong(KEY_REMOTE_FAIL_AT, 0L)
+        val failure = if (failedAt > 0L) {
+            RemoteSyncStatus.Failure(
+                at = failedAt,
+                reason = prefs.getString(KEY_REMOTE_FAIL_REASON, null) ?: RemoteSyncStatus.HTTP_ERROR,
+                status = prefs.getInt(KEY_REMOTE_FAIL_STATUS, NO_STATUS).takeIf { it != NO_STATUS },
+                message = prefs.getString(KEY_REMOTE_FAIL_MESSAGE, null).orEmpty(),
+                retryable = prefs.getBoolean(KEY_REMOTE_FAIL_RETRYABLE, false)
+            )
+        } else {
+            null
+        }
+        return RemoteSyncStatus(
+            lastAttemptAt = prefs.getLong(KEY_REMOTE_ATTEMPT_AT, 0L),
+            lastSuccessAt = prefs.getLong(KEY_REMOTE_SUCCESS_AT, 0L),
+            consecutiveFailures = prefs.getInt(KEY_REMOTE_FAILURES, 0),
+            lastFailure = failure,
+            credentialsChangedAt = prefs.getLong(KEY_REMOTE_CREDENTIALS_AT, 0L)
+        )
+    }
+
+    /** An accepted upload that began at [startedAt]. The last failure is kept, as history. */
+    fun recordRemoteSuccess(startedAt: Long, at: Long = System.currentTimeMillis()) {
+        prefs.edit()
+            .putLong(KEY_REMOTE_ATTEMPT_AT, startedAt)
+            .putLong(KEY_REMOTE_SUCCESS_AT, at)
+            .putInt(KEY_REMOTE_FAILURES, 0)
+            .apply()
+    }
+
+    /** A failed or refused upload that began at [startedAt]. */
+    fun recordRemoteFailure(startedAt: Long, reason: String, status: Int?, message: String, retryable: Boolean) {
+        prefs.edit()
+            .putLong(KEY_REMOTE_ATTEMPT_AT, startedAt)
+            .putInt(KEY_REMOTE_FAILURES, prefs.getInt(KEY_REMOTE_FAILURES, 0) + 1)
+            .putLong(KEY_REMOTE_FAIL_AT, startedAt)
+            .putString(KEY_REMOTE_FAIL_REASON, reason)
+            .putInt(KEY_REMOTE_FAIL_STATUS, status ?: NO_STATUS)
+            .putString(KEY_REMOTE_FAIL_MESSAGE, message)
+            .putBoolean(KEY_REMOTE_FAIL_RETRYABLE, retryable)
+            .apply()
+    }
+
+    /** The upload credentials changed: config's URL, headers or auth mode, or the signing key. */
+    fun recordRemoteCredentialsChanged(at: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong(KEY_REMOTE_CREDENTIALS_AT, at).apply()
+    }
+
     /** One atomic write for the hot path, instead of nine separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -319,5 +371,17 @@ class StepStateStore(context: Context) {
         private const val KEY_LAST_RECOVERY_AT = "last_recovery_at"
         private const val KEY_RECOVERY_COUNT = "recovery_count"
         private const val KEY_LAST_RECOVERY_REASON = "last_recovery_reason"
+        private const val KEY_REMOTE_ATTEMPT_AT = "remote_last_attempt_at"
+        private const val KEY_REMOTE_SUCCESS_AT = "remote_last_success_at"
+        private const val KEY_REMOTE_FAILURES = "remote_consecutive_failures"
+        private const val KEY_REMOTE_FAIL_AT = "remote_failure_at"
+        private const val KEY_REMOTE_FAIL_REASON = "remote_failure_reason"
+        private const val KEY_REMOTE_FAIL_STATUS = "remote_failure_status"
+        private const val KEY_REMOTE_FAIL_MESSAGE = "remote_failure_message"
+        private const val KEY_REMOTE_FAIL_RETRYABLE = "remote_failure_retryable"
+        private const val KEY_REMOTE_CREDENTIALS_AT = "remote_credentials_changed_at"
+
+        /** No HTTP status stored. */
+        private const val NO_STATUS = Int.MIN_VALUE
     }
 }
