@@ -99,6 +99,13 @@ export interface StepTrackerConfig {
    */
   healthConnectIgnoreManualEntries?: boolean;
   /**
+   * Also read Health Connect's active calories and report them per source as
+   * `StepSource.activeCalories`. Default false. It is one more permission,
+   * `android.permission.health.READ_ACTIVE_CALORIES_BURNED`, which your app
+   * must declare and justify to Play.
+   */
+  healthConnectReadActiveCalories?: boolean;
+  /**
    * How to reconcile this phone's sensor with what other apps published to
    * Health Connect. Default 'auto'. See {@link StepSourcePolicy}.
    */
@@ -152,6 +159,15 @@ export interface StepTrackerConfig {
    * upload also carries an `Idempotency-Key` header, whichever shape.
    */
   remoteSyncPayload?: 'totals' | 'full';
+  /**
+   * How uploads authenticate. `'headers'` (default) sends
+   * `remoteSyncHeaders`. `'signature'` sends none of them and relies on the
+   * `Step-Tracker-Signature` header alone, signed by the key from
+   * `attestDevice()` - no secret is stored on the device at all. Without a
+   * key the worker does not upload and `syncAuthFailed` fires with
+   * `reason: 'no_key'`.
+   */
+  remoteSyncAuth?: 'headers' | 'signature';
   /** Restart tracking automatically after device reboot. Default true. */
   autoStartOnBoot?: boolean;
   /**
@@ -460,6 +476,89 @@ export interface SnapshotSignature {
   payloadSha256: string;
 }
 
+export interface IntegrityTokenOptions {
+  /** What the token is bound to - a signed snapshot's `signature.payloadSha256`. At most 500 characters. */
+  requestHash: string;
+  /** Your Google Cloud project number, from the Play Console's app integrity page. */
+  cloudProjectNumber: number;
+}
+
+export interface IntegrityToken {
+  /** Opaque here; your server decrypts and verifies it with Google. */
+  token: string;
+  requestHash: string;
+}
+
+/** One step record as Health Connect stores it. */
+export interface HealthConnectRecord {
+  id: string;
+  clientRecordId: string | null;
+  clientRecordVersion: number;
+  /** The app that wrote it. */
+  packageName: string;
+  recordingMethod: 'active' | 'automatic' | 'manual' | 'unknown';
+  device: {
+    type:
+      | 'unknown'
+      | 'watch'
+      | 'phone'
+      | 'scale'
+      | 'ring'
+      | 'head_mounted'
+      | 'fitness_band'
+      | 'chest_strap'
+      | 'smart_display';
+    manufacturer: string | null;
+    model: string | null;
+  } | null;
+  /** Epoch ms. */
+  startTime: number;
+  endTime: number;
+  /** Seconds east of UTC the writer recorded; null when it gave none. */
+  startZoneOffsetSeconds: number | null;
+  endZoneOffsetSeconds: number | null;
+  /** Epoch ms of the last write to the record. */
+  lastModifiedTime: number;
+  count: number;
+}
+
+export interface HealthConnectRecordList {
+  records: HealthConnectRecord[];
+  /** More records exist than one call returns (10,000); narrow the window. */
+  truncated: boolean;
+}
+
+export interface HealthConnectChanges {
+  /**
+   * Health Connect no longer has the changes since this token - it keeps
+   * them 30 days. Take a new token and re-read with
+   * `getHealthConnectRecords()`.
+   */
+  tokenExpired: boolean;
+  /** Inserted or updated records. */
+  upserted: HealthConnectRecord[];
+  /** Ids of deleted records. */
+  deletedIds: string[];
+  /** The cursor for the next call; null when `tokenExpired`. */
+  nextToken: string | null;
+  /** Call again with `nextToken` straight away. */
+  hasMore: boolean;
+}
+
+/**
+ * The remote endpoint refused an upload, or signature auth had no key to
+ * sign with. The batch is not retried with the same credentials: refresh
+ * them with `updateConfig({ remoteSyncHeaders })`, or call `attestDevice()`,
+ * then `syncNow()`.
+ */
+export interface SyncAuthFailedEvent {
+  target: 'remote';
+  /** The HTTP status, or null for `'no_key'`. */
+  status: number | null;
+  reason: 'unauthorized' | 'forbidden' | 'no_key';
+  auth: 'headers' | 'signature';
+}
+
 /** Fired when the integrity checks find something new for a day. */
 export interface SuspiciousActivityEvent {
   date: string;
@@ -647,6 +746,14 @@ export interface RangeStats {
  * current policy chose, for comparison only.
  */
 export interface VerificationSnapshot {
+  /**
+   * The snapshot's shape. Bumped when a field is removed, renamed or changes
+   * meaning; a new field does not bump it. `2` from 1.5. A snapshot with no
+   * `schemaVersion` is the 1.4 shape.
+   */
+  schemaVersion: number;
+  /** The npm version of this package that produced it, e.g. `'2.0.0'`. */
+  libraryVersion: string;
   /** yyyy-MM-dd in the device timezone. */
   date: string;
   /** What this phone's own sensor counted. Never includes Health Connect. */
@@ -761,6 +868,13 @@ export interface HealthConnectStatus {
   historyReadGranted: boolean;
   grantedPermissions: string[];
   missingPermissions: string[];
+  /**
+   * Permissions config asks for that your app's manifest does not declare.
+   * From 2.0 the library declares none; add them (see docs/PERMISSIONS.md)
+   * or `requestHealthConnectPermissions()` rejects with
+   * `E_HEALTH_CONNECT_NOT_DECLARED`.
+   */
+  undeclaredPermissions: string[];
   /** How many times the sheet has been shown without a grant. */
   denialCount: number;
   /**
@@ -918,6 +1032,19 @@ export interface StepSource {
    * computed (aggregate reads over 35 days).
    */
   lateWrittenSteps: number;
+  /**
+   * Of `steps`, how many fell in each local hour of the day: 24 entries
+   * summing to `steps`, a record spanning hours split by time. On a range
+   * (`getStepSources`) it is the hour-of-day total across the range. Every
+   * entry is `-1` when not computed - aggregate reads over 35 days.
+   */
+  hourlySteps: number[];
+  /**
+   * Kilocalories from this app's active-calorie records, with
+   * `healthConnectReadActiveCalories` on and granted; `-1` otherwise and on
+   * aggregate reads.
+   */
+  activeCalories: number;
 }
 
 /** The outcome of picking a source for one day. */
@@ -1036,6 +1163,12 @@ export interface BackgroundRestrictionStatus {
   aggressiveOem: boolean;
   /** Doze restrictions still apply; `openBatteryOptimizationSettings()` or `requestDisableBatteryOptimization()`. */
   batteryOptimizationEnabled: boolean;
+  /**
+   * Your app declares `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, so
+   * `requestDisableBatteryOptimization()` can show the direct dialog. False
+   * by default from 2.0; the call then opens the settings list instead.
+   */
+  directPromptAvailable: boolean;
   /** `openManufacturerAutoStartSettings()` will land on an OEM screen rather than app info. */
   autoStartSettingsAvailable: boolean;
   /**
@@ -1141,6 +1274,8 @@ export interface StepTrackerEventMap {
   /** The integrity checks found something new. See {@link SuspiciousActivityEvent}. */
   suspiciousActivity: SuspiciousActivityEvent;
   syncCompleted: SyncEvent;
+  /** The endpoint refused the credentials. See {@link SyncAuthFailedEvent}. */
+  syncAuthFailed: SyncAuthFailedEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;
   error: { code: string; message: string };

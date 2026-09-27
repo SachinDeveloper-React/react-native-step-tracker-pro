@@ -5,6 +5,157 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-09-27
+
+Current toolchains, a manifest that declares only what sensor counting
+needs, and the pieces a server-side verifier was missing. Breaking changes
+are listed first, with what to do about each in
+[Migrating from 1.x](#migrating-from-1x).
+
+### Breaking
+
+- **Minimal library manifest.** The library now merges in only
+  `ACTIVITY_RECOGNITION`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_HEALTH`,
+  `POST_NOTIFICATIONS`, `RECEIVE_BOOT_COMPLETED` and `WAKE_LOCK`. The Health
+  Connect permissions and `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` are declared
+  by the app, and only when it uses them - no app inherits a permission it
+  then has to justify to Play. A config that asks for an undeclared Health
+  Connect permission rejects with the new `E_HEALTH_CONNECT_NOT_DECLARED`,
+  naming the missing entries, instead of Health Connect silently leaving them
+  off its sheet; `HealthConnectStatus.undeclaredPermissions` lists them up
+  front. Without the battery permission `requestDisableBatteryOptimization()`
+  opens the settings list, and `BackgroundRestrictionStatus.directPromptAvailable`
+  says so.
+- **Typed events on the new architecture.** Events reach JS through
+  codegen-typed emitters (`onStepsChanged` and so on) instead of
+  `RCTDeviceEventEmitter`. `StepTracker.addListener` and the hooks handle both
+  architectures; code that subscribed to `StepTrackerPro:<event>` through its
+  own `NativeEventEmitter` stops receiving events on the new architecture.
+- **`useStepTracker` applies config changes.** It used to read config once,
+  on mount, and silently drop every later change. It now pushes a change
+  through `updateConfig()`, compared by value so a new object literal on each
+  render is not a change. An app whose config legitimately changes will now
+  see it take effect.
+- **Refused uploads are not retried.** A 401 or 403 from `remoteSyncUrl`
+  raises `syncAuthFailed` and ends the attempt; retrying the same credentials
+  only earned more refusals. Other failures back off and retry as before.
+- **The codegen spec changed** (new methods, the emitters, a second argument
+  to `getVerificationSnapshot`), so the app's native code has to be rebuilt -
+  as for any native module upgrade.
+
+### Build and toolchains
+
+- Builds on **AGP 9** with `android.builtInKotlin` either way. Built-in Kotlin
+  refuses the Kotlin Android and kapt plugins, so the library applies AGP's
+  `com.android.legacy-kapt` and adds the `gradle-kotlin` artifact that
+  provides it - React Native apps do not have it on the classpath - at the
+  host's AGP version. The architecture shims are registered as Kotlin
+  sources too, which built-in Kotlin needs. `android.newDsl=true` builds as
+  well.
+- **React Native 0.82+ is new-architecture-only**, detected from the app's
+  `react-native` package rather than trusting `newArchEnabled`, which newer
+  templates may drop.
+- `kotlinOptions {}` replaced with `compilerOptions`; Room's JVM-default
+  requirement uses Kotlin 2.2's typed `jvmDefault` where it exists.
+  `project.buildDir` replaced with `layout.buildDirectory`.
+- The **Health Connect client follows compileSdk**: 1.1.0 stable from
+  compileSdk 36, 1.1.0-beta01 below. `ext.healthConnectVersion` still pins.
+- The library declares **minSdk 26** whatever the app says, so an app on
+  React Native's template default of 24 fails the manifest merge naming this
+  package.
+- Inside an app the library's buildscript adds no AGP or Kotlin plugin of its
+  own; only a standalone build of the package does.
+- `getCurrentActivity()` replaced with `reactApplicationContext.currentActivity`
+  (deprecated in React Native 0.80), and the three deprecation warnings
+  Kotlin 2.2 raised in the package fixed. It compiles warning-free on RN 0.77
+  and 0.87.
+- **CI builds the packed library in real apps** made from React Native's
+  template - 0.77.3 on AGP 8.7, 0.87.2 on AGP 9.2 with built-in Kotlin off
+  and on - and checks the merged manifest carries no opt-in permission. The
+  README has the compatibility table.
+
+### Added
+
+- **Play Integrity**: `requestIntegrityToken({ requestHash, cloudProjectNumber })`,
+  a standard request bound to a signed snapshot's `payloadSha256`. Compile-only,
+  like Activity Recognition: the app adds `com.google.android.play:integrity`,
+  and without it the call rejects with `E_INTEGRITY_UNAVAILABLE`.
+- `hasAttestationKey()` and `getAttestationKeyInfo()`, so an app attests once
+  instead of replacing the key on every launch.
+- `schemaVersion` and `libraryVersion` on the verification snapshot, first,
+  so a server can pick a parser across releases. `schemaVersion` is 2.
+- **Sealed remote-sync headers.** `remoteSyncHeaders` are encrypted with an
+  AES-GCM key in the Android Keystore before they are stored; 1.x plaintext
+  headers are sealed on first read.
+- `syncAuthFailed` event and `remoteSyncAuth: 'signature'`, which sends no
+  stored headers and authenticates uploads with the device key alone.
+- `getHealthConnectRecords(start, end)`: every step record as stored - id,
+  client record id, source app, recording method, device, start and end with
+  zone offsets, last-modified time, count.
+- `getHealthConnectChangesToken()` and `getHealthConnectChanges(token)`:
+  inserted, updated and deleted step records since a cursor, with expired
+  tokens reported as `tokenExpired` rather than thrown.
+- `StepSource.hourlySteps` (24 local hours; every entry -1 on the aggregate
+  path) and `StepSource.activeCalories` behind the opt-in
+  `healthConnectReadActiveCalories`.
+- `removeAllListeners(event?)`.
+- **Jest mock** at `react-native-step-tracker-pro/jest`: every method a
+  `jest.fn` resolving with an empty-day value, `__emit` to fire listeners,
+  static hooks.
+- **Expo config plugin**: declares the opt-in permissions and raises
+  `android.minSdkVersion` to 26. Checked against `@expo/config-plugins` 57.
+- A **publish workflow** that runs `npm publish --provenance` on a version
+  tag.
+
+### Fixed
+
+- **Forged reboots.** `BootReceiver` logs a `reboot` integrity event only
+  when `Settings.Global.BOOT_COUNT` has moved since the last one it logged,
+  so an unprotected `QUICKBOOT_POWERON` from another app - or the duplicate
+  some devices send - no longer writes fake reboots. The meaningless
+  `priority="1000"` is gone.
+- `SECURITY.md` and `CONTRIBUTING.md` are published; the changelog linked to
+  both. The `author` field names the author.
+- Changelog dates for 1.0.0, 1.3.0 and 1.4.0 now match the npm publish dates.
+
+### Deprecated
+
+- `removeListener()` with no argument. It removes every listener in the app,
+  the hooks' included, and now warns once. Use `removeAllListeners()`. The
+  no-argument form goes in 3.0; `removeListener(event)` stays.
+
+### Not changed
+
+- **Android only.** iOS stays unsupported, now stated plainly: autolinking
+  skips it, `isSupported()` is false, and every method rejects with
+  `E_UNSUPPORTED_PLATFORM`.
+- The codegen types still come from `react-native/Libraries/Types/CodegenTypes`:
+  React Native 0.77, the floor, does not export them from `react-native`.
+
+### Migrating from 1.x
+
+The full guide, with before-and-after examples per mode, is
+[docs/MIGRATING.md](docs/MIGRATING.md). In short:
+
+1. **Declare the Health Connect permissions you use** in
+   `android/app/src/main/AndroidManifest.xml` - the snippets are in
+   [docs/PERMISSIONS.md](docs/PERMISSIONS.md#what-the-library-declares-and-what-you-add).
+   Delete any `tools:node="remove"` lines you added for them; they now remove
+   nothing. Expo apps list the package under `plugins` instead.
+2. **Declare `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`** if you use the direct
+   battery dialog; otherwise do nothing and the settings list opens.
+3. **Subscribe through `StepTracker.addListener`** (or the hooks), not a
+   `NativeEventEmitter` of your own.
+4. **Replace `removeListener()` with no argument** by `removeAllListeners()`,
+   or better, keep and `remove()` the subscriptions you create.
+5. **Handle `syncAuthFailed`** if you set `remoteSyncHeaders`: refresh the
+   token with `updateConfig`, then `syncNow()`.
+6. **Pass config to `useStepTracker` from one component**, and expect changes
+   to it to apply.
+7. **Raise `minSdkVersion` to 26** if your app is still on React Native's
+   default of 24.
+8. Rebuild the native app.
+
 ## [1.5.0] - 2026-09-27
 
 Integrity checks for apps that pay for steps: flag the ways a count is
@@ -129,7 +280,7 @@ was.
   against the attested key.
 - 12 new Jest tests for validation, the new methods and the event.
 
-## [1.4.0] - 2026-09-14
+## [1.4.0] - 2026-09-18
 
 The release for apps that pay for steps. Nothing here changes what a
 consumer who touches no new config sees: the same resolved numbers, the same
@@ -288,7 +439,7 @@ events, the same remote payload. Everything is opt-in or additive.
   Kotlin 2.0.21, and 0.76 is still on 1.9.24. The package was merely being
   developed and CI-tested against a version it does not claim to support.
 
-## [1.3.0] - 2026-09-11
+## [1.3.0] - 2026-09-12
 
 The release for phones that kill services and users who also wear a watch:
 steps counted while the process was dead are recovered instead of dropped, a
@@ -686,7 +837,7 @@ answered by `installHealthConnect()`.
   0.74–0.76 the package still works if you pin `kotlinVersion = "1.9.24"` and
   `roomVersion = "2.6.1"`.
 
-## [1.0.0] - 2026-09-06
+## [1.0.0] - 2026-09-08
 
 Initial release.
 
@@ -706,6 +857,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.0.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.0
 [1.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.5.0
 [1.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.4.0
 [1.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.3.0

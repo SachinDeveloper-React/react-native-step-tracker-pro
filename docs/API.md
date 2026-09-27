@@ -16,8 +16,10 @@ try {
 Codes: `E_UNSUPPORTED_PLATFORM`, `E_NO_SENSOR`, `E_NOT_INITIALIZED`,
 `E_PERMISSION_DENIED`, `E_SERVICE_START_FAILED`, `E_HEALTH_CONNECT_UNAVAILABLE`,
 `E_HEALTH_CONNECT_NOT_INSTALLED`, `E_HEALTH_CONNECT_UPDATE_REQUIRED`,
-`E_HEALTH_CONNECT_DENIED`, `E_DATABASE`, `E_INVALID_CONFIG`, `E_NO_ACTIVITY`,
-`E_NOT_TRACKING`, `E_UNKNOWN`.
+`E_HEALTH_CONNECT_DENIED`, `E_HEALTH_CONNECT_NOT_DECLARED`, `E_INTEGRITY_UNAVAILABLE`,
+`E_INTEGRITY_FAILED`, `E_DATABASE`, `E_INVALID_CONFIG`, `E_NO_ACTIVITY`,
+`E_NOT_TRACKING`, `E_UNKNOWN`. `E_SENSOR_UNAVAILABLE` arrives on the `error`
+event rather than as a rejection.
 
 Which calls you need depends on your [usage mode](USAGE_MODES.md).
 
@@ -199,6 +201,8 @@ split out.
 
 ```ts
 {
+  schemaVersion: 2,           // the shape; read it first
+  libraryVersion: '2.0.0',    // the package release that produced it
   date: '2026-09-14',
   deviceSteps: 7431,          // this phone's own sensor; never Health Connect
   recoveredSteps: 800,        // of deviceSteps, credited in one go by gap recovery
@@ -224,6 +228,11 @@ split out.
   integrity: { /* IntegrityReport, see Integrity checks */ },
 }
 ```
+
+`schemaVersion` changes only when a field is removed, renamed or changes
+meaning - a new field does not bump it - so a server can parse by version
+across releases. It is `2` from 1.5; a snapshot without it is the 1.4 shape.
+`libraryVersion` says which release of this package produced it.
 
 A second argument, `{ sign?: boolean, nonce?: string }`, signs the snapshot
 with the install's Keystore key and echoes a server-issued nonce inside what
@@ -489,12 +498,67 @@ payloadSha256 }`. Verify `value` (base64 DER ECDSA) over the UTF-8 bytes of
 `signedPayload` with the key stored for `keyId`, check that the parsed
 payload's `nonce` is the one you issued and has not been used, and then
 trust **the parsed `signedPayload`, not the unsigned fields around it**. A
-server never has to re-serialise anything the way the phone did. If you also
-use Play Integrity, pass `payloadSha256` as its `requestHash` and send the
-token alongside; the package itself has no Play Services dependency.
+server never has to re-serialise anything the way the phone did. For Play
+Integrity on top, pass `payloadSha256` to
+[`requestIntegrityToken()`](#requestintegritytokenoptions-promiseintegritytoken).
 
 Uploads to `remoteSyncUrl` carry the same kind of signature once a key exists
 — see [Remote sync](#remote-sync).
+
+### `hasAttestationKey(): Promise<boolean>`
+### `getAttestationKeyInfo(): Promise<DeviceAttestation | null>`
+
+Attest once, not on every launch. `attestDevice()` has to replace the key each
+time - Android can only bind a challenge when a key is generated - so check
+first, and only attest when the install has no key or your server has none
+on file for it:
+
+```ts
+const info = await StepTracker.getAttestationKeyInfo(); // null when there is no key
+if (!info || !(await api.hasKey(info.keyId))) {
+  const { challenge } = await api.post('/devices/challenge');
+  await api.post('/devices/attest', await StepTracker.attestDevice(challenge));
+}
+```
+
+`getAttestationKeyInfo()` returns the same shape as `attestDevice()` without
+touching the key; its chain still carries the challenge it was made with.
+
+### `requestIntegrityToken(options): Promise<IntegrityToken>`
+
+A Play Integrity token from a standard request, bound to `requestHash`. Key
+attestation shows which device and which signed app hold the key; Play
+Integrity adds what only Google can say - that this exact build is the one
+Play distributed, how it was installed, and Google's own device and account
+verdicts. Bind it to the signed snapshot:
+
+```ts
+const snapshot = await StepTracker.getVerificationSnapshot(date, { sign: true, nonce });
+const { token } = await StepTracker.requestIntegrityToken({
+  requestHash: snapshot.signature!.payloadSha256,
+  cloudProjectNumber: 123456789012, // Play Console → App integrity
+});
+await api.post('/steps/verify', { snapshot, integrityToken: token });
+```
+
+The server decodes the token with Google's API and checks the verdicts and
+that `requestHash` equals the hash of the `signedPayload` it verified. The
+token provider is prepared once per project and reused; a stale one is
+re-prepared and the request retried once.
+
+Play Integrity is compile-only here, like Activity Recognition. Add it to your
+app to use this:
+
+```gradle
+dependencies {
+  implementation "com.google.android.play:integrity:1.6.0"
+}
+```
+
+Without it the call rejects with `E_INTEGRITY_UNAVAILABLE`; when Play refuses,
+with `E_INTEGRITY_FAILED` and Play's error code in the message. `requestHash`
+is at most 500 characters.
+
 
 ### Activity Recognition
 
@@ -610,8 +674,10 @@ True means the OS is still applying Doze restrictions to your app.
 ### `requestDisableBatteryOptimization(): Promise<boolean>`
 
 Shows the system exemption dialog. Requires
-`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` and an eligible Play use case — read
-[PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md) first.
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, which your app declares from 2.0, and
+an eligible Play use case — read
+[PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md) first. Without the
+permission it opens the settings list instead, which reaches the same switch.
 
 ### `openBatteryOptimizationSettings(): Promise<boolean>`
 
@@ -632,6 +698,7 @@ info. On those skins this matters more than Doze.
   brand: 'Redmi',
   aggressiveOem: true,                  // known to kill foreground services
   batteryOptimizationEnabled: true,     // Doze still applies
+  directPromptAvailable: false,         // REQUEST_IGNORE_BATTERY_OPTIMIZATIONS declared by the app
   autoStartSettingsAvailable: true,     // the deep link will land on an OEM screen
   autoStartTarget: 'com.miui.securitycenter/com.miui.permcenter.autostart.AutoStartManagementActivity',
   backgroundStartNeedsExemption: true,  // Android 12+: the watchdog needs the exemption
@@ -674,6 +741,7 @@ the next foreground until nothing is left. Guidance text per manufacturer:
   historyReadGranted: false,
   grantedPermissions: [],
   missingPermissions: ['android.permission.health.READ_STEPS', ...],
+  undeclaredPermissions: [],   // asked for by config, absent from your manifest
   denialCount: 0,
   shouldOpenSettings: false,
 }
@@ -681,7 +749,10 @@ the next foreground until nothing is left. Guidance text per manufacturer:
 
 `availability` is the field to branch on. `not_supported` is the only value with
 nothing to offer the user; the other two failure states are both fixed by
-`installHealthConnect()`.
+`installHealthConnect()`. A non-empty `undeclaredPermissions` means your
+manifest is missing entries config asks for; requesting rejects with
+`E_HEALTH_CONNECT_NOT_DECLARED` until they are added
+([PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add)).
 
 ### `enableHealthConnect(options?): Promise<HealthConnectStatus>`
 
@@ -755,6 +826,61 @@ rather than stacking duplicates.
 Days a wearable already owns are skipped rather than written, and counted in
 `skippedRecords`. Writing this phone's parallel count of the same walk would
 leave every other app reading Health Connect with both copies of it.
+
+### `getHealthConnectRecords(startIso, endIso): Promise<HealthConnectRecordList>`
+
+Every step record Health Connect holds between two instants, from every app,
+as stored - for a server that wants the evidence rather than a total.
+
+```ts
+{
+  records: [{
+    id: 'a1b2…',
+    clientRecordId: 'stp-steps-2026-09-14',   // null when the writer set none
+    clientRecordVersion: 1757845200000,
+    packageName: 'com.fitbit.FitbitMobile',
+    recordingMethod: 'automatic',              // | 'active' | 'manual' | 'unknown'
+    device: { type: 'watch', manufacturer: 'Google', model: 'Pixel Watch 3' },
+    startTime: 1757834400000, endTime: 1757834460000,
+    startZoneOffsetSeconds: 19800, endZoneOffsetSeconds: 19800,
+    lastModifiedTime: 1757835000000,
+    count: 112,
+  }],
+  truncated: false,   // true past 10,000 records: narrow the window
+}
+```
+
+ISO-8601 instants with a zone, start before end. Unlike the aggregated reads
+it does not fall back quietly: it rejects with
+`E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`.
+
+### `getHealthConnectChangesToken(): Promise<string>`
+### `getHealthConnectChanges(token: string): Promise<HealthConnectChanges>`
+
+Change tracking for step records: what was inserted, updated or deleted
+since a cursor, across every app, so a server can mirror Health Connect
+without re-reading whole days.
+
+```ts
+let token = await storage.get('hcToken') ?? await StepTracker.getHealthConnectChangesToken();
+for (;;) {
+  const changes = await StepTracker.getHealthConnectChanges(token);
+  if (changes.tokenExpired) {
+    // Health Connect keeps changes for 30 days. Start again from a full read.
+    token = await StepTracker.getHealthConnectChangesToken();
+    await resyncWindow(await StepTracker.getHealthConnectRecords(from, to));
+    break;
+  }
+  await upload(changes.upserted, changes.deletedIds);
+  token = changes.nextToken!;
+  if (!changes.hasMore) break;
+}
+await storage.set('hcToken', token);
+```
+
+`upserted` holds records in the `getHealthConnectRecords()` shape; `deletedIds`
+the ids of deleted ones. Each call reads at most 20 pages; `hasMore` says to
+call again straight away. Same rejections as `getHealthConnectRecords()`.
 
 ### `openHealthConnectSettings(): Promise<boolean>`
 
@@ -855,6 +981,8 @@ Every app that published steps over the range, with what each contributed.
       unknownMethodSteps: 0,
       recordingMethods: { active: 0, automatic: 8240, manual: 0, unknown: 0 },
       lateWrittenSteps: 0,  // of `steps`, from records modified over a day after they ended
+      hourlySteps: [0, 0, 0, 0, 0, 0, 0, 312, 1180, /* … 24 entries */],
+      activeCalories: -1,   // kcal, with healthConnectReadActiveCalories; -1 otherwise
     },
   ],
   hasWearable: true,
@@ -866,6 +994,14 @@ more than a day after they ended — a history pushed into Health Connect after
 the fact, or a companion app that synced very late. It is evidence for a
 server and is never subtracted: a watch that was out of range for two days
 writes late too. `-1` on days answered through the aggregate API.
+
+`hourlySteps` splits `steps` across the 24 local hours of the day, a record
+spanning hours split by time, so a server can see *when* a source counted -
+a watch that counted all day against a phone-side app that added 10,000 at
+23:59, say. Over a range it is the hour-of-day total. Every entry is `-1`
+when not computed. `activeCalories` is the source's active-calorie records,
+read only with `healthConnectReadActiveCalories` on and granted; `-1`
+otherwise.
 
 `manualSteps`, `unknownMethodSteps` and `recordingMethods` split `steps` by
 Health Connect's `recordingMethod`, which the writing app stamps on every
@@ -1006,6 +1142,17 @@ exponential backoff, and marks them uploaded on any 2xx. `syncNow()` queues
 the same job immediately. The URL must be `https://` unless
 `remoteSyncAllowHttp` is set; `remoteSyncHeaders` go on every request.
 
+**Authentication.** `remoteSyncHeaders` are sealed with an AES key in the
+Android Keystore before they are stored, never written in the clear; headers
+a 1.x release stored in the clear are sealed on first read. A 401 or 403 is
+not retried with the same credentials: `syncAuthFailed` fires with the
+status, and the app refreshes them with `updateConfig({ remoteSyncHeaders })`
+and calls `syncNow()`. `remoteSyncAuth: 'signature'` sends no headers at all
+and authenticates with the `Step-Tracker-Signature` header alone - the key
+from `attestDevice()`, checked against the public key your server stored -
+so no secret lives on the device. Without a key it does not upload, and
+`syncAuthFailed` fires with `reason: 'no_key'`.
+
 **Every request carries an `Idempotency-Key` header**: a SHA-256 hex digest of
 the app's package name and each record's `date` and `steps`, sorted by date.
 WorkManager retries a failed batch verbatim, and `syncNow()` can queue the
@@ -1093,9 +1240,18 @@ handful of days since the last successful upload.
 const sub = StepTracker.addListener('stepsChanged', (data) => console.log(data.steps));
 sub.remove();
 
-StepTracker.removeListener('goalReached'); // all listeners for one event
-StepTracker.removeListener();              // everything
+StepTracker.removeAllListeners('goalReached'); // every listener for one event
+StepTracker.removeAllListeners();              // every listener, the hooks' included
 ```
+
+On the new architecture events arrive through the module's codegen-typed
+emitters (`onStepsChanged` and so on); on the old one through
+`NativeEventEmitter`. `addListener` picks the right one, and the
+subscription behaves the same either way.
+
+`removeListener(event)` still works. `removeListener()` with no argument is
+deprecated: it removes every listener in the app, the hooks' included, and
+warns once. Use `removeAllListeners()` when that is really what you mean.
 
 | Event | Payload |
 |---|---|
@@ -1109,6 +1265,7 @@ StepTracker.removeListener();              // everything
 | `suspiciousActivity` | `{ date, flags, deviceSteps, suspectSteps, mode }`. The [integrity checks](#integrity-checks) found something they had not reported for this day before; `flags` holds only the new ones. Only with `fraudDetection.enabled`. |
 | `motionWindow` | `MotionWindow`. One motion signature window was stored — see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Features only. |
 | `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it. Once per affected day, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
+| `syncAuthFailed` | `{ target: 'remote', status, reason: 'unauthorized' \| 'forbidden' \| 'no_key', auth }`. The endpoint refused the credentials, or signature auth had no key. Not retried: refresh with `updateConfig({ remoteSyncHeaders })` or call `attestDevice()`, then `syncNow()`. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
 | `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
 
@@ -1144,6 +1301,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own; `WRITE_*` is then never requested |
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
+| `healthConnectReadActiveCalories` | `false` | also read active calories per source (`StepSource.activeCalories`); one more permission to declare |
 | `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |
@@ -1151,7 +1309,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `wearableAllowlist` | `[]` | packages trusted as wearables under `'catalog'` on top of the built-in catalog |
 | `privacyPolicyUrl` | — | **required before shipping health permissions**; Health Connect links to it and Play review checks for it |
 | `remoteSyncUrl` | — | optional endpoint for unsynced days; must be `https://` |
-| `remoteSyncHeaders` | `{}` | e.g. auth headers; stored in the clear, use short-lived tokens |
+| `remoteSyncHeaders` | `{}` | e.g. auth headers; sealed with a Keystore key at rest, never returned by `getConfig()` |
+| `remoteSyncAuth` | `'headers'` | `'headers'` \| `'signature'` — `'signature'` sends no headers and authenticates with the device key from `attestDevice()` alone |
 | `remoteSyncAllowHttp` | `false` | permit a plain `http://` endpoint, for a development server |
 | `remoteSyncPayload` | `'totals'` | `'totals'` \| `'full'` — what each uploaded record carries; see [Remote sync](#remote-sync) |
 | `autoStartOnBoot` | `true` | |
@@ -1178,8 +1337,12 @@ const {
 } = useStepTracker({ dailyGoal: 10000, autoStart: true, onGoalReached: (e) => {} });
 ```
 
-Initialises once, subscribes to `stepsChanged` and `trackingStateChanged`, and
-re-reads the snapshot when the app returns to the foreground. Extra options:
+Initialises once, pushes later config changes through `updateConfig()`
+(compared by value, so a new object literal on each render is not a change),
+subscribes to `stepsChanged` and `trackingStateChanged`, and re-reads the
+snapshot when the app returns to the foreground. Use it in the one component
+that owns config; other screens read with `getTodaySteps()`, `useStepStats()`
+or a `stepsChanged` listener. Extra options:
 `autoStart` (default false), `refreshOnForeground` (default true), and
 `onSuspiciousActivity`, called with each `suspiciousActivity` event — the
 snapshot is re-read then too, since under `mode: 'exclude'` the number can

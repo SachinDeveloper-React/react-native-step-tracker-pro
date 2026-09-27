@@ -59,6 +59,12 @@ data class StepTrackerConfig(
      * reported per source - only the resolved number leaves them out.
      */
     val healthConnectIgnoreManualEntries: Boolean = false,
+    /**
+     * Also read `ActiveCaloriesBurnedRecord` and report it per source as
+     * `StepSource.activeCalories`. Off by default: it is one more Health
+     * Connect permission, which the app must declare and justify.
+     */
+    val healthConnectReadActiveCalories: Boolean = false,
     /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
@@ -98,6 +104,14 @@ data class StepTrackerConfig(
      * source and the unresolved Health Connect origins per record.
      */
     val remoteSyncPayload: String = "totals",
+    /**
+     * How uploads authenticate. `headers` (default) sends [remoteSyncHeaders].
+     * `signature` sends none of them and relies on the
+     * `Step-Tracker-Signature` header alone, so no secret has to be stored on
+     * the device at all; it needs a key from `attestDevice()`, and the worker
+     * refuses to upload without one.
+     */
+    val remoteSyncAuth: String = RemoteSyncAuth.HEADERS,
     val autoStartOnBoot: Boolean = true,
     /**
      * What to do with steps the hardware counted while the service was dead
@@ -221,6 +235,7 @@ data class StepTrackerConfig(
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
         remoteSyncPayload = com.steptrackerpro.sync.RemotePayload.Shape.from(remoteSyncPayload).jsValue,
+        remoteSyncAuth = if (remoteSyncAuth == RemoteSyncAuth.SIGNATURE) RemoteSyncAuth.SIGNATURE else RemoteSyncAuth.HEADERS,
         gapRecovery = StepCounterEngine.GapRecovery.from(gapRecovery).jsValue,
         gapRecoveryMaxSteps = gapRecoveryMaxSteps.coerceAtLeast(0),
         accelerometerThreshold = if (accelerometerThreshold.isFinite()) {
@@ -245,7 +260,11 @@ data class StepTrackerConfig(
 
     private inline fun offOr(value: Int, clamp: (Int) -> Int): Int = if (value <= 0) 0 else clamp(value)
 
-    fun toJson(): JSONObject = JSONObject().apply {
+    /**
+     * @param includeHeaders false for what [ConfigStore] persists, where the
+     *   headers are sealed separately; true everywhere else.
+     */
+    fun toJson(includeHeaders: Boolean = true): JSONObject = JSONObject().apply {
         put("height", heightCm)
         put("weight", weightKg)
         put("strideLength", strideLengthM)
@@ -270,15 +289,17 @@ data class StepTrackerConfig(
         put("healthConnectBackgroundRead", healthConnectBackgroundRead)
         put("healthConnectHistoryRead", healthConnectHistoryRead)
         put("healthConnectIgnoreManualEntries", healthConnectIgnoreManualEntries)
+        put("healthConnectReadActiveCalories", healthConnectReadActiveCalories)
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
         put("wearableTrust", wearableTrust)
         put("wearableAllowlist", JSONArray(wearableAllowlist))
         put("privacyPolicyUrl", privacyPolicyUrl ?: JSONObject.NULL)
         put("remoteSyncUrl", remoteSyncUrl ?: JSONObject.NULL)
-        put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
+        if (includeHeaders) put("remoteSyncHeaders", JSONObject(remoteSyncHeaders as Map<*, *>))
         put("remoteSyncAllowHttp", remoteSyncAllowHttp)
         put("remoteSyncPayload", remoteSyncPayload)
+        put("remoteSyncAuth", remoteSyncAuth)
         put("autoStartOnBoot", autoStartOnBoot)
         put("gapRecovery", gapRecovery)
         put("gapRecoveryMaxSteps", gapRecoveryMaxSteps)
@@ -362,6 +383,10 @@ data class StepTrackerConfig(
                     "healthConnectIgnoreManualEntries",
                     fallback.healthConnectIgnoreManualEntries
                 ),
+                healthConnectReadActiveCalories = json.optBoolean(
+                    "healthConnectReadActiveCalories",
+                    fallback.healthConnectReadActiveCalories
+                ),
                 stepSource = json.optString("stepSource", fallback.stepSource),
                 preferredStepSourcePackage =
                     json.optStringOrNull("preferredStepSourcePackage"),
@@ -372,6 +397,7 @@ data class StepTrackerConfig(
                 remoteSyncHeaders = headers,
                 remoteSyncAllowHttp = json.optBoolean("remoteSyncAllowHttp", fallback.remoteSyncAllowHttp),
                 remoteSyncPayload = json.optString("remoteSyncPayload", fallback.remoteSyncPayload),
+                remoteSyncAuth = json.optString("remoteSyncAuth", fallback.remoteSyncAuth),
                 autoStartOnBoot = json.optBoolean("autoStartOnBoot", fallback.autoStartOnBoot),
                 gapRecovery = json.optString("gapRecovery", fallback.gapRecovery),
                 gapRecoveryMaxSteps = json.optInt("gapRecoveryMaxSteps", fallback.gapRecoveryMaxSteps),
@@ -434,30 +460,70 @@ class ConfigStore(context: Context) {
     fun get(): StepTrackerConfig {
         cached?.let { return it }
         val raw = prefs.getString(KEY_CONFIG, null)
-        val parsed = if (raw.isNullOrEmpty()) {
-            StepTrackerConfig()
-        } else {
-            runCatching { StepTrackerConfig.fromJson(JSONObject(raw)) }
-                .getOrElse { StepTrackerConfig() }
+        val json = raw?.takeIf { it.isNotEmpty() }?.let { runCatching { JSONObject(it) }.getOrNull() }
+        var parsed = json?.let { runCatching { StepTrackerConfig.fromJson(it) }.getOrNull() }
+            ?: StepTrackerConfig()
+        prefs.getString(KEY_HEADERS_SEALED, null)?.let { sealed ->
+            com.steptrackerpro.util.SecretVault.open(sealed)?.let { opened ->
+                parsed = parsed.copy(remoteSyncHeaders = headersFrom(opened))
+            }
         }
         cached = parsed.sanitised()
+        // Headers a 1.x release wrote in the clear - or that a device whose
+        // Keystore failed had to keep there - are sealed on the first read
+        // that can, and the clear copy is gone with the rewrite.
+        if (json?.optJSONObject("remoteSyncHeaders")?.length()?.let { it > 0 } == true) {
+            save(cached!!)
+        }
         return cached!!
     }
 
+    /**
+     * Persists config. `remoteSyncHeaders` never go into the JSON: they are
+     * sealed with a Keystore key into their own entry. Only on a device whose
+     * Keystore cannot be used do they fall back to the JSON, as every 1.x
+     * release stored them, so uploads keep authenticating there.
+     */
     @Synchronized
     fun save(config: StepTrackerConfig): StepTrackerConfig {
         val safe = config.sanitised()
         cached = safe
-        prefs.edit().putString(KEY_CONFIG, safe.toJson().toString()).apply()
+        val json = safe.toJson(includeHeaders = false)
+        val editor = prefs.edit()
+        if (safe.remoteSyncHeaders.isEmpty()) {
+            editor.remove(KEY_HEADERS_SEALED)
+        } else {
+            val plain = JSONObject(safe.remoteSyncHeaders as Map<*, *>).toString()
+            val sealed = com.steptrackerpro.util.SecretVault.seal(plain)
+            if (sealed != null) {
+                editor.putString(KEY_HEADERS_SEALED, sealed)
+            } else {
+                editor.remove(KEY_HEADERS_SEALED)
+                json.put("remoteSyncHeaders", JSONObject(plain))
+            }
+        }
+        editor.putString(KEY_CONFIG, json.toString()).apply()
         return safe
     }
+
+    private fun headersFrom(text: String): Map<String, String> = runCatching {
+        val obj = JSONObject(text)
+        obj.keys().asSequence().associateWith { obj.optString(it) }
+    }.getOrDefault(emptyMap())
 
     fun isInitialized(): Boolean = prefs.contains(KEY_CONFIG)
 
     companion object {
         const val PREFS_NAME = "StepTrackerProConfig"
         private const val KEY_CONFIG = "config_json"
+        private const val KEY_HEADERS_SEALED = "remote_headers_sealed"
     }
+}
+
+/** Values of [StepTrackerConfig.remoteSyncAuth]. */
+object RemoteSyncAuth {
+    const val HEADERS = "headers"
+    const val SIGNATURE = "signature"
 }
 
 /** Defaults for motion signature windows, shared by config and the TypeScript layer's docs. */

@@ -155,7 +155,13 @@ abstract class StepDatabase : RoomDatabase() {
                     .addMigrations(*MIGRATIONS)
                     // Counter state lives in SharedPreferences, so a corrupt or
                     // unmigratable history file costs history, never the live count.
-                    .fallbackToDestructiveMigrationOnDowngrade()
+                    // The no-argument form: Room 2.7 deprecates it for an
+                    // overload 2.6.1 does not have, and 2.6.1 is still what an
+                    // app on React Native 0.74-0.76 pins (docs/INSTALLATION.md).
+                    .let {
+                        @Suppress("DEPRECATION")
+                        it.fallbackToDestructiveMigrationOnDowngrade()
+                    }
                     .build()
                     .also { instance = it }
             }

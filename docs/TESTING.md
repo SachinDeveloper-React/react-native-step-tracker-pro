@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer (66 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute attribution, integrity config (128 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (83 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, integrity config (137 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -57,11 +57,12 @@ shake are each flagged; lumps of untimed steps are never judged for
 cadence; and the daily cap takes only the excess.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Thirty-nine cases: thirty-three drive the engine, three build the
+sensor. Forty-five cases: thirty-three drive the engine, three build the
 Room database as an older version from the exported schema, migrate real
-rows to the current version and check every one survived, and three run the
-integrity layer end to end through the real core, database and Keystore.
-Among them:
+rows to the current version and check every one survived, five run the
+integrity layer end to end through the real core, database and Keystore, and
+four check that remote-sync headers are sealed, read back and migrated from
+1.x. Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -87,6 +88,18 @@ Among them:
 | `migrate4To5KeepsMotionWindowsAndAddsTheIntegrityTables` | upgrading to 1.5 loses motion windows or history |
 | `aSwingGadgetIsFlaggedExcludedLoggedAndSigned` | the detector, exclude mode, the event log or snapshot signing is broken end to end |
 | `withoutPlayServicesActivityRecognitionIsUnavailableNotACrash` | an app without Play Services crashes, or believes it has Activity Recognition |
+| `aRebootIsLoggedOncePerBootCountNotPerBroadcast` | a forged or repeated boot broadcast writes fake reboots into the integrity log |
+| `healthConnectPermissionsTheAppDoesNotDeclareAreReported` | a missing manifest entry fails silently instead of naming itself |
+| `headersAreSealedNotStoredInTheClear` / `plaintextHeadersFromOneXAreMigratedOnFirstRead` | remote-sync credentials sit in SharedPreferences in the clear |
+
+### Compatibility builds
+
+CI also packs the library and builds it inside apps made from React Native's
+own template - 0.77.3 on AGP 8.7, and 0.87.2 on AGP 9.2 with built-in Kotlin
+off and on - and checks the merged manifest carries no opt-in permission. To
+reproduce one locally, follow the `compat` job in `.github/workflows/ci.yml`;
+it needs only Node 22, JDK 17 and the Android SDK. The versions are in the
+README's compatibility table.
 
 Run one case:
 
@@ -94,6 +107,38 @@ Run one case:
 ./gradlew :react-native-step-tracker-pro:connectedAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.class=com.steptrackerpro.StepCounterEngineTest#rebootOnSameDayClaimsStepsTakenSinceBoot
 ```
+
+---
+
+## Mocking the package in your app's tests
+
+The package ships a Jest mock. In a test file or a Jest setup file:
+
+```ts
+jest.mock('react-native-step-tracker-pro', () =>
+  require('react-native-step-tracker-pro/jest')
+);
+```
+
+Every method is a `jest.fn` resolving with an empty-day value - a snapshot
+with `steps: 0`, empty history, Health Connect not installed, permissions
+granted - so a test changes only what it cares about:
+
+```ts
+import StepTracker from 'react-native-step-tracker-pro';
+import { __emit, mockSnapshot } from 'react-native-step-tracker-pro/jest';
+
+(StepTracker.getTodaySteps as jest.Mock).mockResolvedValueOnce(
+  mockSnapshot({ steps: 12000, goalReached: true })
+);
+__emit('stepsChanged', mockSnapshot({ steps: 12001 })); // fires addListener callbacks
+```
+
+Both imports resolve to the same mock module, so `__emit` reaches the
+listeners the code under test added.
+`useStepTracker`, `useStepStats` and `useHealthConnect` return settled,
+static results, `isSupported()` returns `true`, and the constants and
+`StepTrackerError` are the real ones.
 
 ---
 

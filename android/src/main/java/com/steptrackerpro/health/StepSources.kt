@@ -88,6 +88,14 @@ data class RecordingMethods(
             else -> UNKNOWN
         }
 
+        /** The JS name of a raw `Metadata.recordingMethod` value. */
+        fun nameOf(method: Int): String = when (bucketOf(method)) {
+            ACTIVE -> "active"
+            AUTOMATIC -> "automatic"
+            MANUAL -> "manual"
+            else -> "unknown"
+        }
+
         fun fromBuckets(buckets: IntArray): RecordingMethods =
             RecordingMethods(buckets[ACTIVE], buckets[AUTOMATIC], buckets[MANUAL], buckets[UNKNOWN])
     }
@@ -164,7 +172,19 @@ data class StepSource(
      * server, never subtracted here: a watch that was out of range for two
      * days writes late too. -1 when not computed (aggregate reads).
      */
-    val lateWrittenSteps: Int = -1
+    val lateWrittenSteps: Int = -1,
+    /**
+     * Of [steps], how many fell in each local hour of the day, 24 entries
+     * summing to [steps]; every entry -1 when not computed (aggregate reads).
+     * A record spanning hours is split by time. See [HourlySteps].
+     */
+    val hourlySteps: List<Int> = HourlySteps.UNKNOWN,
+    /**
+     * Kilocalories from this origin's `ActiveCaloriesBurnedRecord`s, when
+     * `healthConnectReadActiveCalories` is on and granted; -1 otherwise, and
+     * on aggregate reads.
+     */
+    val activeCalories: Double = -1.0
 ) {
     val isWearable: Boolean get() = kind.isWearable
 
@@ -214,7 +234,9 @@ data class StepSource(
         "unknownMethodSteps" to unknownMethodSteps,
         "recordingMethods" to recordingMethods?.toMap(),
         "trustedWearable" to trustedWearable,
-        "lateWrittenSteps" to lateWrittenSteps
+        "lateWrittenSteps" to lateWrittenSteps,
+        "hourlySteps" to hourlySteps,
+        "activeCalories" to activeCalories
     )
 }
 

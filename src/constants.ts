@@ -22,9 +22,11 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectBackgroundRead'
     | 'healthConnectHistoryRead'
     | 'healthConnectIgnoreManualEntries'
+    | 'healthConnectReadActiveCalories'
     | 'stepSource'
     | 'wearableTrust'
     | 'remoteSyncPayload'
+    | 'remoteSyncAuth'
     | 'autoStartOnBoot'
     | 'gapRecovery'
     | 'gapRecoveryMaxSteps'
@@ -54,9 +56,11 @@ export const DEFAULT_CONFIG: Required<
   healthConnectBackgroundRead: false,
   healthConnectHistoryRead: false,
   healthConnectIgnoreManualEntries: false,
+  healthConnectReadActiveCalories: false,
   stepSource: 'auto',
   wearableTrust: 'metadata',
   remoteSyncPayload: 'totals',
+  remoteSyncAuth: 'headers',
   autoStartOnBoot: true,
   gapRecovery: 'split',
   gapRecoveryMaxSteps: 20000,

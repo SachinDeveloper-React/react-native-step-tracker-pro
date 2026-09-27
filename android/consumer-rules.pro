@@ -31,3 +31,6 @@
 -dontwarn com.google.android.gms.location.**
 -dontwarn com.google.android.gms.tasks.**
 -dontwarn com.google.android.gms.common.api.**
+
+# Play Integrity is compile-only for the same reason (requestIntegrityToken()).
+-dontwarn com.google.android.play.core.integrity.**

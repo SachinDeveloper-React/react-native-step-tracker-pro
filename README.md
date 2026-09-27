@@ -5,8 +5,14 @@ closed, the screen is locked, the process is killed, or the phone reboots —
 and keeps the number moving when a watch or another app is also counting.
 Hardware sensor → foreground service → Room → Health Connect.
 
-Android only. iOS has CMPedometer and a completely different permission model;
-wrapping both behind one API produces a bad version of each.
+**Android only.** There is no iOS implementation and none is planned: iOS has
+CMPedometer, HealthKit and App Attest, and a completely different permission
+model; wrapping both behind one API produces a bad version of each. On iOS the
+package is inert rather than broken - autolinking skips it (no pod is added),
+`isSupported()` returns `false`, every method rejects with
+`E_UNSUPPORTED_PLATFORM`, and `addListener` returns a no-op subscription - so
+a cross-platform app can import it unconditionally and branch on
+`isSupported()`.
 
 ```ts
 import StepTracker from "react-native-step-tracker-pro";
@@ -26,9 +32,11 @@ StepTracker.addListener("stepsChanged", (data) => console.log(data.steps));
 | **Health Connect only** | whatever Samsung Health, Google Fit or a watch wrote; nothing runs in the background | [USAGE_MODES.md § B](docs/USAGE_MODES.md#mode-b-health-connect-only) |
 | **Both** *(default)* | the phone counts, and a source that saw more of the day supplies the number — merged live, never summed | [USAGE_MODES.md § C](docs/USAGE_MODES.md#mode-c-both-recommended) |
 
-Each mode has its own manifest trims, permission flow and Play Console forms;
-the guide has all three side by side. Permissions in one place:
-[docs/PERMISSIONS.md](docs/PERMISSIONS.md).
+Each mode has its own manifest entries, permission flow and Play Console
+forms; the guide has all three side by side. From 2.0 the library declares
+only what sensor counting needs - Health Connect and the battery-exemption
+prompt are yours to add, so nothing you do not use needs justifying to Play.
+Permissions in one place: [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
 ## What it does
 
@@ -54,9 +62,29 @@ cd android && ./gradlew clean
 npx react-native run-android
 ```
 
-Requires `minSdk 26`, `compileSdk 35`, RN ≥ 0.77. Full steps, including the
-Gradle overrides for Kotlin 2.x and the manifest entries your app has to add:
+Requires `minSdk 26` (React Native's template starts at 24 - raise it),
+`compileSdk 35` or higher, RN ≥ 0.77, AGP 8 or 9. From 2.0 the Health Connect
+permissions are yours to declare - see [the modes](#three-ways-to-use-it) and
+[who declares what](docs/PERMISSIONS.md#who-declares-what). Upgrading from
+1.x: [docs/MIGRATING.md](docs/MIGRATING.md).
+Expo: add `"react-native-step-tracker-pro"` to `plugins` and prebuild; the
+config plugin declares what you opt into. Full steps:
 [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+## Compatibility
+
+What CI builds on every push, by installing the packed library into an app
+made from React Native's own template and compiling it there:
+
+| React Native | Android Gradle Plugin | Gradle | Kotlin | compileSdk | Kotlin mode | Health Connect client |
+|---|---|---|---|---|---|---|
+| 0.77.3 | 8.7.2 | 8.10.2 | 2.0.21 | 35 | Kotlin Android plugin | 1.1.0-beta01 |
+| 0.87.2 | 9.2.1 | 9.4.1 | 2.2.0 | 37 | Kotlin Android plugin (`builtInKotlin=false`, the template default) | 1.1.0 |
+| 0.87.2 | 9.2.1 | 9.4.1 | 2.2.0 | 37 | AGP built-in Kotlin | 1.1.0 |
+
+All three use the new architecture, with codegen. The package's own build and
+JVM tests run standalone on AGP 8.6 and Kotlin 2.0.21, on the old
+architecture; the instrumented tests on an API 37 emulator.
 
 ## Configuration
 
@@ -123,7 +151,8 @@ getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(
 getMotionWindows(from, to)
 
 getIntegrityReport(date)      getIntegrityEvents(from, to)  getStepMinutes(from, to)
-attestDevice(challenge)
+attestDevice(challenge)       hasAttestationKey()       getAttestationKeyInfo()
+requestIntegrityToken(opts)
 
 requestPermissions()          checkPermissions()        getDeviceCapabilities()
 isBatteryOptimizationEnabled()                          requestDisableBatteryOptimization()
@@ -133,6 +162,7 @@ getBackgroundRestrictionStatus()                        requestBackgroundPermiss
 getHealthConnectStatus()      enableHealthConnect()     requestHealthConnectPermissions()
 installHealthConnect()        openHealthConnectSettings()   revokeHealthConnectPermissions()
 readHealthConnectSteps(a, b)  writeHealthConnectSteps(date)   syncWithHealthConnect()
+getHealthConnectRecords(a, b) getHealthConnectChangesToken()  getHealthConnectChanges(token)
 
 getStepSources(from, to)      getCurrentStepSource()
 setPreferredStepSource(pkg)   getInstalledCompanionApps()
@@ -143,14 +173,16 @@ resetToday()                  clearHistory()            pruneHistory(days)
 
 Events: `stepsChanged`, `goalReached`, `goalProgressChanged`,
 `trackingStateChanged`, `dayChanged`, `historyBackfilled`, `motionWindow`,
-`suspiciousActivity`, `syncCompleted`, `stepSourceChanged`,
-`healthConnectStatusChanged`, `error`.
+`suspiciousActivity`, `syncCompleted`, `syncAuthFailed`, `stepSourceChanged`,
+`healthConnectStatusChanged`, `error`. On the new architecture they arrive
+through codegen-typed emitters, on the old one through `NativeEventEmitter`;
+`addListener` hides the difference.
 
 ```ts
 const sub = StepTracker.addListener("goalReached", ({ type, goal }) => {});
 sub.remove();
-// or
-StepTracker.removeListener("goalReached");
+// or, for every listener of one event
+StepTracker.removeAllListeners("goalReached");
 ```
 
 Signatures and payload shapes: [docs/API.md](docs/API.md).
@@ -278,14 +310,30 @@ cd example && npm install && npm run android
 
 ## Testing
 
+In your app's Jest tests, mock the whole package in one line:
+
+```ts
+jest.mock("react-native-step-tracker-pro", () =>
+  require("react-native-step-tracker-pro/jest")
+);
+```
+
+Every method resolves with an empty-day value and is a `jest.fn`, so a test
+overrides one with `mockResolvedValueOnce`; `__emit(event, payload)` fires a
+listener; the hooks return settled results. See
+[docs/TESTING.md](docs/TESTING.md#mocking-the-package-in-your-apps-tests).
+
+This package's own suites:
+
 ```sh
 npm test                    # Jest: the JS layer against a scripted native module
 npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-Sixty-six Jest tests cover config validation and the flows in the JS
-layer. A hundred and twenty-eight JVM tests cover step-source resolution,
+Eighty-three Jest tests cover config validation, the flows in the JS layer,
+the typed and legacy event paths, the hook's config handling, the shipped
+Jest mock and the Expo plugin. A hundred and thirty-seven JVM tests cover step-source resolution,
 the `auto` merge and its coverage rule, manual-entry exclusion and wearable
 trust, gap splitting under all four policies, the accelerometer pedometer
 against synthetic gait, motion signatures against a synthetic walk and
@@ -293,25 +341,27 @@ shake, the fraud detector against synthetic days, minute attribution, and
 the remote payload — chiefly that a phone and a watch are never added
 together, that a phone-side app cannot inflate a covered day, that a
 typed-in number never becomes the day's number, that a car is not a walk,
-and that a swing gadget is flagged while a treadmill is not. Thirty-nine
+and that a swing gadget is flagged while a treadmill is not. Forty-five
 instrumented tests cover the reboot, midnight, overnight-kill,
 capped-recovery, sensor-jitter, pause and counter-reset paths by feeding
 samples to the engine directly, the Room migrations against real rows, and
 the integrity layer end to end through the real core, database and
-Keystore, so they run on an emulator with no step hardware. CI runs all of
-it on every push.
+Keystore, the sealed remote-sync headers and the reboot log, so they run on
+an emulator with no step hardware. CI runs all of it on every push, plus the
+compatibility builds above.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **1.5.0** — integrity checks
-for apps that pay for steps: per-minute step buckets, a fraud detector for
-shaken phones, swing gadgets, charging, vehicles and implausible totals, an
-integrity event log, an optional exclude mode, and Keystore attestation with
-signed snapshots and uploads. All opt-in; nothing changes for a consumer who
-sets none of it.
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.0.0** — current toolchains
+(AGP 9 with or without built-in Kotlin, Kotlin 2.2, compileSdk 37, React
+Native 0.82+ as new-architecture-only), a minimal manifest that declares only
+what sensor counting needs, typed codegen events, Play Integrity, raw Health
+Connect records and change tracking, sealed remote-sync headers with a
+`syncAuthFailed` event, a Jest mock and an Expo config plugin. Breaking
+changes and how to move: [docs/MIGRATING.md](docs/MIGRATING.md).
 
 ## Licence
 

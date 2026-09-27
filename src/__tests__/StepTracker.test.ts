@@ -7,6 +7,10 @@ import {
   setNativeModule,
 } from '../__mocks__/react-native';
 import StepTracker, { estimateStride, isSupported } from '../StepTracker';
+import React from 'react';
+import TestRenderer from 'react-test-renderer';
+import type { ReactTestRenderer } from 'react-test-renderer';
+import { useStepTracker } from '../hooks/useStepTracker';
 import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
 import type { HealthConnectStatus } from '../types';
@@ -22,6 +26,9 @@ function fakeNative() {
   const handler: ProxyHandler<Record<string, unknown>> = {
     get(_target, method: string) {
       if (method === 'then') return undefined;
+      // The old architecture: no codegen-typed emitters (`onStepsChanged`
+      // and so on), so events go through NativeEventEmitter.
+      if (/^on[A-Z]/.test(method)) return undefined;
       return (...args: unknown[]) => {
         calls.push({ method, args });
         const queued = results.get(method);
@@ -54,6 +61,7 @@ const baseStatus: HealthConnectStatus = {
   historyReadGranted: false,
   grantedPermissions: [],
   missingPermissions: ['android.permission.health.READ_STEPS'],
+  undeclaredPermissions: [],
   denialCount: 0,
   shouldOpenSettings: false,
 };
@@ -142,6 +150,7 @@ describe('initialize()', () => {
       /maxContinuousMinutes/,
     ],
     [{ fraudDetection: { enabled: true, maxDailySteps: -5 } }, /maxDailySteps/],
+    [{ remoteSyncAuth: 'token' as 'headers' }, /remoteSyncAuth/],
   ])('rejects %j with E_INVALID_CONFIG', async (config, message) => {
     await expect(StepTracker.initialize(config)).rejects.toMatchObject({
       code: 'E_INVALID_CONFIG',
@@ -367,6 +376,62 @@ describe('date validation', () => {
     expect(native.calledWith('attestDevice')).toEqual([['é'.repeat(64)]]);
   });
 
+  it('requestIntegrityToken() validates the hash and project number before native', async () => {
+    for (const bad of [
+      { requestHash: '', cloudProjectNumber: 1 },
+      { requestHash: 'x'.repeat(501), cloudProjectNumber: 1 },
+      { requestHash: 'abc', cloudProjectNumber: 0 },
+      { requestHash: 'abc', cloudProjectNumber: 1.5 },
+    ]) {
+      await expect(StepTracker.requestIntegrityToken(bad)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+      });
+    }
+    expect(native.calls).toHaveLength(0);
+    native.when('requestIntegrityToken', { token: 't', requestHash: 'abc' });
+    await expect(
+      StepTracker.requestIntegrityToken({
+        requestHash: 'abc',
+        cloudProjectNumber: 123456789012,
+      })
+    ).resolves.toEqual({ token: 't', requestHash: 'abc' });
+    expect(native.calledWith('requestIntegrityToken')).toEqual([
+      [{ requestHash: 'abc', cloudProjectNumber: 123456789012 }],
+    ]);
+  });
+
+  it('the attestation key getters pass through', async () => {
+    native.when('hasAttestationKey', true);
+    await expect(StepTracker.hasAttestationKey()).resolves.toBe(true);
+    native.when('getAttestationKeyInfo', null);
+    await expect(StepTracker.getAttestationKeyInfo()).resolves.toBeNull();
+  });
+
+  it('raw Health Connect reads validate their inputs', async () => {
+    await expect(
+      StepTracker.getHealthConnectRecords('2026-09-01', '2026-09-02')
+    ).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+      message: expect.stringMatching(/ISO/),
+    });
+    await expect(
+      StepTracker.getHealthConnectRecords('2026-09-02T00:00:00Z', '2026-09-01T00:00:00Z')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    await expect(StepTracker.getHealthConnectChanges('')).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+    });
+    expect(native.calls).toHaveLength(0);
+
+    native.when('getHealthConnectRecords', { records: [], truncated: false });
+    await expect(
+      StepTracker.getHealthConnectRecords('2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z')
+    ).resolves.toEqual({ records: [], truncated: false });
+    native.when('getHealthConnectChanges', { tokenExpired: true, nextToken: null });
+    await expect(StepTracker.getHealthConnectChanges('tok')).resolves.toMatchObject({
+      tokenExpired: true,
+    });
+  });
+
   it('unwraps history records', async () => {
     native.when('getHistory', { records: [{ date: '2026-09-09', steps: 1 }] });
     await expect(StepTracker.getHistory('2026-09-01', '2026-09-09')).resolves.toEqual([
@@ -481,18 +546,74 @@ describe('events', () => {
     expect(seen).toHaveLength(1);
   });
 
-  it('removeListener() with no argument clears every event', () => {
+  it('removeAllListeners() with no argument clears every event', () => {
     StepTracker.addListener('goalReached', () => {});
     StepTracker.addListener('dayChanged', () => {});
     StepTracker.addListener('historyBackfilled', () => {});
     StepTracker.addListener('motionWindow', () => {});
     StepTracker.addListener('suspiciousActivity', () => {});
-    StepTracker.removeListener();
+    StepTracker.removeAllListeners();
     expect(__listenerCount('StepTrackerPro:goalReached')).toBe(0);
     expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(0);
     expect(__listenerCount('StepTrackerPro:historyBackfilled')).toBe(0);
     expect(__listenerCount('StepTrackerPro:motionWindow')).toBe(0);
     expect(__listenerCount('StepTrackerPro:suspiciousActivity')).toBe(0);
+  });
+
+  it('removeListener() with no argument still works, but warns once', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    StepTracker.addListener('stepsChanged', () => {});
+    StepTracker.removeListener();
+    StepTracker.removeListener();
+    expect(__listenerCount('StepTrackerPro:stepsChanged')).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toMatch(/removeAllListeners/);
+    warn.mockRestore();
+  });
+
+  it('removeAllListeners(event) removes only that event', () => {
+    StepTracker.addListener('stepsChanged', () => {});
+    StepTracker.addListener('dayChanged', () => {});
+    StepTracker.removeAllListeners('stepsChanged');
+    expect(__listenerCount('StepTrackerPro:stepsChanged')).toBe(0);
+    expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(1);
+    StepTracker.removeAllListeners();
+    expect(__listenerCount('StepTrackerPro:dayChanged')).toBe(0);
+  });
+
+  it('subscribes through the codegen-typed emitter on the new architecture', () => {
+    const handlers: Array<(value: unknown) => void> = [];
+    let removed = 0;
+    setNativeModule({
+      onStepsChanged: (handler: (value: unknown) => void) => {
+        handlers.push(handler);
+        return { remove: () => removed++ };
+      },
+    });
+    const seen: unknown[] = [];
+    const sub = StepTracker.addListener('stepsChanged', (payload) => seen.push(payload));
+    // Nothing went through the legacy emitter.
+    expect(__listenerCount('StepTrackerPro:stepsChanged')).toBe(0);
+    handlers[0]!({ steps: 42 });
+    expect(seen).toEqual([{ steps: 42 }]);
+    StepTracker.removeAllListeners('stepsChanged');
+    expect(removed).toBe(1);
+    // Removing again is a no-op, not a second native remove.
+    sub.remove();
+    expect(removed).toBe(1);
+  });
+
+  it('delivers syncAuthFailed', () => {
+    const seen: unknown[] = [];
+    StepTracker.addListener('syncAuthFailed', (event) => seen.push(event));
+    const payload = {
+      target: 'remote',
+      status: 401,
+      reason: 'unauthorized',
+      auth: 'headers',
+    };
+    __emit('StepTrackerPro:syncAuthFailed', payload);
+    expect(seen).toEqual([payload]);
   });
 
   it('delivers suspiciousActivity with its flags', () => {
@@ -573,5 +694,42 @@ describe('reads', () => {
     await expect(StepTracker.getInstalledCompanionApps()).resolves.toEqual([
       { packageName: 'x' },
     ]);
+  });
+});
+
+describe('useStepTracker()', () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  function Probe(props: { dailyGoal: number }) {
+    useStepTracker({ dailyGoal: props.dailyGoal });
+    return null;
+  }
+
+  it('pushes a config change through updateConfig, and only a real one', async () => {
+    const snapshot = { date: '2026-09-14', steps: 1, state: 'idle' };
+    native.when('initialize', snapshot);
+    native.when('getTodaySteps', snapshot);
+    native.when('getTrackingState', { state: 'idle' });
+    native.when('updateConfig', {});
+
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe, { dailyGoal: 8000 }));
+    });
+    expect(native.calledWith('initialize')).toHaveLength(1);
+
+    // A new render with the same values is not a change.
+    await TestRenderer.act(async () => {
+      renderer!.update(React.createElement(Probe, { dailyGoal: 8000 }));
+    });
+    expect(native.calledWith('updateConfig')).toHaveLength(0);
+
+    await TestRenderer.act(async () => {
+      renderer!.update(React.createElement(Probe, { dailyGoal: 9000 }));
+    });
+    expect(native.calledWith('updateConfig')).toEqual([[{ dailyGoal: 9000 }]]);
+    // Initialised once, however often config changed.
+    expect(native.calledWith('initialize')).toHaveLength(1);
+    await TestRenderer.act(async () => renderer!.unmount());
   });
 });

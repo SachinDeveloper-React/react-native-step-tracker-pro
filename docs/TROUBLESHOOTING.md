@@ -109,7 +109,45 @@ this should not happen on a stock app. If it does, set `kotlinVersion` and
 ## Build fails: `minSdkVersion 24 cannot be smaller than 26`
 
 Set `minSdkVersion = 26` in the app's root `build.gradle`. Health Connect and
-`java.time` both need it.
+`java.time` both need it, and React Native's own template starts at 24. The
+error names this package from 2.0, which declares 26 whatever the app says.
+Expo: the config plugin raises it for you.
+
+## Build fails on AGP 9: Kotlin or kapt plugin errors
+
+`The 'org.jetbrains.kotlin.kapt' plugin is not compatible with built-in
+Kotlin support` or `Plugin with id 'com.android.legacy-kapt' not found` come
+from a 1.x release of this package on AGP 9 with `android.builtInKotlin` on.
+2.0 detects built-in Kotlin and applies AGP's `com.android.legacy-kapt`,
+pulling in the artifact that provides it. Upgrade; or, on 1.x, set
+`android.builtInKotlin=false` as React Native 0.87's template does.
+
+## `E_HEALTH_CONNECT_NOT_DECLARED`
+
+From 2.0 the library manifest declares no Health Connect permission. Add the
+entries your config asks for to your app's manifest - the message names them,
+and so does `getHealthConnectStatus().undeclaredPermissions`. The snippets
+are in [PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add);
+an app upgraded from 1.x, which declared them for you, is covered by
+[MIGRATING.md](MIGRATING.md).
+
+## The battery dialog opens a settings list instead
+
+`requestDisableBatteryOptimization()` needs
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, which the library no longer declares
+from 2.0. Without it the call opens the settings list, which reaches the same
+switch. Add the permission if you have an eligible Play use case
+([PLAY_STORE_COMPLIANCE.md](PLAY_STORE_COMPLIANCE.md#3-battery-optimisation-exemption)).
+
+## Uploads stop with `syncAuthFailed`
+
+The endpoint answered 401 or 403, or `remoteSyncAuth: 'signature'` had no key
+to sign with. The batch is not retried with credentials that were just
+refused. Refresh the token with `updateConfig({ remoteSyncHeaders })` - or
+call `attestDevice()` for signature auth - then `syncNow()`. After a backup is
+restored onto a new phone the sealed headers cannot be opened there (the
+Keystore key does not travel), so the first upload is refused and the same
+event asks for fresh ones.
 
 ## `ForegroundServiceDidNotStartInTimeException`
 
@@ -229,6 +267,11 @@ origin is recognised, classified `'phone'` and flagged `isPlatform: true`.
 `invalidate()` unsubscribes the module from the event bus on teardown. If you
 hold a listener across a reload, re-register in a `useEffect` — the bundled
 hooks already do.
+
+If listeners vanish in a running app instead, look for a
+`removeListener()` or `removeAllListeners()` call with no argument: it
+removes every listener subscribed through the package, the hooks' included.
+Keep the subscription `addListener` returns and call `remove()` on it.
 
 ## Numbers do not match Google Fit or Samsung Health
 

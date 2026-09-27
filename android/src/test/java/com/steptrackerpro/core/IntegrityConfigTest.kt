@@ -126,4 +126,21 @@ class IntegrityConfigTest {
         assertEquals("daily_volume@0", flag.key)
         assertNull(FraudDetector.dailyVolumeFlag(0, 100, IntegrityRules(), 0L, 1L))
     }
+
+    @Test
+    fun `the 2_0 settings survive the persisted JSON and an unknown auth falls back to headers`() {
+        val config = StepTrackerConfig(healthConnectReadActiveCalories = true, remoteSyncAuth = "signature")
+        assertEquals(config, StepTrackerConfig.fromJson(config.toJson()))
+        assertEquals(RemoteSyncAuth.HEADERS, StepTrackerConfig(remoteSyncAuth = "token").sanitised().remoteSyncAuth)
+        assertEquals(RemoteSyncAuth.SIGNATURE, StepTrackerConfig(remoteSyncAuth = "signature").sanitised().remoteSyncAuth)
+    }
+
+    @Test
+    fun `persisted config never carries the headers, which are sealed separately`() {
+        val config = StepTrackerConfig(remoteSyncHeaders = mapOf("Authorization" to "Bearer secret"))
+        assertFalse(config.toJson(includeHeaders = false).has("remoteSyncHeaders"))
+        assertTrue(config.toJson().has("remoteSyncHeaders"))
+        // A 1.x config with plaintext headers still reads, so it can be migrated.
+        assertEquals("Bearer secret", StepTrackerConfig.fromJson(config.toJson()).remoteSyncHeaders["Authorization"])
+    }
 }

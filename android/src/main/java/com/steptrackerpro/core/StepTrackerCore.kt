@@ -53,7 +53,9 @@ class StepTrackerCore private constructor(context: Context) {
     val metrics = MetricsCalculator(configStore.get())
     val repository = StepRepository(appContext)
     val goals = GoalTracker(appContext)
-    val healthConnect = HealthConnectManager(appContext, state)
+    val healthConnect = HealthConnectManager(appContext, state).apply {
+        readActiveCalories = configStore.get().healthConnectReadActiveCalories
+    }
 
     /** Per-minute buckets, the detector, the event log and suspect-step arithmetic. */
     val integrity = IntegrityMonitor(
@@ -93,6 +95,7 @@ class StepTrackerCore private constructor(context: Context) {
         val previous = configStore.get()
         val saved = configStore.save(config)
         metrics.config = saved
+        healthConnect.readActiveCalories = saved.healthConnectReadActiveCalories
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
         engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
         // A different policy or pin changes what the baseline means, so it is
@@ -107,7 +110,9 @@ class StepTrackerCore private constructor(context: Context) {
             previous.wearableTrust != saved.wearableTrust ||
             previous.wearableAllowlist != saved.wearableAllowlist ||
             // Exclude mode lowers the device count the baseline was measured against.
-            previous.excludeSuspect != saved.excludeSuspect
+            previous.excludeSuspect != saved.excludeSuspect ||
+            // Cached sources were read without (or with) active calories.
+            previous.healthConnectReadActiveCalories != saved.healthConnectReadActiveCalories
         ) {
             state.clearContinuity()
             sourceCache.invalidate()
@@ -145,7 +150,8 @@ class StepTrackerCore private constructor(context: Context) {
             read = config.healthConnectReadEnabled,
             write = config.healthConnectWriteEnabled,
             backgroundRead = backgroundRead ?: config.healthConnectBackgroundRead,
-            historyRead = historyRead ?: config.healthConnectHistoryRead
+            historyRead = historyRead ?: config.healthConnectHistoryRead,
+            activeCalories = config.healthConnectReadActiveCalories
         )
     }
 
@@ -624,6 +630,9 @@ class StepTrackerCore private constructor(context: Context) {
         val zone = DateKeys.zone()
         val now = System.currentTimeMillis()
         val snapshot = linkedMapOf<String, Any?>(
+            // First, so a server can pick a parser before reading anything else.
+            "schemaVersion" to SNAPSHOT_SCHEMA_VERSION,
+            "libraryVersion" to com.steptrackerpro.BuildConfig.LIBRARY_VERSION,
             "date" to date,
             // This phone's own sensor, before any policy. Never Health Connect.
             "deviceSteps" to device.steps,
@@ -1157,6 +1166,15 @@ class StepTrackerCore private constructor(context: Context) {
     )
 
     companion object {
+        /**
+         * The verification snapshot's shape. Bumped whenever a field is
+         * removed, renamed or changes meaning; adding a field does not bump
+         * it. 1 is the 1.4 shape, which carried no version field; 2 added
+         * `suspectSteps`, `integrity` and the signing fields in 1.5, and the
+         * version fields themselves in 2.0.
+         */
+        const val SNAPSHOT_SCHEMA_VERSION = 2
+
         /** Config keys whose change is logged as an integrity event. */
         private val INTEGRITY_CONFIG_KEYS = listOf(
             "fraudDetectionEnabled", "fraudMode", "fraudMaxCadenceSpm", "fraudSteadyCadenceMinutes",

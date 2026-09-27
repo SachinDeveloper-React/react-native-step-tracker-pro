@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.RemoteSyncAuth
 import com.steptrackerpro.core.StepTrackerCore
 import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.integrity.DeviceAttestation
@@ -85,6 +86,14 @@ class RemoteSyncWorker(
         val pending = core.repository.unsynced(SyncTarget.REMOTE, limit = 200)
         if (pending.isEmpty()) return Result.success()
 
+        // Signature-only auth stores no secret at all, so without a key there
+        // is nothing to authenticate with. Not retried: the app attests first.
+        val signatureOnly = config.remoteSyncAuth == RemoteSyncAuth.SIGNATURE
+        if (signatureOnly && !DeviceAttestation.hasKey()) {
+            authRefused(status = null, reason = "no_key", auth = config.remoteSyncAuth, pending = pending.size)
+            return Result.success()
+        }
+
         // The full shape reads Health Connect once per pending day, at upload
         // time, so the server sees the origins as they stood when the batch
         // was built. Pending is normally the handful of days since the last
@@ -116,11 +125,26 @@ class RemoteSyncWorker(
             }
         }
 
-        val ok = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
-            post(url, config.remoteSyncHeaders, pending, shape, details, suspects, config.excludeSuspect)
-        } ?: false
+        val headers = if (signatureOnly) emptyMap() else config.remoteSyncHeaders
+        val status = withTimeoutOrNull(REQUEST_TIMEOUT_MS) {
+            post(url, headers, pending, shape, details, suspects, config.excludeSuspect)
+        } ?: NO_RESPONSE
+        val outcome = RemotePayload.outcomeOf(status)
 
-        if (ok) {
+        if (outcome == RemotePayload.Outcome.AUTH_REFUSED) {
+            // The token expired or the key is not one the server accepted.
+            // The same request would be refused again, so it is not retried:
+            // JS hears it, refreshes, and calls syncNow().
+            authRefused(
+                status = status,
+                reason = if (status == 401) "unauthorized" else "forbidden",
+                auth = config.remoteSyncAuth,
+                pending = pending.size
+            )
+            return Result.success()
+        }
+
+        if (outcome == RemotePayload.Outcome.UPLOADED) {
             core.repository.markSynced(SyncTarget.REMOTE, pending.map { it.date })
             StepEventBus.emit(
                 StepEventBus.Events.SYNC_COMPLETED,
@@ -141,12 +165,35 @@ class RemoteSyncWorker(
                 "syncedRecords" to 0,
                 "failedRecords" to pending.size,
                 "success" to false,
-                "error" to "Upload failed"
+                "error" to if (status == NO_RESPONSE) "Upload failed: no response" else "Upload failed: HTTP $status",
+                "retryable" to true
             )
         )
         // As above: failure() would retire the periodic work permanently, so an
         // endpoint that is down for a day would never be retried again.
         return if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.success()
+    }
+
+    /** Tells JS the credentials were refused, and reports the batch as failed and not retryable. */
+    private fun authRefused(status: Int?, reason: String, auth: String, pending: Int) {
+        StepEventBus.emit(
+            StepEventBus.Events.SYNC_AUTH_FAILED,
+            mapOf("target" to "remote", "status" to status, "reason" to reason, "auth" to auth)
+        )
+        StepEventBus.emit(
+            StepEventBus.Events.SYNC_COMPLETED,
+            mapOf(
+                "target" to "remote",
+                "syncedRecords" to 0,
+                "failedRecords" to pending,
+                "success" to false,
+                "error" to when (reason) {
+                    "no_key" -> "remoteSyncAuth 'signature' needs a key from attestDevice()"
+                    else -> "Upload refused: HTTP $status"
+                },
+                "retryable" to false
+            )
+        )
     }
 
     /**
@@ -170,7 +217,7 @@ class RemoteSyncWorker(
         details: Map<String, RemotePayload.DayDetail>,
         suspects: Map<String, Int>,
         excludeSuspect: Boolean
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): Int = withContext(Dispatchers.IO) {
         var connection: HttpURLConnection? = null
         try {
             val body = RemotePayload.body(
@@ -214,9 +261,9 @@ class RemoteSyncWorker(
             if (code !in 200..299) {
                 connection.errorStream?.bufferedReader()?.use(BufferedReader::readText)
             }
-            code in 200..299
+            code
         } catch (error: Exception) {
-            false
+            NO_RESPONSE
         } finally {
             connection?.disconnect()
         }
@@ -226,6 +273,9 @@ class RemoteSyncWorker(
         const val NAME = "stp_remote_sync"
         private const val MAX_ATTEMPTS = 5
         private const val REQUEST_TIMEOUT_MS = 45_000L
+
+        /** No HTTP status: a timeout, a refused connection, a TLS failure. */
+        private const val NO_RESPONSE = -1
 
         /** Most of the worker's budget the `full` shape may spend reading Health Connect. */
         private const val DETAIL_TIMEOUT_MS = 120_000L

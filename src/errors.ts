@@ -12,6 +12,15 @@ export type StepTrackerErrorCode =
   /** Provider too old. Also answered by `installHealthConnect()`. */
   | 'E_HEALTH_CONNECT_UPDATE_REQUIRED'
   | 'E_HEALTH_CONNECT_DENIED'
+  /**
+   * A Health Connect permission config asks for is not declared in the app's
+   * manifest. From 2.0 the app declares them; see docs/PERMISSIONS.md.
+   */
+  | 'E_HEALTH_CONNECT_NOT_DECLARED'
+  /** `requestIntegrityToken()` needs `com.google.android.play:integrity` in the app. */
+  | 'E_INTEGRITY_UNAVAILABLE'
+  /** Play Integrity returned an error; the message carries Play's error code. */
+  | 'E_INTEGRITY_FAILED'
   | 'E_DATABASE'
   | 'E_INVALID_CONFIG'
   | 'E_NO_ACTIVITY'

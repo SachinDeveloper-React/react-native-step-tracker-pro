@@ -458,6 +458,17 @@ start date, so it fires once per day/week/month and rearms by itself.
 `suspiciousActivity` fires once per flag, keyed on the flag's type and start,
 compared against the day's stored verdict.
 
+The module hands each event to a generated `emitOn…` method. On the new
+architecture codegen generates them from the spec's `EventEmitter`
+properties, and they reach JS through the TurboModule's typed emitter; JS
+subscribes with `NativeStepTrackerPro.onStepsChanged(handler)` and so on. On
+the old architecture there is no typed emitter, so the old-architecture spec
+shim implements the same thirteen methods over `RCTDeviceEventEmitter` under
+the `StepTrackerPro:` prefix, and JS falls back to `NativeEventEmitter`. The
+module's code is identical on both; `StepTracker.addListener` picks the path
+by whether the typed emitter exists, and keeps its own registry of
+subscriptions so `removeAllListeners()` works on either.
+
 ## Sync
 
 Three WorkManager jobs:
@@ -482,6 +493,54 @@ parallel count of the same walk leaves every other reader with two copies of it.
 Marking it done rather than leaving it queued matters too: nothing about that day
 will ever make it writable, so a pending row would be retried for as long as it
 stays in retention.
+
+Remote uploads classify the response: 2xx marks the rows uploaded; 401 and
+403 raise `syncAuthFailed` and end the attempt without a retry, because the
+same credentials would be refused again; anything else, or no response, is
+retried with backoff. `remoteSyncHeaders` live sealed in SharedPreferences -
+AES-GCM with a Keystore key (`SecretVault`) - and are opened when config is
+read. Under `remoteSyncAuth: 'signature'` none are sent and the request
+authenticates with the `Step-Tracker-Signature` header alone.
+
+## Build
+
+`android/build.gradle` adapts to the app it is built into rather than
+assuming one toolchain:
+
+- **React Native version.** Read from the nearest
+  `node_modules/react-native/package.json` above the Gradle root, which finds
+  it in a plain app, a hoisted monorepo and this repository alike. From 0.82
+  the new architecture is the only one, so the new-architecture sources and
+  codegen are used whatever `newArchEnabled` says; below 0.82 the property
+  decides.
+- **Kotlin mode.** On AGP 9 with `android.builtInKotlin` not set to `false`,
+  AGP compiles Kotlin itself and refuses the Kotlin Android and Kotlin kapt
+  plugins. The script then applies `com.android.legacy-kapt` instead, and -
+  because that plugin lives in `com.android.tools.build:gradle-kotlin`, which
+  React Native apps do not put on the classpath - adds that artifact to its
+  own buildscript classpath at the host's AGP version, found by reflection
+  through the root project's class loader (the buildscript block is compiled
+  before that classpath exists). On AGP 8, or with built-in Kotlin off, it is
+  the Kotlin Android plugin and its kapt, as in 1.x. The architecture shim
+  directories are registered as Kotlin sources as well as Java ones, because
+  built-in Kotlin compiles only `kotlin` source directories and the defaults.
+- **Compiler options** go through `kotlin { compilerOptions { } }`, which
+  works from Kotlin 2.0 under both modes. Room needs real JVM default methods
+  in the DAO interfaces: Kotlin 2.2's typed `jvmDefault` option where it
+  exists, the `-Xjvm-default=all` flag before it.
+- **Health Connect client** follows `compileSdkVersion`: 1.1.0 from 36, the
+  1.1.0-beta01 that builds against 35 below.
+- **minSdk** is declared as at least 26 whatever the app says, so an app
+  below it fails the manifest merge naming this package.
+- **`BuildConfig.LIBRARY_VERSION`** is the npm version from `package.json`,
+  compiled in for the verification snapshot.
+- **Standalone builds.** Only when the module is the root of the build - CI
+  and development - does its buildscript add AGP and the Kotlin plugin; inside
+  an app it adds nothing of its own, so it never puts a second AGP next to
+  the host's.
+
+The combinations this is checked against are in the README's compatibility
+table, built on every push by the `compat` CI job.
 
 ## Step source resolution
 

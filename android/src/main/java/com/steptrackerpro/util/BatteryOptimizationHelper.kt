@@ -46,6 +46,10 @@ object BatteryOptimizationHelper {
     @SuppressLint("BatteryLife")
     fun requestExemption(context: Context): Boolean {
         if (!isOptimizationEnabled(context)) return true
+        // Not declared - the default from 2.0 - means the system would refuse
+        // the direct dialog. The settings list needs no permission and gets
+        // the user to the same switch.
+        if (!directPromptAvailable(context)) return openSettings(context)
         return runCatching {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                 .setData(Uri.parse("package:${context.packageName}"))
@@ -54,6 +58,10 @@ object BatteryOptimizationHelper {
             true
         }.getOrDefault(false)
     }
+
+    /** Whether the app declares REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, which the direct dialog needs. */
+    fun directPromptAvailable(context: Context): Boolean =
+        PermissionHelper.isDeclared(context, "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS")
 
     /** Policy-safe: opens the exemption list, the user picks the app. */
     fun openSettings(context: Context): Boolean = runCatching {
@@ -258,6 +266,9 @@ object BatteryOptimizationHelper {
         "brand" to Build.BRAND,
         "aggressiveOem" to isAggressiveOem(),
         "batteryOptimizationEnabled" to isOptimizationEnabled(context),
+        // False unless the app declares REQUEST_IGNORE_BATTERY_OPTIMIZATIONS;
+        // requestDisableBatteryOptimization() then opens the settings list.
+        "directPromptAvailable" to directPromptAvailable(context),
         "autoStartSettingsAvailable" to hasAutoStartSettings(context),
         // Which screen openManufacturerAutoStartSettings() will open, for
         // support tickets: "it opened X" is a bug report, "it opened app

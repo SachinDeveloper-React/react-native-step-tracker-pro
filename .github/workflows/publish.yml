@@ -1,0 +1,43 @@
+name: Publish
+
+# Publishing happens here, not from a laptop: `--provenance` needs the
+# workflow's OIDC token, and npm then shows which commit and which workflow
+# run built the tarball. Push a tag that matches package.json's version:
+#
+#   git tag v2.0.0 && git push origin v2.0.0
+#
+# Needs an NPM_TOKEN repository secret: an npm automation token for an
+# account that can publish the package.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: npm publish --provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci --ignore-scripts
+      - name: The tag matches package.json
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json $version"
+            exit 1
+          fi
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test -- --ci
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

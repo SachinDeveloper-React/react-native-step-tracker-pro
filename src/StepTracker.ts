@@ -11,9 +11,13 @@ import type {
   DeviceAttestation,
   DeviceCapabilities,
   EventSubscription,
+  HealthConnectChanges,
+  HealthConnectRecordList,
   HealthConnectStatus,
   IntegrityEvent,
   IntegrityReport,
+  IntegrityToken,
+  IntegrityTokenOptions,
   MotionWindow,
   PermissionStatus,
   RangeOptions,
@@ -71,6 +75,73 @@ function getEmitter(): NativeEventEmitter {
 }
 
 const EVENT_PREFIX = 'StepTrackerPro:';
+
+/**
+ * The codegen-typed emitter behind each event. On the new architecture the
+ * native module exposes these as functions that subscribe and return a
+ * subscription; on the old one they do not exist and the event arrives
+ * through `NativeEventEmitter` under `StepTrackerPro:<event>` instead.
+ */
+const TYPED_EMITTERS: Record<StepTrackerEvent, string> = {
+  stepsChanged: 'onStepsChanged',
+  goalReached: 'onGoalReached',
+  goalProgressChanged: 'onGoalProgressChanged',
+  trackingStateChanged: 'onTrackingStateChanged',
+  dayChanged: 'onDayChanged',
+  historyBackfilled: 'onHistoryBackfilled',
+  motionWindow: 'onMotionWindow',
+  suspiciousActivity: 'onSuspiciousActivity',
+  syncCompleted: 'onSyncCompleted',
+  syncAuthFailed: 'onSyncAuthFailed',
+  stepSourceChanged: 'onStepSourceChanged',
+  healthConnectStatusChanged: 'onHealthConnectStatusChanged',
+  error: 'onError',
+};
+
+type Subscription = { remove(): void };
+
+/**
+ * Every subscription made through `addListener`, so `removeAllListeners`
+ * can remove exactly those - typed emitters have no "remove everything"
+ * of their own.
+ */
+const subscriptions = new Map<StepTrackerEvent, Set<Subscription>>();
+
+function nativeModuleOrNull(): Spec | null {
+  return (NativeStepTrackerPro ??
+    (NativeModules as Record<string, unknown>)[MODULE_NAME] ??
+    null) as Spec | null;
+}
+
+function subscribe(
+  event: StepTrackerEvent,
+  listener: (payload: never) => void
+): EventSubscription {
+  const mod = nativeModuleOrNull() as unknown as Record<string, unknown> | null;
+  const typed = mod?.[TYPED_EMITTERS[event]];
+  const inner: Subscription =
+    typeof typed === 'function'
+      ? (typed as (handler: (value: never) => void) => Subscription).call(mod, listener)
+      : getEmitter().addListener(
+          `${EVENT_PREFIX}${event}`,
+          listener as (payload: unknown) => void
+        );
+  let set = subscriptions.get(event);
+  if (!set) {
+    set = new Set();
+    subscriptions.set(event, set);
+  }
+  const owner = set;
+  const entry: Subscription = {
+    remove: () => {
+      if (owner.delete(entry)) inner.remove();
+    },
+  };
+  owner.add(entry);
+  return { remove: () => entry.remove() };
+}
+
+let warnedRemoveListener = false;
 
 async function call<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -164,6 +235,22 @@ function assertFraudDetection(config: StepTrackerConfig): void {
 /** UTF-8 byte length without TextEncoder, which older Hermes builds lack. */
 function utf8Length(value: string): number {
   return encodeURIComponent(value).replace(/%[0-9A-F]{2}/gi, 'x').length;
+}
+
+function isIsoInstant(value: string): boolean {
+  return typeof value === 'string' && /T/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
+function assertInstantRange(startIso: string, endIso: string): void {
+  if (!isIsoInstant(startIso) || !isIsoInstant(endIso)) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      "Instants must be ISO-8601 with a zone, e.g. '2026-09-01T00:00:00Z'"
+    );
+  }
+  if (Date.parse(startIso) >= Date.parse(endIso)) {
+    throw new StepTrackerError('E_INVALID_CONFIG', 'startIso must be before endIso');
+  }
 }
 
 function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
@@ -261,6 +348,16 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
     throw new StepTrackerError('E_INVALID_CONFIG', 'motionWindowRetention must be >= 1');
   }
   assertFraudDetection(config);
+  if (
+    config.remoteSyncAuth != null &&
+    config.remoteSyncAuth !== 'headers' &&
+    config.remoteSyncAuth !== 'signature'
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      "remoteSyncAuth must be 'headers' or 'signature'"
+    );
+  }
   // Only the keys the caller supplied cross the bridge. The native side holds
   // the same defaults and, more importantly, holds whatever the user set last
   // session: spreading DEFAULT_CONFIG here sent `height: 170` on every
@@ -479,6 +576,59 @@ export const StepTracker = {
     return call(() =>
       getNativeModule().attestDevice(challenge)
     ) as Promise<DeviceAttestation>;
+  },
+
+  /**
+   * Whether the install already has a signing key. Attest once - on first
+   * run, or when your server has no key on file for the install - rather
+   * than on every launch: `attestDevice()` replaces the key each time,
+   * because a challenge can only be bound when a key is generated.
+   */
+  async hasAttestationKey(): Promise<boolean> {
+    return call(() => getNativeModule().hasAttestationKey());
+  },
+
+  /**
+   * The current key's id, public key, certificate chain and security level,
+   * without replacing it; `null` when there is none. Its chain still carries
+   * the challenge it was generated with.
+   */
+  async getAttestationKeyInfo(): Promise<DeviceAttestation | null> {
+    return call(() =>
+      getNativeModule().getAttestationKeyInfo()
+    ) as Promise<DeviceAttestation | null>;
+  },
+
+  /**
+   * A Play Integrity token (standard request) bound to `requestHash`. Pass a
+   * signed snapshot's `signature.payloadSha256`, and your Google Cloud
+   * project number. Your server decrypts the token with Google and checks the
+   * app, device and account verdicts and that the hash matches. Needs your
+   * app to add `com.google.android.play:integrity`; rejects with
+   * `E_INTEGRITY_UNAVAILABLE` otherwise, and `E_INTEGRITY_FAILED` with Play's
+   * error code when Play refuses.
+   */
+  async requestIntegrityToken(options: IntegrityTokenOptions): Promise<IntegrityToken> {
+    const { requestHash, cloudProjectNumber } = options ?? ({} as IntegrityTokenOptions);
+    if (
+      typeof requestHash !== 'string' ||
+      requestHash.length < 1 ||
+      requestHash.length > 500
+    ) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'requestHash must be a string of 1–500 characters'
+      );
+    }
+    if (!(Number.isSafeInteger(cloudProjectNumber) && cloudProjectNumber > 0)) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'cloudProjectNumber must be a positive integer'
+      );
+    }
+    return call(() =>
+      getNativeModule().requestIntegrityToken({ requestHash, cloudProjectNumber })
+    ) as Promise<IntegrityToken>;
   },
 
   /**
@@ -702,6 +852,45 @@ export const StepTracker = {
     return call(() => getNativeModule().syncWithHealthConnect()) as Promise<SyncEvent>;
   },
 
+  /**
+   * Every step record Health Connect holds between two instants, from every
+   * app, as stored: id, client record id, source app, recording method,
+   * device, start and end with their zone offsets, last-modified time and
+   * count. Up to 10,000 records; `truncated` says to narrow the window.
+   * Rejects with `E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`
+   * rather than returning an empty list.
+   */
+  async getHealthConnectRecords(
+    startIso: string,
+    endIso: string
+  ): Promise<HealthConnectRecordList> {
+    assertInstantRange(startIso, endIso);
+    return call(() =>
+      getNativeModule().getHealthConnectRecords(startIso, endIso)
+    ) as Promise<HealthConnectRecordList>;
+  },
+
+  /** A change-tracking cursor for step records, starting now. Valid for 30 days. */
+  async getHealthConnectChangesToken(): Promise<string> {
+    return call(() => getNativeModule().getHealthConnectChangesToken());
+  },
+
+  /**
+   * Step records inserted, updated or deleted since `token`, and the cursor
+   * to use next. `tokenExpired: true` means Health Connect no longer has the
+   * changes since that cursor: take a new token and re-read the window with
+   * `getHealthConnectRecords()`. `hasMore: true` means call again with
+   * `nextToken` straight away.
+   */
+  async getHealthConnectChanges(token: string): Promise<HealthConnectChanges> {
+    if (typeof token !== 'string' || token.length === 0) {
+      throw new StepTrackerError('E_INVALID_CONFIG', 'token must be a non-empty string');
+    }
+    return call(() =>
+      getNativeModule().getHealthConnectChanges(token)
+    ) as Promise<HealthConnectChanges>;
+  },
+
   // ---- step sources ----------------------------------------------------
 
   /**
@@ -772,38 +961,50 @@ export const StepTracker = {
 
   // ---- events ----------------------------------------------------------
 
+  /**
+   * Subscribes to an event. On the new architecture this goes through the
+   * module's codegen-typed emitter; on the old one through
+   * `NativeEventEmitter`. The subscription behaves the same either way.
+   */
   addListener<E extends StepTrackerEvent>(
     event: E,
     listener: (payload: StepTrackerEventMap[E]) => void
   ): EventSubscription {
     if (Platform.OS !== 'android') return { remove: () => {} };
-    const sub = getEmitter().addListener(`${EVENT_PREFIX}${event}`, listener);
-    return { remove: () => sub.remove() };
+    return subscribe(event, listener as (payload: never) => void);
   },
 
-  /** Removes every listener for one event, or all events when omitted. */
+  /**
+   * Removes every listener subscribed through `addListener` for `event` -
+   * or, with no argument, for every event, including the ones this
+   * package's own hooks hold. Prefer keeping the subscription `addListener`
+   * returns and calling `remove()` on it.
+   */
+  removeAllListeners(event?: StepTrackerEvent): void {
+    const events = event ? [event] : Array.from(subscriptions.keys());
+    events.forEach((name) => {
+      Array.from(subscriptions.get(name) ?? []).forEach((sub) => sub.remove());
+    });
+  },
+
+  /**
+   * Removes every listener for one event.
+   *
+   * @deprecated Without an argument this removes every listener in the app,
+   *   the hooks' included. Call `removeAllListeners()` when that is really
+   *   what you want; the no-argument form will be removed in 3.0.
+   */
   removeListener(event?: StepTrackerEvent): void {
-    if (Platform.OS !== 'android') return;
-    const em = getEmitter();
-    if (event) em.removeAllListeners(`${EVENT_PREFIX}${event}`);
-    else {
-      (
-        [
-          'stepsChanged',
-          'goalReached',
-          'goalProgressChanged',
-          'trackingStateChanged',
-          'dayChanged',
-          'historyBackfilled',
-          'motionWindow',
-          'suspiciousActivity',
-          'syncCompleted',
-          'stepSourceChanged',
-          'healthConnectStatusChanged',
-          'error',
-        ] as StepTrackerEvent[]
-      ).forEach((name) => em.removeAllListeners(`${EVENT_PREFIX}${name}`));
+    if (event === undefined && !warnedRemoveListener) {
+      warnedRemoveListener = true;
+      // A one-time deprecation notice is the point of this branch.
+      // eslint-disable-next-line no-console
+      console.warn(
+        'react-native-step-tracker-pro: removeListener() with no argument is deprecated ' +
+          "and removes every listener, the hooks' included. Use removeAllListeners()."
+      );
     }
+    StepTracker.removeAllListeners(event);
   },
 };
 

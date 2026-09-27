@@ -22,9 +22,16 @@ location, no network access unless `remoteSyncUrl` is configured.
   extract can read them. If that matters for your product, exclude them from
   backups (`android:allowBackup="false"` or backup rules) and treat the
   numbers as the user's own data, which they are.
-- `remoteSyncHeaders` are stored in the same place, in the clear. Put
-  short-lived tokens in them, never long-lived secrets, and rotate them from
-  your app. They are never returned by `getConfig()`.
+- `remoteSyncHeaders` are sealed before they are stored: AES-256-GCM with a
+  key in the Android Keystore that never leaves it, so the config file holds
+  `v1:<iv>:<ciphertext>`, useless to a backup extract or another app reading
+  it. Headers a 1.x release stored in the clear are sealed on the first read.
+  The key is not part of a backup, so a restore onto a new phone cannot open
+  them - the first upload is refused and `syncAuthFailed` asks for fresh
+  ones. Only on a device whose Keystore is unusable are they kept in the
+  clear, as before, so uploads keep working there. They are never returned
+  by `getConfig()`. Short-lived tokens are still the right thing to put in
+  them - or none at all, with `remoteSyncAuth: 'signature'`.
 - With the integrity checks on, per-minute step counts, the detector's
   verdicts and the integrity event log sit in the same database. Counts and
   flags only - no samples, no location. They are what a rooted user would
@@ -45,7 +52,7 @@ location, no network access unless `remoteSyncUrl` is configured.
 
 | Component | Exported | Why | Guard |
 |---|---|---|---|
-| `BootReceiver` | yes | `BOOT_COMPLETED` is only delivered to exported receivers | acts only when the user had tracking on and permissions are held; an unprotected `QUICKBOOT_POWERON` from another app can at most restart tracking the user already asked for |
+| `BootReceiver` | yes | `BOOT_COMPLETED` is only delivered to exported receivers | acts only when the user had tracking on and permissions are held; an unprotected `QUICKBOOT_POWERON` from another app can at most restart tracking the user already asked for, and cannot write a reboot into the integrity log (see below) |
 | `HealthPrivacyPolicyActivity` (+ alias) | yes | Health Connect and Play require it | opens only `http(s)` URLs from the app's own config; never an arbitrary scheme |
 | `StepTrackerService` | no | | |
 | `HealthPermissionActivity` | no | | |
@@ -54,8 +61,11 @@ location, no network access unless `remoteSyncUrl` is configured.
 
 The integrity checks' charging and clock receivers are registered at runtime
 with `RECEIVER_NOT_EXPORTED`, while the service runs. `BootReceiver` also logs
-a `reboot` integrity event; since `QUICKBOOT_POWERON` is unprotected, another
-app can add one to the log - the log is evidence, not proof.
+a `reboot` integrity event, but only when `Settings.Global.BOOT_COUNT` - which
+only the system writes, and only on a real boot - has moved since the last one
+it logged. A forged `QUICKBOOT_POWERON`, or the duplicate some devices send
+alongside `BOOT_COMPLETED`, finds the count unchanged and logs nothing. A
+device that does not expose the count logs the event with `verified: false`.
 
 ### Input from the bridge
 
@@ -74,9 +84,11 @@ numbers came unmodified from a genuine device. See
 [docs/API.md](docs/API.md#integrity-checks). What remains:
 
 - A rooted device can feed a mock sensor, hook this code or edit its
-  database; attestation catches an unlocked bootloader and an emulator, and
-  a signature that stops verifying catches edits after signing, but nothing
-  on the device can stop a determined attacker before that.
+  database; attestation catches an unlocked bootloader and an emulator, a
+  Play Integrity token (`requestIntegrityToken()`) adds Google's verdict on
+  the app binary and the device, and a signature that stops verifying
+  catches edits after signing - but nothing on the device can stop a
+  determined attacker before that.
 - A gadget tuned to vary its pace, or a person shaking a phone in bursts,
   can stay under every threshold. The checks raise the effort; they are not
   a proof of walking.
@@ -100,15 +112,17 @@ lower-confidence.
 ### Permissions
 
 Only what the configured mode needs is requested; see
-[docs/PERMISSIONS.md](docs/PERMISSIONS.md). `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
-and the Health Connect permissions are declared by the library manifest and
-are meant to be removed with `tools:node="remove"` by apps that do not use them.
+[docs/PERMISSIONS.md](docs/PERMISSIONS.md). From 2.0 the library manifest
+declares only what sensor counting needs; `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`
+and the Health Connect permissions are declared by the app, and only when it
+uses them.
 
 ### Dependencies
 
 Runtime: AndroidX core, lifecycle, activity, Room, WorkManager, the Health
 Connect client, and kotlinx-coroutines — all Google or JetBrains. No
-third-party network or analytics code. `play-services-location` is
-compile-only: it ships only if your app adds it, for Activity Recognition. `npm audit` and Dependabot run on the
+third-party network or analytics code. `play-services-location` and
+`com.google.android.play:integrity` are compile-only: each ships only if your
+app adds it, for Activity Recognition and Play Integrity. `npm audit` and Dependabot run on the
 JS toolchain, which is development-only; nothing from `node_modules` ships in
 the package.

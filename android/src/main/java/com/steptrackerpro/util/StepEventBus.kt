@@ -32,6 +32,12 @@ object StepEventBus {
          */
         const val SUSPICIOUS_ACTIVITY = "suspiciousActivity"
         const val SYNC_COMPLETED = "syncCompleted"
+        /**
+         * The remote endpoint refused the upload - 401 or 403 - or signature
+         * auth has no key to sign with. Not retried: the app refreshes its
+         * token through `updateConfig`, or calls `attestDevice`, then syncs.
+         */
+        const val SYNC_AUTH_FAILED = "syncAuthFailed"
         /** The app now counting for the user changed - watch on, watch off. */
         const val STEP_SOURCE_CHANGED = "stepSourceChanged"
         /** Health Connect was installed, updated, granted or revoked. */

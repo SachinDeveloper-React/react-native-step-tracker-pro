@@ -192,4 +192,15 @@ class RemotePayloadTest {
             RemotePayload.signatureHeader("abc", "SHA256withECDSA", "MEUCIQ==")
         )
     }
+
+    @Test
+    fun `a refused credential is not retried, anything else short of success is`() {
+        assertEquals(RemotePayload.Outcome.UPLOADED, RemotePayload.outcomeOf(200))
+        assertEquals(RemotePayload.Outcome.UPLOADED, RemotePayload.outcomeOf(204))
+        assertEquals(RemotePayload.Outcome.AUTH_REFUSED, RemotePayload.outcomeOf(401))
+        assertEquals(RemotePayload.Outcome.AUTH_REFUSED, RemotePayload.outcomeOf(403))
+        assertEquals(RemotePayload.Outcome.RETRY, RemotePayload.outcomeOf(500))
+        assertEquals(RemotePayload.Outcome.RETRY, RemotePayload.outcomeOf(429))
+        assertEquals(RemotePayload.Outcome.RETRY, RemotePayload.outcomeOf(-1))
+    }
 }

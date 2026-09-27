@@ -23,6 +23,23 @@ object PermissionHelper {
         }
     }
 
+    /**
+     * Permissions the app's merged manifest declares. From 2.0 the library
+     * manifest only carries what sensor-only counting needs; Health Connect
+     * and the battery-exemption prompt are declared by the app when it wants
+     * them, so every path that needs one checks here first and says what is
+     * missing instead of failing silently.
+     */
+    fun declaredPermissions(context: Context): Set<String> = runCatching {
+        val info = context.packageManager.getPackageInfo(
+            context.packageName, PackageManager.GET_PERMISSIONS
+        )
+        info.requestedPermissions?.toSet() ?: emptySet()
+    }.getOrDefault(emptySet())
+
+    fun isDeclared(context: Context, permission: String): Boolean =
+        permission in declaredPermissions(context)
+
     fun isGranted(context: Context, permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) ==
             PackageManager.PERMISSION_GRANTED

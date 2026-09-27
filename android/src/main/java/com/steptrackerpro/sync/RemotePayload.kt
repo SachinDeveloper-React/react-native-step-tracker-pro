@@ -56,6 +56,27 @@ object RemotePayload {
      */
     const val SIGNATURE_HEADER = "Step-Tracker-Signature"
 
+    /** What an upload's HTTP status means for the batch. */
+    enum class Outcome {
+        /** 2xx: the rows are marked uploaded. */
+        UPLOADED,
+
+        /**
+         * 401 or 403: the credentials were refused. Retrying with the same
+         * ones cannot help, so the batch waits for the app to refresh them.
+         */
+        AUTH_REFUSED,
+
+        /** Anything else, or no response at all: worth another attempt. */
+        RETRY
+    }
+
+    fun outcomeOf(status: Int): Outcome = when (status) {
+        in 200..299 -> Outcome.UPLOADED
+        401, 403 -> Outcome.AUTH_REFUSED
+        else -> Outcome.RETRY
+    }
+
     /** `keyId=<hex>;alg=SHA256withECDSA;sig=<base64>`, the [SIGNATURE_HEADER] value. */
     fun signatureHeader(keyId: String, algorithm: String, signature: String): String =
         "keyId=$keyId;alg=$algorithm;sig=$signature"

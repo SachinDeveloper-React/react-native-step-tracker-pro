@@ -11,7 +11,10 @@ import com.steptrackerpro.core.JsonMaps
 import com.steptrackerpro.core.StepStateStore
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
+import android.content.Intent
+import com.steptrackerpro.health.HealthConnectManager
 import com.steptrackerpro.integrity.ActivityRecognitionBridge
+import com.steptrackerpro.service.BootReceiver
 import com.steptrackerpro.integrity.DeviceAttestation
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -124,9 +127,13 @@ class IntegrityPipelineTest {
             update(payload.toByteArray(Charsets.UTF_8))
         }
         assertTrue(verifier.verify(Base64.getDecoder().decode(signature["value"] as String)))
-        // What was signed is the snapshot itself, nonce included.
+        // What was signed is the snapshot itself, nonce included, versioned
+        // so a server can pick its parser first.
         val signed = JsonMaps.parse(payload)
         assertEquals("n-42", signed["nonce"])
+        assertEquals(StepTrackerCore.SNAPSHOT_SCHEMA_VERSION, (signed["schemaVersion"] as Number).toInt())
+        assertEquals(BuildConfig.LIBRARY_VERSION, signed["libraryVersion"])
+        assertEquals(snapshot.keys.first(), "schemaVersion")
         assertEquals(device, (signed["deviceSteps"] as Number).toInt())
         assertEquals(suspect, (signed["suspectSteps"] as Number).toInt())
     }
@@ -143,6 +150,34 @@ class IntegrityPipelineTest {
         val activity = core.integrity.report(DateKeys.today())["activityRecognition"] as Map<String, Any?>
         assertEquals(true, activity["requested"])
         assertEquals(false, activity["available"])
+    }
+
+    @Test
+    fun aRebootIsLoggedOncePerBootCountNotPerBroadcast() = runBlocking {
+        context.getSharedPreferences("StepTrackerProBoot", Context.MODE_PRIVATE).edit().clear().commit()
+        val receiver = BootReceiver()
+        // BOOT_COMPLETED, then the same boot again, then a forged QUICKBOOT_POWERON.
+        receiver.onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        receiver.onReceive(context, Intent(Intent.ACTION_BOOT_COMPLETED))
+        receiver.onReceive(context, Intent("android.intent.action.QUICKBOOT_POWERON"))
+        @Suppress("UNCHECKED_CAST")
+        val reboots = (core.integrity.report(DateKeys.today())["events"] as List<Map<String, Any?>>)
+            .filter { it["type"] == IntegrityEvent.REBOOT }
+        assertEquals(1, reboots.size)
+        @Suppress("UNCHECKED_CAST")
+        assertEquals(true, (reboots.single()["detail"] as Map<String, Any?>)["verified"])
+    }
+
+    @Test
+    fun healthConnectPermissionsTheAppDoesNotDeclareAreReported() {
+        // From 2.0 the library manifest declares none, and this test app adds none.
+        val undeclared = core.healthConnect.undeclaredPermissions(HealthConnectManager.PermissionScope())
+        assertTrue(HealthConnectManager.READ_PERMISSIONS.all { it in undeclared })
+        assertTrue(HealthConnectManager.WRITE_PERMISSIONS.all { it in undeclared })
+        // Nothing the sensor-only mode needs is missing.
+        val declared = com.steptrackerpro.util.PermissionHelper.declaredPermissions(context)
+        assertTrue("android.permission.ACTIVITY_RECOGNITION" in declared)
+        assertFalse("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" in declared)
     }
 
     @Test

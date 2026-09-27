@@ -7,7 +7,10 @@ import android.os.Build
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.aggregate.AggregationResultGroupedByPeriod
+import androidx.health.connect.client.changes.DeletionChange
+import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.StepsRecord
@@ -16,6 +19,7 @@ import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
+import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.health.connect.client.units.Energy
@@ -42,6 +46,14 @@ class HealthConnectManager(
     private val context: Context,
     private val state: StepStateStore
 ) {
+
+    /**
+     * Read `ActiveCaloriesBurnedRecord` alongside steps, per source. Set by
+     * the core from `healthConnectReadActiveCalories`; only acted on once the
+     * permission is actually granted.
+     */
+    @Volatile
+    var readActiveCalories: Boolean = false
 
     /**
      * Why Health Connect cannot be used, at the granularity the UI needs.
@@ -153,7 +165,9 @@ class HealthConnectManager(
         val read: Boolean = true,
         val write: Boolean = true,
         val backgroundRead: Boolean = false,
-        val historyRead: Boolean = false
+        val historyRead: Boolean = false,
+        /** Also read `ActiveCaloriesBurnedRecord`, per source. Only meaningful with [read]. */
+        val activeCalories: Boolean = false
     ) {
         /** The required set: everything the app cannot do its job without. */
         val required: Set<String>
@@ -168,8 +182,18 @@ class HealthConnectManager(
                 addAll(required)
                 if (backgroundRead) PERMISSION_BACKGROUND_READ?.let { add(it) }
                 if (historyRead) PERMISSION_HISTORY_READ?.let { add(it) }
+                if (read && activeCalories) add(READ_ACTIVE_CALORIES)
             }
     }
+
+    /**
+     * Of what [scope] asks for, what the app's manifest does not declare.
+     * Health Connect silently leaves undeclared permissions off its sheet, so
+     * a request for them looks exactly like a refusal; from 2.0 the library
+     * no longer declares them for every app, so this is checked up front.
+     */
+    fun undeclaredPermissions(scope: PermissionScope): Set<String> =
+        scope.requested - com.steptrackerpro.util.PermissionHelper.declaredPermissions(context)
 
     /**
      * Resolves the permission set a request should ask for. Optional
@@ -212,6 +236,9 @@ class HealthConnectManager(
                 (PERMISSION_HISTORY_READ != null && granted.contains(PERMISSION_HISTORY_READ)),
             "grantedPermissions" to granted.toList(),
             "missingPermissions" to missing.toList(),
+            // Asked for by config but absent from the manifest - add them, see
+            // docs/PERMISSIONS.md. A request rejects while any are listed.
+            "undeclaredPermissions" to undeclaredPermissions(scope).toList(),
             "denialCount" to denials,
             // Past the provider's prompt limit the sheet no longer appears, so
             // the only route left is Health Connect's own settings screen.
@@ -297,6 +324,7 @@ class HealthConnectManager(
 
         // date -> package -> accumulator
         val buckets = HashMap<String, HashMap<String, Accumulator>>()
+        val zone = DateKeys.zone()
 
         // Bucketed by start time, so a record straddling midnight lands wholly
         // on the day it began rather than being split across both. Step records
@@ -340,6 +368,7 @@ class HealthConnectManager(
                 if (bucket == RecordingMethods.MANUAL) acc.manualBefore += before
             }
             acc.observe(record.metadata.device?.type, recordEnd)
+            HourlySteps.add(acc.hourly, recordStart, recordEnd, count, zone)
         }
         // Distance and calories are optional companions: an origin that wrote
         // steps but no distance keeps 0.0 here and has it derived from stride
@@ -353,6 +382,15 @@ class HealthConnectManager(
             val date = DateKeys.of(record.startTime.toEpochMilli())
             val pkg = record.metadata.dataOrigin.packageName
             buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
+        }
+        // Opt-in, and only once granted: an ungranted type would fail the read.
+        if (readActiveCalories && grantedPermissions().contains(READ_ACTIVE_CALORIES)) {
+            buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = 0.0 } }
+            readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end) { record ->
+                val date = DateKeys.of(record.startTime.toEpochMilli())
+                val pkg = record.metadata.dataOrigin.packageName
+                buckets[date]?.get(pkg)?.let { it.activeCalories += record.energy.inKilocalories }
+            }
         }
 
         return buckets.mapValues { (date, byPackage) ->
@@ -433,6 +471,17 @@ class HealthConnectManager(
             acc.distance += source.distance
             acc.calories += source.calories
             if (source.lateWrittenSteps >= 0) acc.lateSteps += source.lateWrittenSteps
+            // Hour-of-day profile across the range; unknown if any day lacks it.
+            if (source.hourlySteps.any { it < 0 }) {
+                acc.hourlyKnown = false
+            } else {
+                source.hourlySteps.forEachIndexed { h, v -> acc.hourly[h] += v }
+            }
+            if (source.activeCalories < 0) {
+                acc.activeKnown = false
+            } else {
+                acc.activeCalories = acc.activeCalories.coerceAtLeast(0.0) + source.activeCalories
+            }
             // The method split is only as good as its worst day: one day
             // answered from the aggregate API has no split, and a partial sum
             // presented as the range's manual total would understate it.
@@ -454,6 +503,104 @@ class HealthConnectManager(
             acc.lastRecordAt = maxOf(acc.lastRecordAt, source.lastRecordAt)
         }
         return merged.values.map { it.toStepSource(self) }.sortedByDescending { it.steps }
+    }
+
+    // ---- raw records and change tracking ----------------------------------
+
+    /** One step record as Health Connect stores it, for a server that wants the evidence itself. */
+    fun recordMap(record: StepsRecord): Map<String, Any?> = mapOf(
+        "id" to record.metadata.id,
+        "clientRecordId" to record.metadata.clientRecordId,
+        "clientRecordVersion" to record.metadata.clientRecordVersion,
+        "packageName" to record.metadata.dataOrigin.packageName,
+        "recordingMethod" to RecordingMethods.nameOf(record.metadata.recordingMethod),
+        "device" to record.metadata.device?.let {
+            mapOf("type" to deviceTypeName(it.type), "manufacturer" to it.manufacturer, "model" to it.model)
+        },
+        "startTime" to record.startTime.toEpochMilli(),
+        "endTime" to record.endTime.toEpochMilli(),
+        "startZoneOffsetSeconds" to record.startZoneOffset?.totalSeconds,
+        "endZoneOffsetSeconds" to record.endZoneOffset?.totalSeconds,
+        "lastModifiedTime" to record.metadata.lastModifiedTime.toEpochMilli(),
+        "count" to record.count
+    )
+
+    /**
+     * Every step record between two instants, every origin, as stored.
+     * Bounded by [MAX_RAW_PAGES] pages; `truncated` says a token was left
+     * unread, so the caller narrows the window rather than trusting a short
+     * list. Throws when Health Connect cannot be read; the module checks first.
+     */
+    suspend fun readStepRecords(start: Instant, end: Instant): Map<String, Any?> {
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
+        val out = ArrayList<Map<String, Any?>>()
+        var token: String? = null
+        var pages = 0
+        do {
+            val response = hc.readRecords(
+                ReadRecordsRequest(
+                    recordType = StepsRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(start, end),
+                    pageSize = PAGE_SIZE,
+                    pageToken = token
+                )
+            )
+            response.records.forEach { out += recordMap(it) }
+            token = response.pageToken
+            pages++
+        } while (token != null && pages < MAX_RAW_PAGES)
+        return mapOf("records" to out, "truncated" to (token != null))
+    }
+
+    /** A cursor for [changes], starting now. Valid for 30 days, per Health Connect. */
+    suspend fun changesToken(): String {
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
+        return hc.getChangesToken(ChangesTokenRequest(recordTypes = setOf(StepsRecord::class)))
+    }
+
+    /**
+     * Step records inserted, updated or deleted since [token], across every
+     * origin, and the token to use next. An expired token - Health Connect
+     * keeps changes for 30 days - comes back as `tokenExpired: true` with no
+     * changes: the caller takes a new token and re-reads the window with
+     * [readStepRecords]. At most [MAX_CHANGE_PAGES] pages per call;
+     * `hasMore` says to call again with `nextToken`.
+     */
+    suspend fun changes(token: String): Map<String, Any?> {
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
+        val upserted = ArrayList<Map<String, Any?>>()
+        val deleted = ArrayList<String>()
+        var next = token
+        var more = true
+        var pages = 0
+        while (more && pages < MAX_CHANGE_PAGES) {
+            val response = hc.getChanges(next)
+            if (response.changesTokenExpired) {
+                return mapOf(
+                    "tokenExpired" to true,
+                    "upserted" to emptyList<Map<String, Any?>>(),
+                    "deletedIds" to emptyList<String>(),
+                    "nextToken" to null,
+                    "hasMore" to false
+                )
+            }
+            response.changes.forEach { change ->
+                when (change) {
+                    is UpsertionChange -> (change.record as? StepsRecord)?.let { upserted += recordMap(it) }
+                    is DeletionChange -> deleted += change.recordId
+                }
+            }
+            next = response.nextChangesToken
+            more = response.hasMore
+            pages++
+        }
+        return mapOf(
+            "tokenExpired" to false,
+            "upserted" to upserted,
+            "deletedIds" to deleted,
+            "nextToken" to next,
+            "hasMore" to more
+        )
     }
 
     /**
@@ -504,6 +651,12 @@ class HealthConnectManager(
         var manualBefore: Int = 0
         /** Steps from records modified more than [LATE_WRITE_MS] after they ended. */
         var lateSteps: Int = 0
+        /** Steps per local hour of the day. */
+        val hourly = IntArray(HourlySteps.HOURS)
+        var hourlyKnown: Boolean = true
+        /** -1 until active calories are read for this origin. */
+        var activeCalories: Double = -1.0
+        var activeKnown: Boolean = true
         /**
          * False once any part of the total came from a read that carries no
          * per-record metadata (the aggregate path), at which point no split
@@ -544,7 +697,9 @@ class HealthConnectManager(
                     -1
                 },
                 // Known exactly when the per-record metadata was, like the method split.
-                lateWrittenSteps = if (methodsKnown) lateSteps.coerceIn(0, steps) else -1
+                lateWrittenSteps = if (methodsKnown) lateSteps.coerceIn(0, steps) else -1,
+                hourlySteps = if (methodsKnown && hourlyKnown) hourly.toList() else HourlySteps.UNKNOWN,
+                activeCalories = if (activeKnown) activeCalories else -1.0
             )
         }
     }
@@ -690,6 +845,24 @@ class HealthConnectManager(
         /** A record last modified this long after it ended counts as written late. */
         const val LATE_WRITE_MS = 24L * 60 * 60 * 1000
 
+        /** Pages [readStepRecords] reads before reporting `truncated`: 10,000 records. */
+        private const val MAX_RAW_PAGES = 10
+
+        /** Pages [changes] reads per call before handing back `hasMore`. */
+        private const val MAX_CHANGE_PAGES = 20
+
+        fun deviceTypeName(type: Int): String = when (type) {
+            Device.TYPE_WATCH -> "watch"
+            Device.TYPE_PHONE -> "phone"
+            Device.TYPE_SCALE -> "scale"
+            Device.TYPE_RING -> "ring"
+            Device.TYPE_HEAD_MOUNTED -> "head_mounted"
+            Device.TYPE_FITNESS_BAND -> "fitness_band"
+            Device.TYPE_CHEST_STRAP -> "chest_strap"
+            Device.TYPE_SMART_DISPLAY -> "smart_display"
+            else -> "unknown"
+        }
+
         val READ_PERMISSIONS: Set<String> = setOf(
             HealthPermission.getReadPermission(StepsRecord::class),
             HealthPermission.getReadPermission(DistanceRecord::class),
@@ -726,11 +899,16 @@ class HealthConnectManager(
             }
         }.getOrNull()
 
+        /** Opt-in: active calories per source (`healthConnectReadActiveCalories`). */
+        val READ_ACTIVE_CALORIES: String =
+            HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class)
+
         /** Everything this package may ever ask for. */
         val ALL_PERMISSIONS: Set<String> = buildSet {
             addAll(REQUIRED)
             PERMISSION_BACKGROUND_READ?.let { add(it) }
             PERMISSION_HISTORY_READ?.let { add(it) }
+            add(READ_ACTIVE_CALORIES)
         }
 
         @Deprecated(

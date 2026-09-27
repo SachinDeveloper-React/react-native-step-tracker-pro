@@ -8,8 +8,8 @@ import com.facebook.react.module.model.ReactModuleInfoProvider
 
 class StepTrackerProPackage : BaseReactPackage() {
 
-    override fun getModule(name: String, context: ReactApplicationContext): NativeModule? =
-        if (name == StepTrackerProModule.NAME) StepTrackerProModule(context) else null
+    override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? =
+        if (name == StepTrackerProModule.NAME) StepTrackerProModule(reactContext) else null
 
     override fun getReactModuleInfoProvider(): ReactModuleInfoProvider = ReactModuleInfoProvider {
         mapOf(

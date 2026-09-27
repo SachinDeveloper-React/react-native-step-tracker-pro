@@ -37,8 +37,14 @@ export interface UseStepTrackerResult {
 }
 
 /**
- * Wires the tracker into a component: initialises once, subscribes to
- * `stepsChanged`, and re-reads the snapshot when the app is foregrounded.
+ * Wires the tracker into a component: initialises once, pushes later config
+ * changes through `updateConfig()`, subscribes to `stepsChanged`, and
+ * re-reads the snapshot when the app is foregrounded.
+ *
+ * Use it in one component - the one that owns config. Two mounted copies
+ * with different config would each push theirs; read-only screens use
+ * `StepTracker.getTodaySteps()`, `useStepStats()` or a `stepsChanged`
+ * listener instead.
  */
 export function useStepTracker(
   options: UseStepTrackerOptions = {}
@@ -58,6 +64,11 @@ export function useStepTracker(
 
   const configRef = useRef(config);
   configRef.current = config;
+  // Config compared by value, so an object literal rebuilt on every render
+  // is not a change. Functions and the hook's own options are not in it.
+  const configKey = JSON.stringify(config);
+  // What the native side was last given; null until initialize() succeeds.
+  const appliedKey = useRef<string | null>(null);
   const goalRef = useRef(onGoalReached);
   goalRef.current = onGoalReached;
   const suspiciousRef = useRef(onSuspiciousActivity);
@@ -85,6 +96,7 @@ export function useStepTracker(
       try {
         const initial = await StepTracker.initialize(configRef.current);
         if (cancelled) return;
+        appliedKey.current = JSON.stringify(configRef.current);
         setSnapshot(initial);
         setState(initial.state);
         if (autoStart) {
@@ -137,6 +149,18 @@ export function useStepTracker(
       suspiciousSub.remove();
     };
   }, [autoStart, refresh]);
+
+  // Config that changes after mount goes through updateConfig(). Before 2.0
+  // it was read once, on mount, and every later change was silently lost.
+  // The hook is meant to have one owner: the component that holds config.
+  useEffect(() => {
+    if (!ready || !isSupported()) return;
+    if (appliedKey.current === null || appliedKey.current === configKey) return;
+    appliedKey.current = configKey;
+    StepTracker.updateConfig(configRef.current)
+      .then(() => refresh())
+      .catch((e) => setError(e as Error));
+  }, [configKey, ready, refresh]);
 
   useEffect(() => {
     if (!refreshOnForeground) return;

@@ -4,6 +4,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.modules.core.DeviceEventManagerModule
 
 /**
  * Old architecture shim. Mirrors the signatures codegen produces for the new
@@ -37,6 +38,12 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun getIntegrityEvents(startDate: String, endDate: String, promise: Promise)
     abstract fun getStepMinutes(startDate: String, endDate: String, promise: Promise)
     abstract fun attestDevice(challenge: String, promise: Promise)
+    abstract fun hasAttestationKey(promise: Promise)
+    abstract fun getAttestationKeyInfo(promise: Promise)
+    abstract fun requestIntegrityToken(options: ReadableMap, promise: Promise)
+    abstract fun getHealthConnectRecords(startIso: String, endIso: String, promise: Promise)
+    abstract fun getHealthConnectChangesToken(promise: Promise)
+    abstract fun getHealthConnectChanges(token: String, promise: Promise)
 
     abstract fun resetToday(promise: Promise)
     abstract fun clearHistory(promise: Promise)
@@ -72,4 +79,29 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
 
     abstract fun addListener(eventName: String)
     abstract fun removeListeners(count: Double)
+
+    // The new architecture's codegen generates these from the `EventEmitter`
+    // properties of the spec. On the old architecture there is no typed
+    // emitter, so the same names go out through RCTDeviceEventEmitter under
+    // the `StepTrackerPro:` prefix the JS side listens for there.
+    protected fun emitOnStepsChanged(value: ReadableMap) = legacyEmit("stepsChanged", value)
+    protected fun emitOnGoalReached(value: ReadableMap) = legacyEmit("goalReached", value)
+    protected fun emitOnGoalProgressChanged(value: ReadableMap) = legacyEmit("goalProgressChanged", value)
+    protected fun emitOnTrackingStateChanged(value: ReadableMap) = legacyEmit("trackingStateChanged", value)
+    protected fun emitOnDayChanged(value: ReadableMap) = legacyEmit("dayChanged", value)
+    protected fun emitOnHistoryBackfilled(value: ReadableMap) = legacyEmit("historyBackfilled", value)
+    protected fun emitOnMotionWindow(value: ReadableMap) = legacyEmit("motionWindow", value)
+    protected fun emitOnSuspiciousActivity(value: ReadableMap) = legacyEmit("suspiciousActivity", value)
+    protected fun emitOnSyncCompleted(value: ReadableMap) = legacyEmit("syncCompleted", value)
+    protected fun emitOnSyncAuthFailed(value: ReadableMap) = legacyEmit("syncAuthFailed", value)
+    protected fun emitOnStepSourceChanged(value: ReadableMap) = legacyEmit("stepSourceChanged", value)
+    protected fun emitOnHealthConnectStatusChanged(value: ReadableMap) =
+        legacyEmit("healthConnectStatusChanged", value)
+    protected fun emitOnError(value: ReadableMap) = legacyEmit("error", value)
+
+    private fun legacyEmit(event: String, value: ReadableMap) {
+        reactApplicationContext
+            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .emit("StepTrackerPro:$event", value)
+    }
 }
