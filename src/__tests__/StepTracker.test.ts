@@ -13,7 +13,7 @@ import type { ReactTestRenderer } from 'react-test-renderer';
 import { useStepTracker } from '../hooks/useStepTracker';
 import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
-import type { HealthConnectStatus } from '../types';
+import type { HealthConnectStatus, StepTrackerConfig } from '../types';
 
 /**
  * A scripted native module: every method resolves with whatever the test
@@ -76,6 +76,51 @@ beforeEach(() => {
 
 afterEach(() => setNativeModule(null));
 
+/** Config every entry point must reject before touching native. */
+const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
+  [{ dailyGoal: 0 }, /dailyGoal/],
+  [{ height: 20 }, /height/],
+  [{ weight: 5 }, /weight/],
+  [{ persistEveryNSteps: 0 }, /persistEveryNSteps/],
+  [{ calorieCoefficient: -1 }, /calorieCoefficient/],
+  [{ historyRetentionDays: 0 }, /historyRetentionDays/],
+  [{ strideLength: 0 }, /strideLength/],
+  [{ accelerometerThreshold: 0.1 }, /accelerometerThreshold/],
+  [{ gapRecoveryMaxSteps: -1 }, /gapRecoveryMaxSteps/],
+  [{ motionSampling: { enabled: true, windowSeconds: 0 } }, /windowSeconds/],
+  [{ motionSampling: { enabled: true, windowSeconds: 61 } }, /windowSeconds/],
+  [{ motionSampling: { enabled: true, intervalMinutes: 0 } }, /intervalMinutes/],
+  [{ motionWindowRetention: 0 }, /motionWindowRetention/],
+  [{ wearableAllowlist: ['com.example.band', ''] }, /wearableAllowlist/],
+  [{ wearableAllowlist: 'com.example.band' as unknown as string[] }, /wearableAllowlist/],
+  [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
+  [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
+  [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
+  [{ privacyPolicyUrl: 'intent://evil' }, /privacyPolicyUrl/],
+  [{ fraudDetection: { enabled: true, mode: 'remove' as 'flag' } }, /mode/],
+  [{ fraudDetection: { enabled: true, maxCadenceSpm: 50 } }, /maxCadenceSpm/],
+  [{ fraudDetection: { enabled: true, maxCadenceSpm: 150.5 } }, /maxCadenceSpm/],
+  [
+    { fraudDetection: { enabled: true, steadyCadenceMinutes: 2 } },
+    /steadyCadenceMinutes/,
+  ],
+  [
+    { fraudDetection: { enabled: true, maxContinuousMinutes: 10 } },
+    /maxContinuousMinutes/,
+  ],
+  [{ fraudDetection: { enabled: true, maxDailySteps: -5 } }, /maxDailySteps/],
+  [{ remoteSyncAuth: 'token' as 'headers' }, /remoteSyncAuth/],
+  [{ weeklyGoal: -1 }, /weeklyGoal/],
+  [{ eventThrottleMs: -5 }, /eventThrottleMs/],
+  [{ strideLength: 5 }, /strideLength/],
+  [{ stepSource: 'watch' as 'auto' }, /stepSource/],
+  [{ gapRecovery: 'keep' as 'split' }, /gapRecovery/],
+  [{ wearableTrust: 'always' as 'catalog' }, /wearableTrust/],
+  [{ remoteSyncPayload: 'all' as 'full' }, /remoteSyncPayload/],
+  [{ sex: 'other' as 'unspecified' }, /sex/],
+  [{ dailyGoal: Number.NaN }, /dailyGoal/],
+];
+
 describe('initialize()', () => {
   it('sends only the keys the caller passed, never the JS defaults', async () => {
     await StepTracker.initialize({ dailyGoal: 8000 });
@@ -115,49 +160,16 @@ describe('initialize()', () => {
     expect(native.calledWith('initialize')[0]![0]).not.toHaveProperty('strideLength');
   });
 
-  it.each([
-    [{ dailyGoal: 0 }, /dailyGoal/],
-    [{ height: 20 }, /height/],
-    [{ weight: 5 }, /weight/],
-    [{ persistEveryNSteps: 0 }, /persistEveryNSteps/],
-    [{ calorieCoefficient: -1 }, /calorieCoefficient/],
-    [{ historyRetentionDays: 0 }, /historyRetentionDays/],
-    [{ strideLength: 0 }, /strideLength/],
-    [{ accelerometerThreshold: 0.1 }, /accelerometerThreshold/],
-    [{ gapRecoveryMaxSteps: -1 }, /gapRecoveryMaxSteps/],
-    [{ motionSampling: { enabled: true, windowSeconds: 0 } }, /windowSeconds/],
-    [{ motionSampling: { enabled: true, windowSeconds: 61 } }, /windowSeconds/],
-    [{ motionSampling: { enabled: true, intervalMinutes: 0 } }, /intervalMinutes/],
-    [{ motionWindowRetention: 0 }, /motionWindowRetention/],
-    [{ wearableAllowlist: ['com.example.band', ''] }, /wearableAllowlist/],
-    [
-      { wearableAllowlist: 'com.example.band' as unknown as string[] },
-      /wearableAllowlist/,
-    ],
-    [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
-    [{ remoteSyncUrl: 'http://api.example.com/steps' }, /https/],
-    [{ remoteSyncUrl: 'ftp://api.example.com/steps' }, /https/],
-    [{ privacyPolicyUrl: 'intent://evil' }, /privacyPolicyUrl/],
-    [{ fraudDetection: { enabled: true, mode: 'remove' as 'flag' } }, /mode/],
-    [{ fraudDetection: { enabled: true, maxCadenceSpm: 50 } }, /maxCadenceSpm/],
-    [{ fraudDetection: { enabled: true, maxCadenceSpm: 150.5 } }, /maxCadenceSpm/],
-    [
-      { fraudDetection: { enabled: true, steadyCadenceMinutes: 2 } },
-      /steadyCadenceMinutes/,
-    ],
-    [
-      { fraudDetection: { enabled: true, maxContinuousMinutes: 10 } },
-      /maxContinuousMinutes/,
-    ],
-    [{ fraudDetection: { enabled: true, maxDailySteps: -5 } }, /maxDailySteps/],
-    [{ remoteSyncAuth: 'token' as 'headers' }, /remoteSyncAuth/],
-  ])('rejects %j with E_INVALID_CONFIG', async (config, message) => {
-    await expect(StepTracker.initialize(config)).rejects.toMatchObject({
-      code: 'E_INVALID_CONFIG',
-      message: expect.stringMatching(message),
-    });
-    expect(native.calls).toHaveLength(0);
-  });
+  it.each(INVALID_CONFIGS)(
+    'rejects %j with E_INVALID_CONFIG',
+    async (config, message) => {
+      await expect(StepTracker.initialize(config)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+        message: expect.stringMatching(message),
+      });
+      expect(native.calls).toHaveLength(0);
+    }
+  );
 
   it('allows a plain http remote endpoint only when opted in', async () => {
     await StepTracker.initialize({
@@ -243,6 +255,53 @@ describe('updateConfig()', () => {
       sex: 'female',
       strideLength: 0,
     });
+  });
+
+  it('re-derives weekly and monthly goals from a new daily goal, as initialize does', async () => {
+    await StepTracker.updateConfig({ dailyGoal: 12000 });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      dailyGoal: 12000,
+      weeklyGoal: 84000,
+      monthlyGoal: 360000,
+    });
+  });
+
+  it('keeps an explicit weekly or monthly goal', async () => {
+    await StepTracker.updateConfig({ dailyGoal: 12000, weeklyGoal: 50000 });
+    expect(native.calledWith('updateConfig')[0]![0]).toMatchObject({
+      weeklyGoal: 50000,
+      monthlyGoal: 360000,
+    });
+  });
+
+  it('leaves goals alone when the daily goal is not in the patch', async () => {
+    await StepTracker.updateConfig({ notificationTitle: '{steps}' });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      notificationTitle: '{steps}',
+    });
+  });
+
+  it.each(INVALID_CONFIGS)('rejects %j like initialize does', async (config, message) => {
+    await expect(StepTracker.updateConfig(config)).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+      message: expect.stringMatching(message),
+    });
+    expect(native.calledWith('updateConfig')).toHaveLength(0);
+  });
+
+  it('allows an http endpoint when an earlier call opted in', async () => {
+    native.when('getConfig', { remoteSyncAllowHttp: true });
+    await StepTracker.updateConfig({ remoteSyncUrl: 'http://10.0.2.2:3000/steps' });
+    expect(native.calledWith('updateConfig')).toHaveLength(1);
+
+    native.when('getConfig', { remoteSyncAllowHttp: false });
+    await expect(
+      StepTracker.updateConfig({ remoteSyncUrl: 'http://10.0.2.2:3000/steps' })
+    ).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+      message: expect.stringMatching(/https/),
+    });
+    expect(native.calledWith('updateConfig')).toHaveLength(1);
   });
 });
 
@@ -727,7 +786,11 @@ describe('useStepTracker()', () => {
     await TestRenderer.act(async () => {
       renderer!.update(React.createElement(Probe, { dailyGoal: 9000 }));
     });
-    expect(native.calledWith('updateConfig')).toEqual([[{ dailyGoal: 9000 }]]);
+    // A new daily goal carries its weekly and monthly goals with it; before
+    // 2.0.1 they stayed at the values derived from the first goal.
+    expect(native.calledWith('updateConfig')).toEqual([
+      [{ dailyGoal: 9000, weeklyGoal: 63000, monthlyGoal: 270000 }],
+    ]);
     // Initialised once, however often config changed.
     expect(native.calledWith('initialize')).toHaveLength(1);
     await TestRenderer.act(async () => renderer!.unmount());

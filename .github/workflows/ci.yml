@@ -68,17 +68,25 @@ jobs:
     # official template, so what an app actually gets - the published files,
     # the app's own AGP, Gradle, Kotlin and compileSdk, codegen on the new
     # architecture - is what is tested. 0.77 is the floor; 0.87 is AGP 9.
-    name: Builds in RN ${{ matrix.rn }} (builtInKotlin=${{ matrix.builtInKotlin }})
+    name: Builds in RN ${{ matrix.rn }} (newArch=${{ matrix.newArch }}, builtInKotlin=${{ matrix.builtInKotlin }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - rn: 0.77.3
+            newArch: true
+            builtInKotlin: false
+          # The old architecture: RN 0.77-0.81 can still turn the new one
+          # off, and events take a different path there.
+          - rn: 0.77.3
+            newArch: false
             builtInKotlin: false
           - rn: 0.87.2
+            newArch: true
             builtInKotlin: false
           - rn: 0.87.2
+            newArch: true
             builtInKotlin: true
     steps:
       - uses: actions/checkout@v7
@@ -107,6 +115,10 @@ jobs:
           npm install --no-audit --no-fund "$RUNNER_TEMP"/react-native-step-tracker-pro-*.tgz
           # The package needs minSdk 26; the template starts at 24.
           sed -i 's/minSdkVersion = 24/minSdkVersion = 26/' android/build.gradle
+      - name: Turn the new architecture off
+        if: ${{ !matrix.newArch }}
+        working-directory: ${{ runner.temp }}/app
+        run: sed -i 's/^newArchEnabled=true/newArchEnabled=false/' android/gradle.properties
       - name: Switch the app to AGP 9's built-in Kotlin
         if: matrix.builtInKotlin
         working-directory: ${{ runner.temp }}/app

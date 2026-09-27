@@ -24,9 +24,10 @@ npm run test:android:device   # instrumented engine tests; needs an emulator or 
 ```
 
 CI also packs the library and builds it inside apps made from React Native's
-template (the `compat` job): 0.77.3, and 0.87.2 with AGP 9's built-in Kotlin
-off and on. A build-script change should be checked the same way before it
-is merged - the steps are in that job.
+template (the `compat` job): 0.77.3 with the new architecture on and off,
+and 0.87.2 with AGP 9's built-in Kotlin off and on. A build-script change
+should be checked the same way before it is merged - the steps are in that
+job.
 
 All of them must pass before a pull request is merged. `npm run format:write`
 fixes formatting.

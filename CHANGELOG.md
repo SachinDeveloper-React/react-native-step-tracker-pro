@@ -5,6 +5,48 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-09-27
+
+Fixes from a review of 2.0.0. No API changes.
+
+### Fixed
+
+- **`updateConfig()` re-derives weekly and monthly goals.** `initialize()`
+  derived them as the daily goal × 7 and × 30; `updateConfig()` did not, and
+  the native side kept the old values. Since 2.0 `useStepTracker` sends every
+  config change through `updateConfig()`, so a user who changed their daily
+  goal kept weekly and monthly goals from the old one. A patch that sets them
+  explicitly keeps its own.
+- **`updateConfig()` validates like `initialize()`.** It skipped every check -
+  height and weight ranges, the fraud thresholds, the `https` rule for
+  `remoteSyncUrl`, `wearableAllowlist` - so bad values were clamped natively
+  instead of rejected. An `http://` endpoint is still accepted when an
+  earlier call set `remoteSyncAllowHttp`.
+- **Both now reject values that were only clamped before:** negative goals,
+  throttles and sync intervals, a stride over 3 m, a `NaN` daily goal, and
+  unknown `sex`, `stepSource`, `wearableTrust`, `gapRecovery` and
+  `remoteSyncPayload` values - all `E_INVALID_CONFIG`.
+- **Unknown React Native version builds the new architecture.** When
+  `node_modules/react-native` is not where the build looks and
+  `newArchEnabled` is not set, 2.0.0 built the old-architecture code, which
+  React Native 0.82+ cannot run. An explicit `newArchEnabled=false` still
+  builds the old one.
+- **The AGP lookup for `com.android.legacy-kapt`** tries every class loader
+  that can see the app's AGP, not only the root buildscript's. An app with
+  AGP in a `plugins {}` block built with 2.0.0 too in testing - React
+  Native's Gradle plugin puts AGP on the root classpath anyway - so this
+  covers setups without that plugin.
+- **`schemaVersion` docs.** It was described as `2` from 1.5, with "absent"
+  meaning the 1.4 shape. No 1.x release sent it: a snapshot without it is
+  the 1.5 shape if it carries `integrity`, the 1.4 shape if not, and both
+  parse as version 2 with fields missing.
+
+### CI
+
+- A fourth compatibility build: React Native 0.77.3 with the new architecture
+  turned off, the path events take on the old architecture.
+- Published by the tag workflow, with npm provenance.
+
 ## [2.0.0] - 2026-09-27
 
 Current toolchains, a manifest that declares only what sensor counting
@@ -857,6 +899,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.0.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.1
 [2.0.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.0
 [1.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.5.0
 [1.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v1.4.0

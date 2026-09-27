@@ -95,8 +95,9 @@ four check that remote-sync headers are sealed, read back and migrated from
 ### Compatibility builds
 
 CI also packs the library and builds it inside apps made from React Native's
-own template - 0.77.3 on AGP 8.7, and 0.87.2 on AGP 9.2 with built-in Kotlin
-off and on - and checks the merged manifest carries no opt-in permission. To
+own template - 0.77.3 on AGP 8.7 with the new architecture on and off, and
+0.87.2 on AGP 9.2 with built-in Kotlin off and on - and checks the merged
+manifest carries no opt-in permission. To
 reproduce one locally, follow the `compat` job in `.github/workflows/ci.yml`;
 it needs only Node 22, JDK 17 and the Android SDK. The versions are in the
 README's compatibility table.

@@ -76,13 +76,15 @@ config plugin declares what you opt into. Full steps:
 What CI builds on every push, by installing the packed library into an app
 made from React Native's own template and compiling it there:
 
-| React Native | Android Gradle Plugin | Gradle | Kotlin | compileSdk | Kotlin mode | Health Connect client |
-|---|---|---|---|---|---|---|
-| 0.77.3 | 8.7.2 | 8.10.2 | 2.0.21 | 35 | Kotlin Android plugin | 1.1.0-beta01 |
-| 0.87.2 | 9.2.1 | 9.4.1 | 2.2.0 | 37 | Kotlin Android plugin (`builtInKotlin=false`, the template default) | 1.1.0 |
-| 0.87.2 | 9.2.1 | 9.4.1 | 2.2.0 | 37 | AGP built-in Kotlin | 1.1.0 |
+| React Native | Architecture | Android Gradle Plugin | Gradle | Kotlin | compileSdk | Kotlin mode | Health Connect client |
+|---|---|---|---|---|---|---|---|
+| 0.77.3 | new | 8.7.2 | 8.10.2 | 2.0.21 | 35 | Kotlin Android plugin | 1.1.0-beta01 |
+| 0.77.3 | old | 8.7.2 | 8.10.2 | 2.0.21 | 35 | Kotlin Android plugin | 1.1.0-beta01 |
+| 0.87.2 | new (the only one) | 9.2.1 | 9.4.1 | 2.2.0 | 37 | Kotlin Android plugin (`builtInKotlin=false`, the template default) | 1.1.0 |
+| 0.87.2 | new (the only one) | 9.2.1 | 9.4.1 | 2.2.0 | 37 | AGP built-in Kotlin | 1.1.0 |
 
-All three use the new architecture, with codegen. The package's own build and
+The new-architecture builds run codegen, typed events included; the old one
+covers the legacy event path. The package's own build and
 JVM tests run standalone on AGP 8.6 and Kotlin 2.0.21, on the old
 architecture; the instrumented tests on an API 37 emulator.
 
@@ -355,7 +357,10 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.0.0** — current toolchains
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.0.1** — fixes `updateConfig()`
+(validation, and weekly and monthly goals following a new daily goal), builds
+the new architecture when the React Native version cannot be found, and adds
+an old-architecture compatibility build. **2.0.0** brought current toolchains
 (AGP 9 with or without built-in Kotlin, Kotlin 2.2, compileSdk 37, React
 Native 0.82+ as new-architecture-only), a minimal manifest that declares only
 what sensor counting needs, typed codegen events, Play Integrity, raw Health

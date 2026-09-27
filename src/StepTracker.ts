@@ -253,11 +253,68 @@ function assertInstantRange(startIso: string, endIso: string): void {
   }
 }
 
-function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
+/** Rejects a value that is present but not one of `allowed`. */
+function assertOneOf(name: string, value: unknown, allowed: readonly string[]): void {
+  if (value == null) return;
+  if (!allowed.includes(value as string)) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      `${name} must be one of ${allowed.map((v) => `'${v}'`).join(', ')}`
+    );
+  }
+}
+
+/** Rejects a value that is present but not a finite number >= `min`. */
+function assertAtLeast(name: string, value: number | undefined, min: number): void {
+  if (value == null) return;
+  if (!(Number.isFinite(value) && value >= min)) {
+    throw new StepTrackerError('E_INVALID_CONFIG', `${name} must be >= ${min}`);
+  }
+}
+
+/**
+ * Validates a config patch and adds what `initialize` and `updateConfig` both
+ * derive. The native side clamps as well - config is also rebuilt from
+ * persisted JSON - but a value it would silently move is a mistake to report.
+ *
+ * @param allowHttp whether a plain `http://` remoteSyncUrl is allowed; the
+ *   patch's own `remoteSyncAllowHttp` unless the caller knows the stored one.
+ */
+function normaliseConfig(
+  config: StepTrackerConfig,
+  allowHttp: boolean | undefined = config.remoteSyncAllowHttp
+): StepTrackerConfig {
   const daily = config.dailyGoal ?? DEFAULT_CONFIG.dailyGoal;
-  if (daily <= 0) {
+  if (!(daily > 0)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'dailyGoal must be > 0');
   }
+  assertAtLeast('weeklyGoal', config.weeklyGoal, 0);
+  assertAtLeast('monthlyGoal', config.monthlyGoal, 0);
+  assertAtLeast('notificationThrottleMs', config.notificationThrottleMs, 0);
+  assertAtLeast('eventThrottleMs', config.eventThrottleMs, 0);
+  assertAtLeast(
+    'healthConnectSyncIntervalMinutes',
+    config.healthConnectSyncIntervalMinutes,
+    0
+  );
+  if (config.strideLength != null && config.strideLength > 3) {
+    throw new StepTrackerError('E_INVALID_CONFIG', 'strideLength must be at most 3 m');
+  }
+  assertOneOf('sex', config.sex, ['male', 'female', 'unspecified']);
+  assertOneOf('stepSource', config.stepSource, [
+    'auto',
+    'device',
+    'wearable',
+    'health_connect',
+  ]);
+  assertOneOf('wearableTrust', config.wearableTrust, ['metadata', 'catalog']);
+  assertOneOf('gapRecovery', config.gapRecovery, [
+    'split',
+    'today',
+    'today_capped',
+    'drop',
+  ]);
+  assertOneOf('remoteSyncPayload', config.remoteSyncPayload, ['totals', 'full']);
   if (config.height != null && (config.height < 50 || config.height > 260)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'height must be 50–260 cm');
   }
@@ -279,7 +336,7 @@ function normaliseConfig(config: StepTrackerConfig): StepTrackerConfig {
     const url = config.remoteSyncUrl.toLowerCase();
     const https = url.startsWith('https://');
     const http = url.startsWith('http://');
-    if (!https && !(http && config.remoteSyncAllowHttp)) {
+    if (!https && !(http && allowHttp)) {
       throw new StepTrackerError(
         'E_INVALID_CONFIG',
         'remoteSyncUrl must be an https:// URL (set remoteSyncAllowHttp for a dev server)'
@@ -388,12 +445,18 @@ export const StepTracker = {
     return call(() => getNativeModule().initialize(merged)) as Promise<StepSnapshot>;
   },
 
-  /** Patches config at runtime. Notification and goals update immediately. */
+  /**
+   * Patches config at runtime: only the keys given change. Validated exactly
+   * as `initialize` is, and a new `dailyGoal` re-derives `weeklyGoal` and
+   * `monthlyGoal` (× 7 and × 30) unless the patch sets them too.
+   */
   async updateConfig(config: StepTrackerConfig): Promise<StepTrackerConfig> {
-    const patch: StepTrackerConfig = { ...config };
-    const stride = strideForPatch(config);
-    if (stride === undefined) delete patch.strideLength;
-    else patch.strideLength = stride;
+    let allowHttp = config.remoteSyncAllowHttp;
+    if (allowHttp == null && config.remoteSyncUrl?.toLowerCase().startsWith('http://')) {
+      // The flag may have been set by an earlier call; the stored value decides.
+      allowHttp = (await StepTracker.getConfig())?.remoteSyncAllowHttp === true;
+    }
+    const patch = normaliseConfig(config, allowHttp);
     return call(() =>
       getNativeModule().updateConfig(patch)
     ) as Promise<StepTrackerConfig>;

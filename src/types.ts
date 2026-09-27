@@ -748,8 +748,10 @@ export interface RangeStats {
 export interface VerificationSnapshot {
   /**
    * The snapshot's shape. Bumped when a field is removed, renamed or changes
-   * meaning; a new field does not bump it. `2` from 1.5. A snapshot with no
-   * `schemaVersion` is the 1.4 shape.
+   * meaning; a new field does not bump it. `2` from 2.0, the first release to
+   * send it. A snapshot without it came from 1.x: the 1.5 shape when it
+   * carries `integrity`, the 1.4 shape when it does not. Both parse as
+   * version 2 minus the fields they lack.
    */
   schemaVersion: number;
   /** The npm version of this package that produced it, e.g. `'2.0.0'`. */

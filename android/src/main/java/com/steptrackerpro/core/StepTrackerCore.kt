@@ -1169,9 +1169,10 @@ class StepTrackerCore private constructor(context: Context) {
         /**
          * The verification snapshot's shape. Bumped whenever a field is
          * removed, renamed or changes meaning; adding a field does not bump
-         * it. 1 is the 1.4 shape, which carried no version field; 2 added
-         * `suspectSteps`, `integrity` and the signing fields in 1.5, and the
-         * version fields themselves in 2.0.
+         * it. First sent by 2.0, as 2. No 1.x release sent it: a 1.5
+         * snapshot is recognisable by `integrity`, a 1.4 one by its absence,
+         * and both are version 2 with fields missing - nothing was removed
+         * or renamed between them.
          */
         const val SNAPSHOT_SCHEMA_VERSION = 2
 

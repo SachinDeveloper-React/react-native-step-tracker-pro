@@ -40,7 +40,14 @@ does not reset their height.
 
 ### `updateConfig(config: StepTrackerConfig): Promise<StepTrackerConfig>`
 
-Patches config at runtime. Goals and the notification update immediately.
+Patches config at runtime; only the keys you pass change. Goals and the
+notification update immediately. It is validated exactly as `initialize()`
+is - out-of-range numbers and unknown values reject with `E_INVALID_CONFIG`
+instead of being clamped natively - and a new `dailyGoal` re-derives
+`weeklyGoal` (× 7) and `monthlyGoal` (× 30) unless the same call sets them.
+An `http://` `remoteSyncUrl` is accepted when this call or an earlier one set
+`remoteSyncAllowHttp`.
+
 Changing `height` or `sex` switches stride back to being derived from them
 unless you pass an explicit `strideLength`. `getConfig().strideLength` reads
 `0` while derived; `estimateStride(height, sex)` gives the same number the
@@ -231,7 +238,10 @@ split out.
 
 `schemaVersion` changes only when a field is removed, renamed or changes
 meaning - a new field does not bump it - so a server can parse by version
-across releases. It is `2` from 1.5; a snapshot without it is the 1.4 shape.
+across releases. It is `2`, first sent by 2.0. A snapshot without it came
+from 1.x: the 1.5 shape if it carries `integrity` (and `suspectSteps`), the
+1.4 shape if not. Neither removed or renamed anything version 2 has, so both
+parse as version 2 with those fields missing.
 `libraryVersion` says which release of this package produced it.
 
 A second argument, `{ sign?: boolean, nonce?: string }`, signs the snapshot

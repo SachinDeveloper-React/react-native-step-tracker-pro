@@ -34,15 +34,25 @@ buildscript {
             // the classpath. It is added here at the host's own AGP version,
             // and only in that mode. This block runs before the rest of the
             // script, so the check is inlined rather than shared.
-            // By reflection through the root's class loader, where the app's
-            // AGP lives: this block is compiled before that classpath exists.
+            // By reflection: this block is compiled before the app's
+            // classpath exists. Every loader that can see the app's AGP is
+            // tried - the root buildscript's for an app that puts AGP on its
+            // buildscript classpath, the script's own for one that loads it
+            // through a plugins {} block, whose classes it inherits.
             def hostAgp = null
-            try {
-                hostAgp = rootProject.buildscript.classLoader
-                    .loadClass("com.android.Version")
-                    .getField("ANDROID_GRADLE_PLUGIN_VERSION")
-                    .get(null)?.toString()
-            } catch (Throwable ignored) {
+            def loaders = [
+                this.class.classLoader,
+                rootProject.buildscript.classLoader,
+                Thread.currentThread().contextClassLoader
+            ]
+            for (loader in loaders) {
+                if (hostAgp != null || loader == null) continue
+                try {
+                    hostAgp = loader.loadClass("com.android.Version")
+                        .getField("ANDROID_GRADLE_PLUGIN_VERSION")
+                        .get(null)?.toString()
+                } catch (Throwable ignored) {
+                }
             }
             def builtIn = project.findProperty("android.builtInKotlin")
             if (hostAgp != null && hostAgp.tokenize(".")[0].toInteger() >= 9 &&
@@ -87,12 +97,19 @@ def reactNativeMinor() {
  * new one is the only one - whether or not the app's gradle.properties still
  * says `newArchEnabled=true`, which newer templates are free to drop. Below
  * 0.82 the property decides, as it always has.
+ *
+ * When neither is known - a layout where `node_modules/react-native` is not
+ * where it is looked for, and no property - the new architecture is assumed:
+ * it has been the default since 0.76, every supported release's template
+ * sets the property when it wants the old one, and guessing old on 0.82+
+ * builds code that release cannot run.
  */
 def isNewArchitectureEnabled() {
     def minor = reactNativeMinor()
     if (minor != null && minor >= 82) return true
     def flag = project.findProperty("newArchEnabled")
-    return flag != null && flag.toString() == "true"
+    if (flag != null) return flag.toString() == "true"
+    return minor == null
 }
 
 /** Major version of the Android Gradle Plugin actually running the build. */

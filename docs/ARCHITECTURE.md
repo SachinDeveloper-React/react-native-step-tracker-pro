@@ -512,15 +512,19 @@ assuming one toolchain:
   it in a plain app, a hoisted monorepo and this repository alike. From 0.82
   the new architecture is the only one, so the new-architecture sources and
   codegen are used whatever `newArchEnabled` says; below 0.82 the property
-  decides.
+  decides. With neither known - no `react-native` package where it is looked
+  for, and no property - the new architecture is assumed, since it has been
+  the default since 0.76 and guessing old on 0.82+ builds code that release
+  cannot run.
 - **Kotlin mode.** On AGP 9 with `android.builtInKotlin` not set to `false`,
   AGP compiles Kotlin itself and refuses the Kotlin Android and Kotlin kapt
   plugins. The script then applies `com.android.legacy-kapt` instead, and -
   because that plugin lives in `com.android.tools.build:gradle-kotlin`, which
   React Native apps do not put on the classpath - adds that artifact to its
   own buildscript classpath at the host's AGP version, found by reflection
-  through the root project's class loader (the buildscript block is compiled
-  before that classpath exists). On AGP 8, or with built-in Kotlin off, it is
+  (the buildscript block is compiled before that classpath exists) through
+  whichever class loader sees it: the script's own, the root buildscript's,
+  or the thread's. On AGP 8, or with built-in Kotlin off, it is
   the Kotlin Android plugin and its kapt, as in 1.x. The architecture shim
   directories are registered as Kotlin sources as well as Java ones, because
   built-in Kotlin compiles only `kotlin` source directories and the defaults.
