@@ -154,7 +154,7 @@ getTrackingHealth()
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
 getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date, opts)
-getMotionWindows(from, to)
+getMotionWindows(from, to)    getSignedSnapshot(date, opts)
 
 getIntegrityReport(date)      getIntegrityEvents(from, to)  getStepMinutes(from, to)
 attestDevice(challenge)       hasAttestationKey()       getAttestationKeyInfo()
@@ -361,11 +361,15 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.1.1** — a user who allows
-steps but unticks distance or calories on the Health Connect sheet keeps their
-watch's steps and the mirror (before, either stopped silently), the status
-says type by type what was allowed, and distances say whether they were
-measured or derived. **2.1.0** signed the evidence behind a day's totals
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.2.0** — unticking distance is
+no longer counted as refusing Health Connect, so `enableHealthConnect()` stops
+asking once steps are allowed; the permission request asks only for what the
+manifest declares, so an app without `WRITE_*` no longer fails; a partial
+distance read is no longer reported as measured; `authFailed` no longer
+depends on the clock; and `getSignedSnapshot()` returns a signed snapshot
+without the duplicate copy. **2.1.1** kept a user's watch steps and mirror
+when they unticked distance or calories, and labelled distances as measured
+or derived. **2.1.0** signed the evidence behind a day's totals
 with them (`getVerificationSnapshot(date, { include })`: minutes, motion
 windows, raw Health Connect records), kept background upload failures for
 `getSyncStatus()`, let an app read steps alone from Health Connect

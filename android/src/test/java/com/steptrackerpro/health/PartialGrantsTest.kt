@@ -85,6 +85,68 @@ class PartialGrantsTest {
         assertEquals(DistanceSource.NOT_READ, DistanceSource.of(read = false, seen = false, isSelf = true))
     }
 
+    // ---- what counts as a refusal ---------------------------------------
+
+    private val scope = HealthConnectManager.PermissionScope()
+
+    @Test
+    fun `steps allowed with distance unticked is not a refusal`() {
+        assertTrue(scope.stepsGranted(setOf(readSteps, writeSteps)))
+        // ...even though config is not fully granted.
+        assertFalse((setOf(readSteps, writeSteps)).containsAll(scope.required))
+    }
+
+    @Test
+    fun `steps refused is a refusal whatever else was allowed`() {
+        assertFalse(scope.stepsGranted(setOf(readDistance, readCalories, writeSteps)))
+        assertFalse(scope.stepsGranted(emptySet()))
+    }
+
+    @Test
+    fun `steps are judged only for what config turns on`() {
+        val readOnly = HealthConnectManager.PermissionScope(write = false)
+        assertEquals(setOf(readSteps), readOnly.essential)
+        assertTrue(readOnly.stepsGranted(setOf(readSteps)))
+        val neither = HealthConnectManager.PermissionScope(read = false, write = false)
+        assertFalse(neither.stepsGranted(setOf(readSteps, writeSteps)))
+    }
+
+    // ---- fitting the request to the manifest ----------------------------
+
+    @Test
+    fun `an app that declares no WRITE_STEPS is not asked to write`() {
+        val fitted = scope.forManifest(setOf(readSteps, readDistance, readCalories))
+        assertFalse(fitted.write)
+        assertEquals(setOf(readSteps, readDistance, readCalories), fitted.requested)
+        assertEquals(HealthConnectManager.WRITE_PERMISSIONS, fitted.dropped)
+    }
+
+    @Test
+    fun `undeclared distance and calories are left out, not failed on`() {
+        val fitted = scope.forManifest(setOf(readSteps, writeSteps))
+        assertEquals(setOf(readSteps, writeSteps), fitted.requested)
+        assertEquals(setOf(ReadType.STEPS), fitted.readTypes)
+        assertEquals(setOf(readDistance, readCalories, writeDistance, ReadType.TOTAL_CALORIES.writePermission), fitted.dropped)
+    }
+
+    @Test
+    fun `READ_STEPS and explicit opt-ins stay in, so leaving them out is still reported`() {
+        val fitted = HealthConnectManager.PermissionScope(historyRead = true, activeCalories = true)
+            .forManifest(emptySet())
+        assertTrue(readSteps in fitted.requested)
+        assertTrue(HealthConnectManager.READ_ACTIVE_CALORIES in fitted.requested)
+        HealthConnectManager.PERMISSION_HISTORY_READ?.let { assertTrue(it in fitted.requested) }
+        assertFalse(fitted.write)
+    }
+
+    @Test
+    fun `a fully declared app is asked for everything, as before`() {
+        val all = HealthConnectManager.READ_PERMISSIONS + HealthConnectManager.WRITE_PERMISSIONS
+        val fitted = scope.forManifest(all)
+        assertEquals(scope.requested, fitted.requested)
+        assertTrue(fitted.dropped.isEmpty())
+    }
+
     // ---- what a resolved day reports -----------------------------------
 
     private val metrics = MetricsCalculator(StepTrackerConfig().sanitised())

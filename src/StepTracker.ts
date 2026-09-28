@@ -28,6 +28,7 @@ import type {
   RangeStats,
   RequestHealthConnectOptions,
   ResolvedStepSource,
+  SnapshotSignature,
   StepMinute,
   StepSnapshot,
   StepSourceList,
@@ -279,14 +280,6 @@ function assertAtLeast(name: string, value: number | undefined, min: number): vo
 }
 
 /**
- * Validates a config patch and adds what `initialize` and `updateConfig` both
- * derive. The native side clamps as well - config is also rebuilt from
- * persisted JSON - but a value it would silently move is a mistake to report.
- *
- * @param allowHttp whether a plain `http://` remoteSyncUrl is allowed; the
- *   patch's own `remoteSyncAllowHttp` unless the caller knows the stored one.
- */
-/**
  * A list option: an array of known names. Duplicates are harmless and kept;
  * the native side reads a set.
  */
@@ -324,6 +317,41 @@ function assertCloudProjectNumber(value: unknown): void {
       'cloudProjectNumber must be a positive integer'
     );
   }
+}
+
+/**
+ * Validates snapshot options and calls native with only the keys that are
+ * set, so a 2.0-shaped call sends a 2.0-shaped map.
+ */
+async function snapshotCall(
+  date: string,
+  options: VerificationSnapshotOptions & { signedOnly?: boolean }
+): Promise<unknown> {
+  assertDate(date);
+  if (
+    options.nonce != null &&
+    (typeof options.nonce !== 'string' || options.nonce.length > 512)
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'nonce must be a string of at most 512 characters'
+    );
+  }
+  assertList('include', options.include, SNAPSHOT_PARTS);
+  assertList('healthConnectRecordTypes', options.healthConnectRecordTypes, RECORD_TYPES, {
+    nonEmpty: true,
+  });
+  const native: Record<string, unknown> = {};
+  for (const key of [
+    'sign',
+    'nonce',
+    'include',
+    'healthConnectRecordTypes',
+    'signedOnly',
+  ] as const) {
+    if (options[key] !== undefined) native[key] = options[key];
+  }
+  return call(() => getNativeModule().getVerificationSnapshot(date, native));
 }
 
 /** `{ recordTypes }` for the native side, steps when absent. */
@@ -371,6 +399,14 @@ async function getHealthConnectRecords(
   ) as Promise<HealthConnectRecordList<AnyHealthConnectRecord>>;
 }
 
+/**
+ * Validates a config patch and adds what `initialize` and `updateConfig` both
+ * derive. The native side clamps as well - config is also rebuilt from
+ * persisted JSON - but a value it would silently move is a mistake to report.
+ *
+ * @param allowHttp whether a plain `http://` remoteSyncUrl is allowed; the
+ *   patch's own `remoteSyncAllowHttp` unless the caller knows the stored one.
+ */
 function normaliseConfig(
   config: StepTrackerConfig,
   allowHttp: boolean | undefined = config.remoteSyncAllowHttp
@@ -665,33 +701,28 @@ export const StepTracker = {
     date: string,
     options: VerificationSnapshotOptions = {}
   ): Promise<VerificationSnapshot> {
-    assertDate(date);
-    if (
-      options.nonce != null &&
-      (typeof options.nonce !== 'string' || options.nonce.length > 512)
-    ) {
-      throw new StepTrackerError(
-        'E_INVALID_CONFIG',
-        'nonce must be a string of at most 512 characters'
-      );
-    }
-    assertList('include', options.include, SNAPSHOT_PARTS);
-    assertList(
-      'healthConnectRecordTypes',
-      options.healthConnectRecordTypes,
-      RECORD_TYPES,
-      {
-        nonEmpty: true,
-      }
-    );
-    // Only the keys that are set, so a 2.0-shaped call sends a 2.0-shaped map.
-    const native: Record<string, unknown> = {};
-    for (const key of ['sign', 'nonce', 'include', 'healthConnectRecordTypes'] as const) {
-      if (options[key] !== undefined) native[key] = options[key];
-    }
-    return call(() =>
-      getNativeModule().getVerificationSnapshot(date, native)
-    ) as Promise<VerificationSnapshot>;
+    return snapshotCall(date, options) as Promise<VerificationSnapshot>;
+  },
+
+  /**
+   * The signed snapshot and nothing else: the signature block, whose
+   * `signedPayload` is the whole snapshot as JSON - `include`d evidence too.
+   * `getVerificationSnapshot(date, { sign: true })` returns that payload a
+   * second time as an object, which doubles what crosses the bridge and
+   * what an app uploads; post this instead when only the server reads it.
+   * Takes the same options, and always signs.
+   */
+  async getSignedSnapshot(
+    date: string,
+    options: Omit<VerificationSnapshotOptions, 'sign'> = {}
+  ): Promise<SnapshotSignature> {
+    const rest: VerificationSnapshotOptions = { ...options };
+    delete rest.sign;
+    return snapshotCall(date, {
+      ...rest,
+      sign: true,
+      signedOnly: true,
+    }) as Promise<SnapshotSignature>;
   },
 
   // ---- integrity -------------------------------------------------------
@@ -995,7 +1026,12 @@ export const StepTracker = {
       return status;
     }
 
-    if (!status.granted) {
+    // Steps are what matters. A user who allowed them and unticked distance
+    // or calories has turned Health Connect on; asking again on every call
+    // - and, after two sheets, sending them to settings - would nag them for
+    // something optional. Ask for the rest with
+    // requestHealthConnectPermissions() when the app wants it.
+    if (!(status.stepsGranted ?? status.granted)) {
       if (status.shouldOpenSettings) {
         await StepTracker.openHealthConnectSettings();
         return status;

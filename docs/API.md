@@ -282,9 +282,36 @@ const snapshot = await StepTracker.getVerificationSnapshot(date, {
   empty" from "not asked for". Without `include` the snapshot is exactly the
   2.0 shape, and `schemaVersion` stays `2` - these are new fields.
 
+`minutesStatus` and `motionWindowsStatus` (2.2) say whether each list is being
+recorded as the snapshot is taken - `'enabled'` or `'disabled'` - so an
+empty list under `'enabled'` means nothing happened. A setting changed during
+the day shows as a `config_changed` event in `integrity.events`.
+
 A day of per-minute buckets is at most 1,440 entries, but a watch writing a
 record a minute adds as many again per type, so ask for what the server
 actually scores.
+
+### `getSignedSnapshot(date, options?): Promise<SnapshotSignature>`
+
+The signed snapshot and nothing else (2.2). A signed
+`getVerificationSnapshot()` carries the snapshot twice - as the object, and
+again as `signature.signedPayload`, the JSON text that was signed - and with
+`include` that can be a lot. This returns only the signature block, the
+snapshot in it once:
+
+```ts
+const signed = await StepTracker.getSignedSnapshot(date, { nonce, include: ['minutes'] });
+// { keyId, algorithm, value, attested, signedPayload, payloadSha256 }
+await api.post('/steps/verify', { signed });
+const { token } = await StepTracker.requestIntegrityToken({
+  requestHash: signed.payloadSha256,
+  cloudProjectNumber,
+});
+```
+
+It takes the same options as `getVerificationSnapshot()` and always signs.
+The server verifies `value` over `signedPayload` and parses that - which is
+what it should trust in either shape.
 
 `resolved` is what the current policy chose, for comparison only. `sources`
 follows the same rules as every other Health Connect read — no provider, no
@@ -829,22 +856,25 @@ the next foreground until nothing is left. Guidance text per manufacturer:
   grantedReadTypes: ['steps'], // of healthConnectReadTypes, what the user allowed
   canWriteSteps: true,         // WRITE_STEPS: enough to mirror this device
   grantedWriteTypes: ['steps'],
+  stepsGranted: true,          // steps allowed for all config turns on (2.2)
   backgroundReadGranted: false,
   historyReadGranted: false,
   grantedPermissions: [],
   missingPermissions: ['android.permission.health.READ_STEPS', ...],
-  undeclaredPermissions: [],   // asked for by config, absent from your manifest
-  denialCount: 0,
-  shouldOpenSettings: false,
+  undeclaredPermissions: [],   // used by config, absent from your manifest
+  denialCount: 0,              // requests after which steps were still refused
+  shouldOpenSettings: false,   // steps refused past the sheet's limit
 }
 ```
 
 `availability` is the field to branch on. `not_supported` is the only value with
 nothing to offer the user; the other two failure states are both fixed by
 `installHealthConnect()`. A non-empty `undeclaredPermissions` means your
-manifest is missing entries config asks for; requesting rejects with
-`E_HEALTH_CONNECT_NOT_DECLARED` until they are added
-([PERMISSIONS.md](PERMISSIONS.md#what-the-library-declares-and-what-you-add)).
+manifest is missing entries config would use. Distance, calories and the
+write set are then simply not asked for (2.2); an undeclared `READ_STEPS`, or
+an opt-in such as background reads, makes a request reject with
+`E_HEALTH_CONNECT_NOT_DECLARED` until it is added
+([PERMISSIONS.md](PERMISSIONS.md#when-an-entry-is-missing)).
 
 **Partial grants.** The sheet lets the user untick any single permission.
 Steps alone are enough: with `READ_STEPS` a watch's steps are used and its
@@ -863,6 +893,11 @@ The whole "turn Health Connect on" flow behind one call — install or update th
 provider if it is missing, otherwise request permissions, otherwise fall back to
 the settings screen once the sheet has stopped appearing. Wire it to a single
 button and re-read the status when the app is next foregrounded.
+
+It is done once steps are allowed (`stepsGranted`), whatever the user did
+with distance and calories (2.2): it does not show the sheet again for them,
+and never sends the user to settings over them. Ask for those with
+`requestHealthConnectPermissions()`.
 
 ```ts
 await StepTracker.enableHealthConnect({ backgroundRead: true });

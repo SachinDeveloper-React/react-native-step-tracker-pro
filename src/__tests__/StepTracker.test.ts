@@ -407,6 +407,31 @@ describe('date validation', () => {
     ]);
   });
 
+  it('getSignedSnapshot() always signs, asks for the signature alone, and validates', async () => {
+    const block = {
+      keyId: 'k',
+      signedPayload: '{"date":"2026-09-14"}',
+      payloadSha256: 'ab',
+    };
+    native.when('getVerificationSnapshot', block);
+    await expect(
+      StepTracker.getSignedSnapshot('2026-09-14', { nonce: 'n', include: ['minutes'] })
+    ).resolves.toEqual(block);
+    // A stray sign: false cannot turn signing off.
+    await StepTracker.getSignedSnapshot('2026-09-14', { sign: false } as never);
+    expect(native.calledWith('getVerificationSnapshot')).toEqual([
+      ['2026-09-14', { sign: true, nonce: 'n', include: ['minutes'], signedOnly: true }],
+      ['2026-09-14', { sign: true, signedOnly: true }],
+    ]);
+    await expect(StepTracker.getSignedSnapshot('2026-9-14')).rejects.toMatchObject({
+      code: 'E_INVALID_CONFIG',
+    });
+    await expect(
+      StepTracker.getSignedSnapshot('2026-09-14', { include: ['sources' as 'minutes'] })
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    expect(native.calledWith('getVerificationSnapshot')).toHaveLength(2);
+  });
+
   it('getMotionWindows() validates the range and unwraps the list', async () => {
     await expect(
       StepTracker.getMotionWindows('2026-09-10', '2026-09-09')
@@ -694,6 +719,30 @@ describe('enableHealthConnect()', () => {
     await StepTracker.enableHealthConnect();
     expect(native.calledWith('installHealthConnect')).toHaveLength(1);
     expect(native.calledWith('requestHealthConnectPermissions')).toHaveLength(0);
+  });
+
+  it('stops asking once steps are granted, whatever happened to distance', async () => {
+    // The user allowed steps and unticked distance: granted is false, but
+    // Health Connect is on. No sheet, and never settings.
+    native.when('getHealthConnectStatus', {
+      ...baseStatus,
+      granted: false,
+      stepsGranted: true,
+      canReadSteps: true,
+      shouldOpenSettings: false,
+      missingPermissions: ['android.permission.health.READ_DISTANCE'],
+    });
+    const status = await StepTracker.enableHealthConnect();
+    expect(status.stepsGranted).toBe(true);
+    expect(native.calledWith('requestHealthConnectPermissions')).toHaveLength(0);
+    expect(native.calledWith('openHealthConnectSettings')).toHaveLength(0);
+  });
+
+  it('still asks while steps are missing', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, stepsGranted: false });
+    native.when('requestHealthConnectPermissions', { ...baseStatus, stepsGranted: true });
+    await StepTracker.enableHealthConnect();
+    expect(native.calledWith('requestHealthConnectPermissions')).toHaveLength(1);
   });
 
   it('goes to settings once the sheet has stopped appearing', async () => {

@@ -104,11 +104,21 @@ eligible Play use case for the direct dialog:
 
 ### When an entry is missing
 
-- `requestHealthConnectPermissions()` and `enableHealthConnect()` reject with
-  `E_HEALTH_CONNECT_NOT_DECLARED`, naming the missing entries. Health Connect
-  itself would silently leave an undeclared permission off its sheet, which
-  looks exactly like the user refusing.
-  `getHealthConnectStatus().undeclaredPermissions` lists them up front.
+- **What the package can do without is simply not asked for** (2.2). Writes
+  are on by default, but an app that declares no `WRITE_STEPS` is not asked
+  to write; an undeclared `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` or
+  distance or calorie write is left off the request, and the value is
+  derived. `writeRequired` in the status then reads `false`.
+- **`READ_STEPS` with reads on, and the explicit opt-ins** -
+  `healthConnectBackgroundRead`, `healthConnectHistoryRead`,
+  `healthConnectReadActiveCalories` - still make
+  `requestHealthConnectPermissions()` and `enableHealthConnect()` reject with
+  `E_HEALTH_CONNECT_NOT_DECLARED`, naming them. Health Connect itself would
+  silently leave an undeclared permission off its sheet, which looks exactly
+  like the user refusing.
+- `getHealthConnectStatus().undeclaredPermissions` lists everything config
+  would use that the manifest leaves out, including what is simply not asked
+  for, so a missing entry is still visible while developing.
 - `requestDisableBatteryOptimization()` opens the settings list instead of the
   direct dialog, and `getBackgroundRestrictionStatus().directPromptAvailable`
   is `false`.
@@ -260,7 +270,12 @@ is granted; `canRead` / `canWrite` report the capability whether or not
 config turns reads or writes on - `canRead` against the types in
 `healthConnectReadTypes`.
 
-**The user can untick any one permission** on the sheet. From 2.1.1 steps
+**The user can untick any one permission** on the sheet. From 2.2 that is not
+counted as a refusal, and `enableHealthConnect()` stops asking once steps are
+allowed - `stepsGranted` in the status. Ask for distance with
+`requestHealthConnectPermissions()` when the app wants it; after two refusals
+of it Health Connect stops showing it, and the call comes back with it still
+missing - send the user to `openHealthConnectSettings()` then. From 2.1.1 steps
 alone are enough: `READ_STEPS` lets a watch's steps be used, with distance
 and calories derived when those were refused, and `WRITE_STEPS` lets this
 device's count be mirrored, with distance and calories written only when

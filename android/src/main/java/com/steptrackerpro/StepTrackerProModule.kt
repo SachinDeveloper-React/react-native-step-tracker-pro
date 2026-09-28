@@ -407,7 +407,10 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 )
                 return@launchSafely
             }
-            promise.resolve(Bridge.map(core.verificationSnapshot(date, sign, nonce, include, recordTypes)))
+            val signedOnly = sign && options.optBoolean("signedOnly", false)
+            promise.resolve(
+                Bridge.map(core.verificationSnapshot(date, sign, nonce, include, recordTypes, signedOnly))
+            )
         }
     }
 
@@ -790,9 +793,11 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                     scope.launch {
                         // Counting refusals is what lets a later call tell
                         // "denied just now" from "the sheet no longer opens",
-                        // which Health Connect reports identically.
+                        // which Health Connect reports identically. Only
+                        // steps count: a user who allowed them and unticked
+                        // distance has not refused Health Connect.
                         core.state.recordHealthPermissionResult(
-                            granted.containsAll(permissionScope.required)
+                            permissionScope.stepsGranted(granted.toSet())
                         )
                         val status = core.healthConnect.status(permissionScope)
                         StepEventBus.emit(

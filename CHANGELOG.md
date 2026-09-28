@@ -5,7 +5,58 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.1.1] - 2026-09-28
+## [2.2.0] - 2026-09-28
+
+Fixes from a review of 2.1.1, and the additions they needed.
+
+### Fixed
+
+- **Unticking distance is no longer a refusal.** A request after which the
+  user allowed steps but not distance counted towards Health Connect's
+  two-refusal limit, and `enableHealthConnect()` - waiting for everything
+  config asks for - showed the sheet again on every call, then sent the
+  user to Health Connect's settings on every call while steps worked. Only
+  a refusal of steps counts now, `shouldOpenSettings` is about steps, and
+  `enableHealthConnect()` is done once steps are allowed.
+- **A partial distance read is not reported as measured.** A per-source read
+  that failed part way or stopped at the page cap kept what it had read:
+  labelled `health_connect` at the cap, `not_read` with a non-zero value
+  after a failure. An incomplete read is now discarded - distance zeroed,
+  `not_read`, derived - and the same goes for calories; an incomplete
+  active-calories read reports `-1`. The cap is raised from 50 to 60 pages
+  so 35 days of a watch writing a record a minute fits.
+- **`authFailed` no longer depends on the clock.** It compared wall-clock
+  times, so a clock moved between a refusal and new credentials could keep
+  or clear it wrongly. It now compares a counter bumped on every credential
+  change with the one each attempt read, and the order of attempts.
+  Timestamps stay, for display. A refusal stored by 2.1 is not reported
+  after the upgrade; the next scheduled upload files it again.
+
+### Added
+
+- **`getSignedSnapshot(date, options)`** returns only the signature block. A
+  signed `getVerificationSnapshot()` carries the snapshot twice, as an
+  object and as `signedPayload`.
+- **`minutesStatus` and `motionWindowsStatus`** on a snapshot that
+  `include`s them: `'enabled' | 'disabled'`, so an empty list is not
+  ambiguous.
+- **`HealthConnectStatus.stepsGranted`**: steps allowed for everything config
+  turns on.
+
+### Changed
+
+- **The permission request fits the manifest.** Writes are on by default,
+  and an app that declared no `WRITE_*` got `E_HEALTH_CONNECT_NOT_DECLARED`
+  from its first request. What the package can do without - the write set,
+  distance and calories - is now not asked for when undeclared, and
+  `writeRequired` reads `false` without `WRITE_STEPS`. An undeclared
+  `READ_STEPS` or explicit opt-in still rejects. `undeclaredPermissions`
+  still lists all of them. Turning writes off by default is still planned
+  for 3.0.
+
+## [2.1.1] - 2026-09-27
+
+Published by hand, without npm provenance.
 
 ### Fixed
 
@@ -983,6 +1034,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.0
 [2.1.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.1
 [2.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.0
 [2.0.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.0.1

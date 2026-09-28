@@ -282,18 +282,74 @@ class HealthConnectManager(
         /** Also read `ActiveCaloriesBurnedRecord`, per source. Only meaningful with [read]. */
         val activeCalories: Boolean = false,
         /** Which types [read] covers. Steps always. */
-        val readTypes: Set<ReadType> = ReadType.ALL
+        val readTypes: Set<ReadType> = ReadType.ALL,
+        /** Which types [write] covers. Steps always. */
+        val writeTypes: Set<ReadType> = ReadType.ALL,
+        /**
+         * Permissions config would ask for that [forManifest] left out
+         * because the manifest does not declare them. Reported in
+         * `undeclaredPermissions`, never requested, never a rejection.
+         */
+        val dropped: Set<String> = emptySet()
     ) {
         /** The read permissions [readTypes] need. */
         val readPermissions: Set<String>
             get() = ReadType.permissions(readTypes + ReadType.STEPS)
 
+        /** The write permissions [writeTypes] need. */
+        val writePermissions: Set<String>
+            get() = (writeTypes + ReadType.STEPS).mapTo(LinkedHashSet()) { it.writePermission }
+
         /** The required set: everything the app cannot do its job without. */
         val required: Set<String>
             get() = buildSet {
                 if (read) addAll(readPermissions)
-                if (write) addAll(WRITE_PERMISSIONS)
+                if (write) addAll(writePermissions)
             }
+
+        /**
+         * What steps need: `READ_STEPS` with reads on, `WRITE_STEPS` with
+         * writes on. Distance and calories are extras on top - a user who
+         * unticked them on the sheet has not refused Health Connect, and is
+         * neither counted as refusing nor asked again unprompted.
+         */
+        val essential: Set<String>
+            get() = buildSet {
+                if (read) add(ReadType.STEPS.permission)
+                if (write) add(ReadType.STEPS.writePermission)
+            }
+
+        /** [essential] is non-empty and every part of it is in [granted]. */
+        fun stepsGranted(granted: Set<String>): Boolean =
+            essential.isNotEmpty() && granted.containsAll(essential)
+
+        /**
+         * This scope, fitted to what the app's manifest [declared]. What the
+         * package can do without is left out when undeclared rather than
+         * failing the request: the write set (writes are on by default, and
+         * an app that declares no `WRITE_STEPS` does not want them), and
+         * distance and calories among reads and writes. `READ_STEPS` with
+         * reads on, and every explicit opt-in - background reads, history,
+         * active calories - stay, so leaving those out of the manifest is
+         * still reported as the mistake it is.
+         */
+        fun forManifest(declared: Set<String>): PermissionScope {
+            val writes = write && ReadType.STEPS.writePermission in declared
+            val fitted = copy(
+                write = writes,
+                readTypes = readTypes.filterTo(LinkedHashSet()) {
+                    it == ReadType.STEPS || it.permission in declared
+                },
+                writeTypes = if (writes) {
+                    writeTypes.filterTo(LinkedHashSet()) {
+                        it == ReadType.STEPS || it.writePermission in declared
+                    }
+                } else {
+                    writeTypes
+                }
+            )
+            return fitted.copy(dropped = requested - fitted.requested)
+        }
 
         /** Required plus whichever optional grants were opted into. */
         val requested: Set<String>
@@ -365,11 +421,20 @@ class HealthConnectManager(
             "missingPermissions" to missing.toList(),
             // Asked for by config but absent from the manifest - add them, see
             // docs/PERMISSIONS.md. A request rejects while any are listed.
-            "undeclaredPermissions" to undeclaredPermissions(scope).toList(),
+            // Of those, the ones config would use but can do without -
+            // distance, calories, the write set - are simply not asked for;
+            // only READ_STEPS and the explicit opt-ins fail a request.
+            "undeclaredPermissions" to (undeclaredPermissions(scope) + scope.dropped).toList(),
+            // Steps are allowed for everything config turns on. What
+            // enableHealthConnect() waits for; the rest is optional.
+            "stepsGranted" to scope.stepsGranted(granted),
+            // Requests after which steps were still refused.
             "denialCount" to denials,
             // Past the provider's prompt limit the sheet no longer appears, so
             // the only route left is Health Connect's own settings screen.
-            "shouldOpenSettings" to (denials >= MAX_PROMPTS && missing.isNotEmpty())
+            // Only for steps: an unticked distance is not a refusal.
+            "shouldOpenSettings" to (denials >= MAX_PROMPTS && !scope.stepsGranted(granted) &&
+                scope.essential.isNotEmpty())
         )
     }
 
@@ -507,9 +572,16 @@ class HealthConnectManager(
         // by StepSourceResolver - as does every origin when the app does not
         // read that type, or the user did not grant it. Only granted types
         // are asked for: an ungranted one would fail every time.
+        //
+        // A read that did not finish - a page failed, or the page cap cut it
+        // short - is thrown away rather than kept: a partial distance
+        // labelled as measured would fail a server's distance check, so the
+        // figure is zeroed, reported `not_read`, and derived like any other
+        // missing distance.
         val types = grantedReadTypes()
-        val distanceRead = ReadType.DISTANCE in types &&
-            readAll(hc, DistanceRecord::class.java, start, end) { record ->
+        val accumulators = buckets.values.flatMap { it.values }
+        if (ReadType.DISTANCE in types) {
+            val outcome = readAll(hc, DistanceRecord::class.java, start, end) { record ->
                 val date = DateKeys.of(record.startTime.toEpochMilli())
                 val pkg = record.metadata.dataOrigin.packageName
                 buckets[date]?.get(pkg)?.let {
@@ -517,21 +589,34 @@ class HealthConnectManager(
                     it.distanceSeen = true
                 }
             }
-        if (distanceRead) buckets.values.forEach { byPackage -> byPackage.values.forEach { it.distanceRead = true } }
+            accumulators.forEach {
+                if (outcome == ReadOutcome.COMPLETE) {
+                    it.distanceRead = true
+                } else {
+                    it.distance = 0.0
+                    it.distanceSeen = false
+                }
+            }
+        }
         if (ReadType.TOTAL_CALORIES in types) {
-            readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
+            val outcome = readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
                 val date = DateKeys.of(record.startTime.toEpochMilli())
                 val pkg = record.metadata.dataOrigin.packageName
                 buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
             }
+            if (outcome != ReadOutcome.COMPLETE) accumulators.forEach { it.calories = 0.0 }
         }
         // Opt-in, and only once granted: an ungranted type would fail the read.
         if (readActiveCalories && grantedPermissions().contains(READ_ACTIVE_CALORIES)) {
             buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = 0.0 } }
-            readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end) { record ->
+            val outcome = readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end) { record ->
                 val date = DateKeys.of(record.startTime.toEpochMilli())
                 val pkg = record.metadata.dataOrigin.packageName
                 buckets[date]?.get(pkg)?.let { it.activeCalories += record.energy.inKilocalories }
+            }
+            // A partial sum is reported as unknown, not as a low figure.
+            if (outcome != ReadOutcome.COMPLETE) {
+                buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = -1.0 } }
             }
         }
 
@@ -808,14 +893,26 @@ class HealthConnectManager(
      * day, which for step records is not rare - some watches write one record
      * per minute.
      */
-    /** @return whether every page was read; false when the read failed part way or at once. */
+    /** How a paged read ended. */
+    private enum class ReadOutcome {
+        /** Every page was read. */
+        COMPLETE,
+
+        /** Stopped at [MAX_PAGES] with more to read. */
+        TRUNCATED,
+
+        /** A page failed - at once, or part way through. */
+        FAILED
+    }
+
+    /** @return how the read ended; only [ReadOutcome.COMPLETE] saw every record. */
     private suspend fun <T : Record> readAll(
         hc: HealthConnectClient,
         type: Class<T>,
         start: Instant,
         end: Instant,
         onRecord: (T) -> Unit
-    ): Boolean {
+    ): ReadOutcome {
         var token: String? = null
         var pages = 0
         do {
@@ -828,12 +925,12 @@ class HealthConnectManager(
                         pageToken = token
                     )
                 )
-            }.getOrNull() ?: return false
+            }.getOrNull() ?: return ReadOutcome.FAILED
             response.records.forEach(onRecord)
             token = response.pageToken
             pages++
         } while (token != null && pages < MAX_PAGES)
-        return true
+        return if (token == null) ReadOutcome.COMPLETE else ReadOutcome.TRUNCATED
     }
 
     private class Accumulator(val packageName: String, self: String) {
@@ -1044,7 +1141,13 @@ class HealthConnectManager(
         const val MAX_PROMPTS = 2
 
         private const val PAGE_SIZE = 1_000
-        private const val MAX_PAGES = 50
+
+        /**
+         * Pages a per-source read takes before stopping. A watch writing one
+         * record a minute writes 1,440 a day, so [RAW_READ_MAX_DAYS] of it is
+         * about 50,400 records - past the 50 pages this used to allow.
+         */
+        private const val MAX_PAGES = 60
 
         /** Longest window answered from raw records; longer ones aggregate. */
         private const val RAW_READ_MAX_DAYS = 35L

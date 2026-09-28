@@ -159,7 +159,13 @@ class StepTrackerCore private constructor(context: Context) {
 
     fun isInitialized(): Boolean = configStore.isInitialized()
 
-    /** The Health Connect grants this app needs, as configured. */
+    /**
+     * The Health Connect grants this app needs, as configured and fitted to
+     * what its manifest declares - see
+     * [HealthConnectManager.PermissionScope.forManifest]. An app that
+     * declares no `WRITE_STEPS` is not asked to write however the default
+     * reads, and undeclared distance or calories are not asked for.
+     */
     fun permissionScope(
         backgroundRead: Boolean? = null,
         historyRead: Boolean? = null
@@ -172,7 +178,7 @@ class StepTrackerCore private constructor(context: Context) {
             historyRead = historyRead ?: config.healthConnectHistoryRead,
             activeCalories = config.healthConnectReadActiveCalories,
             readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes)
-        )
+        ).forManifest(com.steptrackerpro.util.PermissionHelper.declaredPermissions(appContext))
     }
 
     /**
@@ -639,7 +645,13 @@ class StepTrackerCore private constructor(context: Context) {
         sign: Boolean = false,
         nonce: String? = null,
         include: Set<SnapshotPart> = emptySet(),
-        recordTypes: Set<HealthConnectManager.RecordType> = setOf(HealthConnectManager.RecordType.STEPS)
+        recordTypes: Set<HealthConnectManager.RecordType> = setOf(HealthConnectManager.RecordType.STEPS),
+        /**
+         * With [sign], return only the signature block: the snapshot then
+         * travels once, as `signedPayload`, instead of as an object and again
+         * as its JSON text.
+         */
+        signedOnly: Boolean = false
     ): Map<String, Any?> {
         val today = date == DateKeys.today()
         if (today) engine.reconcile()
@@ -707,11 +719,15 @@ class StepTrackerCore private constructor(context: Context) {
             // from "never asked for".
             snapshot["include"] = SnapshotPart.entries.filter { it in include }.map { it.jsValue }
         }
+        // Each list says whether it is being recorded, so an empty one reads
+        // as "nothing happened" or "not recording" rather than either.
         if (SnapshotPart.MINUTES in include) {
             integrity.flush()
+            snapshot["minutesStatus"] = if (config().fraudDetectionEnabled) "enabled" else "disabled"
             snapshot["minutes"] = repository.minutes(date, date).map { it.toMap() }
         }
         if (SnapshotPart.MOTION_WINDOWS in include) {
+            snapshot["motionWindowsStatus"] = if (config().motionSamplingEnabled) "enabled" else "disabled"
             snapshot["motionWindows"] = motionWindows(date, date).map { it.toMap() }
         }
         if (SnapshotPart.HEALTH_CONNECT_RECORDS in include) {
@@ -719,7 +735,8 @@ class StepTrackerCore private constructor(context: Context) {
         }
         if (nonce != null) snapshot["nonce"] = nonce
         if (!sign) return snapshot
-        return signed(snapshot, now)
+        val (body, signature) = signed(snapshot, now)
+        return if (signedOnly) signature else body + ("signature" to signature)
     }
 
     /**
@@ -760,7 +777,10 @@ class StepTrackerCore private constructor(context: Context) {
      * signature over those bytes and then parses them - it never has to
      * re-serialise anything the same way this side did.
      */
-    private fun signed(snapshot: Map<String, Any?>, now: Long): Map<String, Any?> {
+    private fun signed(
+        snapshot: Map<String, Any?>,
+        now: Long
+    ): Pair<Map<String, Any?>, Map<String, Any?>> {
         val body = LinkedHashMap(snapshot).apply { put("signedAt", now) }
         val payload = JsonMaps.toJson(body)
         val bytes = payload.toByteArray(Charsets.UTF_8)
@@ -768,7 +788,7 @@ class StepTrackerCore private constructor(context: Context) {
             "signedPayload" to payload,
             "payloadSha256" to DeviceAttestation.sha256Hex(bytes)
         )
-        return body + ("signature" to signature)
+        return body to signature
     }
 
     // ---- motion windows --------------------------------------------------

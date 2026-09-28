@@ -163,34 +163,57 @@ class IntegrityPipelineTest {
         assertTrue(records["status"] in setOf("unavailable", "not_granted"))
         assertEquals(listOf("steps", "distance"), records["recordTypes"])
         assertEquals(emptyList<Any>(), records["records"])
+        // Each evidence list says whether it is being recorded.
+        assertEquals("enabled", fullPayload["minutesStatus"])
+        assertEquals("disabled", fullPayload["motionWindowsStatus"])
+
+        // Signed only: the signature block alone, the snapshot in it once.
+        val only = core.verificationSnapshot(
+            today, sign = true, nonce = "n-44", include = setOf(SnapshotPart.MINUTES), signedOnly = true
+        )
+        assertEquals(setOf("keyId", "algorithm", "value", "attested", "signedPayload", "payloadSha256"), only.keys)
+        val onlyPayload = only["signedPayload"] as String
+        val onlyVerifier = Signature.getInstance("SHA256withECDSA").apply {
+            initVerify(publicKey)
+            update(onlyPayload.toByteArray(Charsets.UTF_8))
+        }
+        assertTrue(onlyVerifier.verify(Base64.getDecoder().decode(only["value"] as String)))
+        assertEquals("n-44", JsonMaps.parse(onlyPayload)["nonce"])
     }
 
     @Test
     fun aRefusedUploadIsKeptUntilTheCredentialsChange() {
         val state = core.state
         core.updateConfig(core.config().copy(remoteSyncUrl = "https://api.example.com/steps"))
-        val refusedAt = System.currentTimeMillis() + 1
-        state.recordRemoteFailure(refusedAt, RemoteSyncStatus.UNAUTHORIZED, 401, "Upload refused: HTTP 401", retryable = false)
+        val first = state.beginRemoteAttempt()
+        state.recordRemoteFailure(first, RemoteSyncStatus.UNAUTHORIZED, 401, "Upload refused: HTTP 401", retryable = false)
         var status = state.remoteSyncStatus()
         assertTrue(status.authFailed)
         assertEquals(1, status.consecutiveFailures)
         assertEquals(401, status.lastFailure?.status)
 
-        // Another refusal counts up; a server error is not an auth failure.
-        state.recordRemoteFailure(refusedAt + 1, RemoteSyncStatus.HTTP_ERROR, 503, "Upload failed: HTTP 503", retryable = true)
+        // A server error after it is not an auth failure, and counts up.
+        state.recordRemoteFailure(state.beginRemoteAttempt(), RemoteSyncStatus.HTTP_ERROR, 503, "Upload failed: HTTP 503", retryable = true)
         status = state.remoteSyncStatus()
         assertEquals(2, status.consecutiveFailures)
         assertFalse(status.authFailed)
 
-        // Refused again, then new headers from JS clear it.
-        state.recordRemoteFailure(refusedAt + 2, RemoteSyncStatus.FORBIDDEN, 403, "Upload refused: HTTP 403", retryable = false)
+        // Refused again, then new headers from JS clear it - no clock involved.
+        state.recordRemoteFailure(state.beginRemoteAttempt(), RemoteSyncStatus.FORBIDDEN, 403, "Upload refused: HTTP 403", retryable = false)
         assertTrue(state.remoteSyncStatus().authFailed)
-        Thread.sleep(5)
         core.updateConfig(core.config().copy(remoteSyncHeaders = mapOf("Authorization" to "Bearer new")))
         assertFalse(state.remoteSyncStatus().authFailed)
 
+        // An attempt that read the old credentials and is refused after the
+        // change is not the current state either.
+        val stale = RemoteSyncStatus(
+            lastFailure = RemoteSyncStatus.Failure(0L, RemoteSyncStatus.FORBIDDEN, 403, "", false, first.generation, 99L),
+            credentialsGeneration = state.remoteSyncStatus().credentialsGeneration
+        )
+        assertFalse(stale.authFailed)
+
         // An accepted upload resets the count and keeps the failure as history.
-        state.recordRemoteSuccess(System.currentTimeMillis())
+        state.recordRemoteSuccess(state.beginRemoteAttempt())
         status = state.remoteSyncStatus()
         assertEquals(0, status.consecutiveFailures)
         assertEquals(RemoteSyncStatus.FORBIDDEN, status.lastFailure?.reason)
@@ -236,6 +259,25 @@ class IntegrityPipelineTest {
         val declared = com.steptrackerpro.util.PermissionHelper.declaredPermissions(context)
         assertTrue("android.permission.ACTIVITY_RECOGNITION" in declared)
         assertFalse("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" in declared)
+    }
+
+    @Test
+    fun theRequestFitsTheManifestAndOnlyStepsCanFailIt() = runBlocking {
+        // This test app declares no Health Connect permission at all.
+        val scope = core.permissionScope()
+        // Writes are on by default, but with no WRITE_STEPS they are not asked for.
+        assertFalse(scope.write)
+        assertEquals(setOf(HealthConnectManager.ReadType.STEPS), scope.readTypes)
+        // Only READ_STEPS is left to fail the request.
+        assertEquals(
+            setOf(HealthConnectManager.ReadType.STEPS.permission),
+            core.healthConnect.undeclaredPermissions(scope)
+        )
+        // The status still lists everything config would use, for the developer.
+        @Suppress("UNCHECKED_CAST")
+        val undeclared = core.healthConnect.status(scope)["undeclaredPermissions"] as List<String>
+        assertTrue(undeclared.containsAll(HealthConnectManager.READ_PERMISSIONS + HealthConnectManager.WRITE_PERMISSIONS))
+        assertEquals(false, core.healthConnect.status(scope)["stepsGranted"])
     }
 
     @Test

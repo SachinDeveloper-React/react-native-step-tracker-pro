@@ -165,6 +165,7 @@ const healthConnectStatus = {
   grantedReadTypes: [] as HealthConnectDataType[],
   canWriteSteps: false,
   grantedWriteTypes: [] as HealthConnectDataType[],
+  stepsGranted: false,
   backgroundReadGranted: false,
   historyReadGranted: false,
   grantedPermissions: [] as string[],
@@ -244,6 +245,14 @@ export const StepTracker = {
     clock: { wallClockMs: 0, bootId: 0, timezone: 'UTC', utcOffsetMinutes: 0 },
     suspectSteps: 0,
     integrity: integrityReport(date),
+  })),
+  getSignedSnapshot: fn(async (..._args: never[]) => ({
+    keyId: 'mock-key',
+    algorithm: 'SHA256withECDSA' as const,
+    value: '',
+    attested: false,
+    signedPayload: '{}',
+    payloadSha256: '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
   })),
   getMotionWindows: done([]),
 

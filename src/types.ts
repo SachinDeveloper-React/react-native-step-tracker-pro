@@ -990,8 +990,17 @@ export interface VerificationSnapshot {
   include?: VerificationSnapshotPart[];
   /** With `include: ['minutes']`. */
   minutes?: StepMinute[];
+  /**
+   * With `include: ['minutes']`: whether minutes are being recorded
+   * (`fraudDetection.enabled`) as the snapshot is taken, so an empty list
+   * reads as "no steps" under `'enabled'`. A change during the day is a
+   * `config_changed` event in `integrity.events`. From 2.2.
+   */
+  minutesStatus?: 'enabled' | 'disabled';
   /** With `include: ['motionWindows']`. */
   motionWindows?: MotionWindow[];
+  /** With `include: ['motionWindows']`: whether `motionSampling.enabled`, as for `minutesStatus`. From 2.2. */
+  motionWindowsStatus?: 'enabled' | 'disabled';
   /** With `include: ['healthConnectRecords']`. */
   healthConnectRecords?: SnapshotHealthConnectRecords;
   /** Echoed from `options.nonce`. */
@@ -1074,6 +1083,13 @@ export interface HealthConnectStatus {
   canWriteSteps?: boolean;
   /** The types the user allowed writing. */
   grantedWriteTypes?: HealthConnectDataType[];
+  /**
+   * Steps are allowed for everything config turns on - `READ_STEPS` with
+   * reads on, `WRITE_STEPS` with writes on - whatever the user did with
+   * distance and calories. What `enableHealthConnect()` waits for. From
+   * 2.2; optional in the type like the four above.
+   */
+  stepsGranted?: boolean;
   backgroundReadGranted: boolean;
   historyReadGranted: boolean;
   grantedPermissions: string[];

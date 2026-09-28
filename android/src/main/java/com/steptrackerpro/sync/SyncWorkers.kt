@@ -65,17 +65,17 @@ class RemoteSyncWorker(
 
     override suspend fun doWork(): Result {
         val core = StepTrackerCore.get(applicationContext)
-        // Taken before config is read: a failure is filed under the moment
-        // its credentials were read, so new ones set while it ran are not
-        // reported as refused.
-        val startedAt = System.currentTimeMillis()
+        // Opened before config is read: the attempt carries the credentials
+        // generation it read, so new ones set while it ran are not reported
+        // as refused - by counter, whatever the clock does.
+        val attempt = core.state.beginRemoteAttempt()
         val config = core.config()
         val url = config.remoteSyncUrl ?: return Result.success()
         if (!config.remoteSyncAllowHttp && !url.startsWith("https://", ignoreCase = true)) {
             // Health data in the clear is a policy violation and a real leak.
             // Not retryable: the URL will not fix itself.
             core.state.recordRemoteFailure(
-                startedAt, RemoteSyncStatus.INSECURE_URL, null,
+                attempt, RemoteSyncStatus.INSECURE_URL, null,
                 "remoteSyncUrl must use https (set remoteSyncAllowHttp to override)", retryable = false
             )
             StepEventBus.emit(
@@ -100,7 +100,7 @@ class RemoteSyncWorker(
         val signatureOnly = config.remoteSyncAuth == RemoteSyncAuth.SIGNATURE
         if (signatureOnly && !DeviceAttestation.hasKey()) {
             authRefused(
-                core, startedAt, status = null, reason = RemoteSyncStatus.NO_KEY,
+                core, attempt, status = null, reason = RemoteSyncStatus.NO_KEY,
                 auth = config.remoteSyncAuth, pending = pending.size
             )
             return Result.success()
@@ -148,7 +148,7 @@ class RemoteSyncWorker(
             // The same request would be refused again, so it is not retried:
             // JS hears it, refreshes, and calls syncNow().
             authRefused(
-                core, startedAt,
+                core, attempt,
                 status = status,
                 reason = if (status == 401) RemoteSyncStatus.UNAUTHORIZED else RemoteSyncStatus.FORBIDDEN,
                 auth = config.remoteSyncAuth,
@@ -159,7 +159,7 @@ class RemoteSyncWorker(
 
         if (outcome == RemotePayload.Outcome.UPLOADED) {
             core.repository.markSynced(SyncTarget.REMOTE, pending.map { it.date })
-            core.state.recordRemoteSuccess(startedAt)
+            core.state.recordRemoteSuccess(attempt)
             StepEventBus.emit(
                 StepEventBus.Events.SYNC_COMPLETED,
                 mapOf(
@@ -174,7 +174,7 @@ class RemoteSyncWorker(
 
         val error = if (status == NO_RESPONSE) "Upload failed: no response" else "Upload failed: HTTP $status"
         core.state.recordRemoteFailure(
-            startedAt,
+            attempt,
             if (status == NO_RESPONSE) RemoteSyncStatus.NO_RESPONSE else RemoteSyncStatus.HTTP_ERROR,
             status.takeIf { it != NO_RESPONSE },
             error,
@@ -203,7 +203,7 @@ class RemoteSyncWorker(
      */
     private fun authRefused(
         core: StepTrackerCore,
-        startedAt: Long,
+        attempt: com.steptrackerpro.core.StepStateStore.RemoteAttempt,
         status: Int?,
         reason: String,
         auth: String,
@@ -213,7 +213,7 @@ class RemoteSyncWorker(
             RemoteSyncStatus.NO_KEY -> "remoteSyncAuth 'signature' needs a key from attestDevice()"
             else -> "Upload refused: HTTP $status"
         }
-        core.state.recordRemoteFailure(startedAt, reason, status, error, retryable = false)
+        core.state.recordRemoteFailure(attempt, reason, status, error, retryable = false)
         StepEventBus.emit(
             StepEventBus.Events.SYNC_AUTH_FAILED,
             mapOf("target" to "remote", "status" to status, "reason" to reason, "auth" to auth)
