@@ -82,7 +82,12 @@ export function useStepStats(
     const onSteps = () => {
       if (!live || timer) return;
       // Trailing: the refresh after a burst of steps includes all of them.
-      const wait = Math.max(0, lastLive + STATS_LIVE_REFRESH_MS - Date.now());
+      // Clamped both ways: a clock the user sets back after a refresh
+      // would otherwise make this hours, and hold every live refresh with it.
+      const wait = Math.min(
+        STATS_LIVE_REFRESH_MS,
+        Math.max(0, lastLive + STATS_LIVE_REFRESH_MS - Date.now())
+      );
       timer = setTimeout(() => {
         timer = null;
         lastLive = Date.now();

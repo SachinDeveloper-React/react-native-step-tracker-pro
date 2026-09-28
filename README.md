@@ -361,10 +361,11 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.4** — every in-memory
-interval is measured on the uptime clock, so setting the phone's clock back
-no longer freezes live step events, cached Health Connect sources, grants or
-the once-a-minute checks for hours. **2.3.3** did the same for the per-day
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.5** — `useStepStats` keeps
+refreshing live after the phone's clock is set back. **2.3.4** measured every
+in-memory interval on the uptime clock, so that setting the phone's clock
+back stopped freezing live step events, cached Health Connect sources, grants
+and the once-a-minute checks for hours. **2.3.3** did the same for the per-day
 refill. **2.3.2** made the refill take only what is left of a
 range read's time, so it can no longer push the range past its timeout. **2.3.1** stopped `useStepStats` showing a stale
 window when loads overlapped, made raising the goal fire `goalReached` again,

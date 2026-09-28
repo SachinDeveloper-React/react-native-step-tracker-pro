@@ -1171,6 +1171,25 @@ describe('useStepStats()', () => {
     await TestRenderer.act(async () => renderer.unmount());
   });
 
+  it('keeps refreshing live after the clock is set back', async () => {
+    jest.useFakeTimers();
+    const renderer = await mount();
+    await TestRenderer.act(async () => {
+      __emit('StepTrackerPro:stepsChanged', { steps: 1 });
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
+    // Three hours back, by hand, right after that refresh.
+    jest.setSystemTime(Date.now() - 3 * 60 * 60 * 1000);
+    await TestRenderer.act(async () => {
+      __emit('StepTrackerPro:stepsChanged', { steps: 2 });
+      await jest.advanceTimersByTimeAsync(STATS_LIVE_REFRESH_MS);
+    });
+    // Within the usual 30 s, not three hours.
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(3);
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
   it('shows only the newest answer when loads overlap', async () => {
     // Last week's answer is slow; the switch to this month is answered
     // first. The late week must not land on top of the month.

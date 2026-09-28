@@ -5,7 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.5] - 2026-09-28
+
+### Fixed
+
+- **`useStepStats` stopped live-refreshing after the clock was set back.**
+  Its 30-second throttle was worked out from `Date.now()`, so after a
+  refresh followed by the clock going back hours, the next refresh waited
+  those hours. The wait is clamped to 30 seconds now. Refreshes on
+  foreground and at midnight were not affected.
+
 ## [2.3.4] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 ### Fixed
 
@@ -1242,6 +1254,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.5]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.5
 [2.3.4]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.4
 [2.3.3]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.3
 [2.3.2]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.2
