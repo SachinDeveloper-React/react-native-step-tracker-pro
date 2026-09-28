@@ -615,6 +615,14 @@ which no server has seen. From 2.3 that key does not count:
 `hasAttestationKey()` never attested. After upgrading, such an install reports
 `false` and attests once.
 
+`hasAttestationKey()` means `attestDevice()` ran, not that the hardware vouched
+for the key. A device that refuses attestation - some emulators, some old
+phones - still gets a key from `attestDevice()`, unattested, and
+`hasAttestationKey()` is true for it; `getAttestationKeyInfo().attested` (and
+the chain your server received) say whether it was attested. Decide what an
+unattested key is worth on the server, not by calling `attestDevice()` again:
+the device will refuse again.
+
 ```ts
 const info = await StepTracker.getAttestationKeyInfo(); // null when there is no key
 if (!info || !(await api.hasKey(info.keyId))) {
@@ -1520,7 +1528,7 @@ warns once. Use `removeAllListeners()` when that is really what you mean.
 | Event | Payload |
 |---|---|
 | `stepsChanged` | `StepSnapshot`. Throttled by `eventThrottleMs` (default 500 ms). |
-| `goalReached` | `{ type: 'daily' \| 'weekly' \| 'monthly', goal, steps, date, timestamp }`. Fires at most once per period. |
+| `goalReached` | `{ type: 'daily' \| 'weekly' \| 'monthly', goal, steps, date, timestamp }`. Fires at most once per period for a goal - again if the goal is raised and the new one reached that period, never for a lower one (2.3.1). |
 | `goalProgressChanged` | `{ type, goal, steps, progress, date }`. Fires when the whole-percent bucket changes. |
 | `trackingStateChanged` | `{ state, source, reason }`. `reason` is `'started'`, `'boot'`, `'restored_sticky'`, `'restored_watchdog'`, `'restored_foreground'`, `'paused'`, `'no_sensor'`, etc. |
 | `stepSourceChanged` | `ResolvedStepSource`. Fires when the app answering for the user's steps flips — a watch coming into range mid-morning, or a pin being changed. |
@@ -1620,7 +1628,9 @@ drop without a sensor sample to carry it.
 const { stats, loading, error, reload } = useStepStats('week');
 ```
 
-`period` is `'week' | 'month' | 'year'`. Reloads on `dayChanged` and when the
+`period` is `'week' | 'month' | 'year'`. Only the newest request's answer is
+shown, so overlapping loads cannot put an old window on screen. Reloads on
+`dayChanged` and when the
 app comes back to the foreground, and - for a window that includes today -
 at most every 30 seconds (`STATS_LIVE_REFRESH_MS`) while steps come in, so
 today's bar moves while walking (2.3). Those refreshes leave `loading` alone;

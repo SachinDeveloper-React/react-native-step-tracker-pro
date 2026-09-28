@@ -33,6 +33,9 @@ import java.time.LocalDateTime
 import java.time.Period
 import java.time.ZoneId
 import kotlin.reflect.KClass
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Health Connect read/write, permissions and provider availability.
@@ -689,29 +692,51 @@ class HealthConnectManager(
         // so a range agrees with the day view. Those per-day reads fall back
         // to aggregates themselves only for a day that alone outruns the cap.
         val filled = if (needsRecordingMethods && perDayFill) {
-            perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs)
+            val days = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs)
+            // A day the budget ran out on is answered from aggregates - it
+            // loses the manual split, but the range keeps its other apps
+            // rather than timing out as a whole.
+            val missing = DateKeys.rangeOf(DateKeys.of(start.toEpochMilli()), incomplete) - days.keys
+            if (missing.isEmpty()) {
+                days
+            } else {
+                days + aggregateBySource(start, gapEnd, kinds, names).filterKeys { it in missing }
+            }
         } else {
             aggregateBySource(start, gapEnd, kinds, names)
         }
         return read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete }
     }
 
-    /** Each day from [first] to [last] read on its own, never filled a day at a time again. */
+    /**
+     * Each day from [first] to [last] read on its own - never filled a day at
+     * a time again - [PER_DAY_PARALLEL] at once, within [PER_DAY_BUDGET_MS].
+     * A day with steps that was read comes back, even with no sources; a
+     * day the budget did not reach is left out, for the caller to answer
+     * some other way.
+     */
     private suspend fun perDay(
         first: String,
         last: String,
         end: Instant,
         coverageStartMs: Long
-    ): Map<String, List<StepSource>> {
-        val out = HashMap<String, List<StepSource>>()
-        for (date in DateKeys.rangeOf(first, last)) {
-            val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
-            val day = readDailyStepsBySource(
-                DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false
-            )
-            day[date]?.let { out[date] = it }
-        }
-        return out
+    ): Map<String, List<StepSource>> = kotlinx.coroutines.coroutineScope {
+        val deadline = System.currentTimeMillis() + PER_DAY_BUDGET_MS
+        val permits = kotlinx.coroutines.sync.Semaphore(PER_DAY_PARALLEL)
+        DateKeys.rangeOf(first, last).map { date ->
+            async {
+                permits.withPermit {
+                    val left = deadline - System.currentTimeMillis()
+                    if (left <= 0) return@withPermit null
+                    val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
+                    kotlinx.coroutines.withTimeoutOrNull(left) {
+                        date to readDailyStepsBySource(
+                            DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false
+                        )[date].orEmpty()
+                    }
+                }
+            }
+        }.awaitAll().filterNotNull().toMap()
     }
 
     /**
@@ -1288,6 +1313,16 @@ class HealthConnectManager(
 
         /** Pages [readStepRecords] reads before reporting `truncated`: 10,000 records. */
         private const val MAX_RAW_PAGES = 10
+
+        /** Days a per-day refill reads at once. */
+        private const val PER_DAY_PARALLEL = 4
+
+        /**
+         * The share of a range read's time a per-day refill may take. Range
+         * reads get 15 s in all; the first read and the aggregate fill for
+         * whatever this does not reach need the rest.
+         */
+        private const val PER_DAY_BUDGET_MS = 8_000L
 
         /** Pages [changes] reads per call before handing back `hasMore`. */
         private const val MAX_CHANGE_PAGES = 20

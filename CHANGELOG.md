@@ -5,7 +5,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.1] - 2026-09-28
+
+Fixes from a review of 2.3.0.
+
+### Fixed
+
+- **`useStepStats` could show a stale window.** Loads overlap - a new
+  period, midnight, a live refresh - and a slow answer for the old window
+  could land after the new one. Only the newest request's answer is shown
+  now. Rolling windows still refresh live: they always end today, whatever
+  `offset` says.
+- **The per-day refill could time out a whole range.** With
+  `healthConnectIgnoreManualEntries` on, the days a busy read missed were
+  re-read one after another inside the range's 15 seconds. They are read
+  four at a time now, within 8 seconds; a day that budget does not reach is
+  answered from aggregates, losing only its manual split rather than the
+  whole range falling back to the phone's count.
+- **Raising the goal did not fire `goalReached` again.** The marker was the
+  period alone, so after 5,000 was reached, reaching a new goal of 10,000 the
+  same day fired nothing. The goal celebrated is stored with it: a higher
+  goal fires again, a lower one does not.
+- **Days kept for upload lost their minute evidence.** 2.3.0 kept a day not
+  yet uploaded, with its summary and verdict, but still deleted its minutes
+  and integrity events, so its `full` upload reported zero minutes. They are
+  kept with the day now.
+
+### Docs
+
+- `hasAttestationKey()` means `attestDevice()` ran. On a device that refuses
+  attestation it made an unattested key, and this is true for it;
+  `getAttestationKeyInfo().attested` says whether the hardware vouched.
+
 ## [2.3.0] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 Fixes from a review of 2.2.1. Two defaults change - see Changed.
 
@@ -1148,6 +1182,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.1
 [2.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.0
 [2.2.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.1
 [2.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.0

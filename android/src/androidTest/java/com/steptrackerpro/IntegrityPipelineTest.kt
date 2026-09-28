@@ -10,6 +10,7 @@ import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.IntegrityFlag
 import com.steptrackerpro.core.JsonMaps
+import com.steptrackerpro.core.MinuteSample
 import com.steptrackerpro.core.RemoteSyncStatus
 import com.steptrackerpro.core.SnapshotPart
 import com.steptrackerpro.core.StepStateStore
@@ -312,6 +313,12 @@ class IntegrityPipelineTest {
         val ancient = DateKeys.minusDays(today, 400)
         for (date in listOf(old, older, ancient)) repo.saveDay(DayTotals(date, 1_000, 700.0, 30.0))
         repo.markSynced(SyncTarget.REMOTE, listOf(older))
+        // The evidence a full upload's integrity report is built from.
+        val oldMinute = DateKeys.startOfDayMillis(old) + 9 * 3_600_000L
+        val olderMinute = DateKeys.startOfDayMillis(older) + 9 * 3_600_000L
+        repo.addMinutes(listOf(MinuteSample(oldMinute, 110), MinuteSample(olderMinute, 110)))
+        repo.addEvent(IntegrityEvent(oldMinute, IntegrityEvent.REBOOT))
+        repo.addEvent(IntegrityEvent(olderMinute, IntegrityEvent.REBOOT))
 
         // Remote in use: the day not yet uploaded survives a 35-day window,
         // the uploaded one does not, and nothing survives past a year.
@@ -319,10 +326,16 @@ class IntegrityPipelineTest {
         assertEquals(1_000, repo.getDay(old).steps)
         assertEquals(0, repo.getDay(older).steps)
         assertEquals(0, repo.getDay(ancient).steps)
+        // The kept day keeps its minutes and events; the uploaded one does not.
+        assertEquals(1, repo.minutes(old, old).size)
+        assertEquals(0, repo.minutes(older, older).size)
+        assertEquals(1, repo.events(DateKeys.startOfDayMillis(old), DateKeys.endOfDayMillis(old)).size)
+        assertEquals(0, repo.events(DateKeys.startOfDayMillis(older), DateKeys.endOfDayMillis(older)).size)
 
         // No target in use: retention is retention.
         repo.prune(35)
         assertEquals(0, repo.getDay(old).steps)
+        assertEquals(0, repo.minutes(old, old).size)
     }
 
     @Test

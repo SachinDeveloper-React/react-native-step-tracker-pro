@@ -5,7 +5,9 @@ import android.content.Context
 /**
  * Fires each goal at most once per period. The "already fired" marker is the
  * period's start date, so a new week or month rearms automatically and a
- * process restart cannot double fire.
+ * process restart cannot double fire. Next to it is the goal that fired:
+ * raising the goal mid-period fires again when the new one is reached, and
+ * lowering it below what was already celebrated does not.
  */
 class GoalTracker(context: Context) {
 
@@ -43,6 +45,7 @@ class GoalTracker(context: Context) {
     fun reset() {
         prefs.edit()
             .remove("$KEY_FIRED_PREFIX$TYPE_DAILY")
+            .remove("$KEY_FIRED_GOAL_PREFIX$TYPE_DAILY")
             .remove("$KEY_BUCKET_PREFIX$TYPE_DAILY")
             .apply()
     }
@@ -50,8 +53,14 @@ class GoalTracker(context: Context) {
     private fun check(type: String, periodKey: String, steps: Int, goal: Int): Reached? {
         if (goal <= 0 || steps < goal) return null
         val key = "$KEY_FIRED_PREFIX$type"
-        if (prefs.getString(key, null) == periodKey) return null
-        prefs.edit().putString(key, periodKey).apply()
+        val goalKey = "$KEY_FIRED_GOAL_PREFIX$type"
+        if (prefs.getString(key, null) == periodKey) {
+            // A marker from before 2.3.1 has no goal next to it: treat it as
+            // covering any goal, so the upgrade itself never fires twice.
+            val celebrated = prefs.getInt(goalKey, Int.MAX_VALUE)
+            if (goal <= celebrated) return null
+        }
+        prefs.edit().putString(key, periodKey).putInt(goalKey, goal).apply()
         return Reached(type, goal, steps, periodKey)
     }
 
@@ -61,6 +70,7 @@ class GoalTracker(context: Context) {
         const val TYPE_WEEKLY = "weekly"
         const val TYPE_MONTHLY = "monthly"
         private const val KEY_FIRED_PREFIX = "fired_"
+        private const val KEY_FIRED_GOAL_PREFIX = "fired_goal_"
         private const val KEY_BUCKET_PREFIX = "bucket_"
     }
 }

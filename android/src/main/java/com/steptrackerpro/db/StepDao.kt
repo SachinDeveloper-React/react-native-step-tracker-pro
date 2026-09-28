@@ -223,6 +223,10 @@ interface StepMinuteDao {
     @Query("SELECT * FROM step_minute WHERE date BETWEEN :start AND :end ORDER BY minuteStart ASC")
     suspend fun findRange(start: String, end: String): List<StepMinuteEntity>
 
+    /** Older than [cutoff] and with no history row left - a day kept for upload keeps its minutes. */
+    @Query("DELETE FROM step_minute WHERE date < :cutoff AND date NOT IN (SELECT date FROM step_history)")
+    suspend fun deleteOrphansOlderThan(cutoff: String): Int
+
     @Query("DELETE FROM step_minute WHERE date < :cutoff")
     suspend fun deleteOlderThan(cutoff: String): Int
 
@@ -276,6 +280,10 @@ interface IntegrityDao {
 
     @Query("DELETE FROM integrity_event WHERE date < :cutoff")
     suspend fun deleteEventsOlderThan(cutoff: String): Int
+
+    /** Older than [cutoff] and with no history row left - a day kept for upload keeps its events. */
+    @Query("DELETE FROM integrity_event WHERE date < :cutoff AND date NOT IN (SELECT date FROM step_history)")
+    suspend fun deleteOrphanEventsOlderThan(cutoff: String): Int
 
     @Query("SELECT COUNT(*) FROM integrity_event")
     suspend fun countEvents(): Int

@@ -801,6 +801,11 @@ export const StepTracker = {
    * only be bound when a key is generated. A key a signed snapshot made
    * before any attestation does not count (2.3); before 2.3 it did, and an
    * app that checked this skipped attesting for good.
+   *
+   * True means `attestDevice()` ran, not that the hardware vouched for the
+   * key: on a device that refuses attestation - some emulators, some old
+   * phones - `attestDevice()` makes an unattested key instead, and this is
+   * true for it. `getAttestationKeyInfo().attested` says which.
    */
   async hasAttestationKey(): Promise<boolean> {
     return call(() => getNativeModule().hasAttestationKey());

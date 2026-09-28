@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import StepTracker, { isSupported } from '../StepTracker';
 import type { RangeOptions, RangeStats } from '../types';
@@ -36,12 +36,18 @@ export function useStepStats(
 
   const { mode, offset } = options;
 
+  // Loads overlap - a new period, midnight, a live refresh - and answers can
+  // arrive out of order. Only the newest request's answer is shown, so a
+  // slow one for last week can never land on top of this month.
+  const latest = useRef(0);
+
   const load = useCallback(
     async (quiet: boolean) => {
       if (!isSupported()) {
         setLoading(false);
         return;
       }
+      const request = ++latest.current;
       if (!quiet) setLoading(true);
       try {
         const opts: RangeOptions = { mode, offset };
@@ -51,12 +57,14 @@ export function useStepStats(
             : period === 'month'
               ? await StepTracker.getMonthlyStats(opts)
               : await StepTracker.getYearlyStats(opts);
+        if (request !== latest.current) return;
         setStats(next);
         setError(null);
       } catch (e) {
+        if (request !== latest.current) return;
         setError(e as Error);
       } finally {
-        setLoading(false);
+        if (request === latest.current) setLoading(false);
       }
     },
     [period, mode, offset]
@@ -92,6 +100,8 @@ export function useStepStats(
       subs.forEach((sub) => sub.remove());
       app.remove();
       if (timer) clearTimeout(timer);
+      // Whatever is still in flight answers for a window no longer shown.
+      latest.current++;
     };
   }, [load, live]);
 

@@ -1171,6 +1171,38 @@ describe('useStepStats()', () => {
     await TestRenderer.act(async () => renderer.unmount());
   });
 
+  it('shows only the newest answer when loads overlap', async () => {
+    // Last week's answer is slow; the switch to this month is answered
+    // first. The late week must not land on top of the month.
+    let answerWeek: (value: unknown) => void = () => {};
+    native.when(
+      'getWeeklyStats',
+      new Promise((resolve) => {
+        answerWeek = resolve;
+      })
+    );
+    native.when('getMonthlyStats', { totalSteps: 2 });
+    let result: ReturnType<typeof useStepStats> | undefined;
+    function Probe(props: { period: 'week' | 'month' }) {
+      result = useStepStats(props.period);
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe, { period: 'week' }));
+    });
+    await TestRenderer.act(async () => {
+      renderer!.update(React.createElement(Probe, { period: 'month' }));
+    });
+    expect(result!.stats).toEqual({ totalSteps: 2 });
+    await TestRenderer.act(async () => {
+      answerWeek({ totalSteps: 1 });
+    });
+    expect(result!.stats).toEqual({ totalSteps: 2 });
+    expect(result!.loading).toBe(false);
+    await TestRenderer.act(async () => renderer!.unmount());
+  });
+
   it('leaves a past week alone while steps come in', async () => {
     jest.useFakeTimers();
     const renderer = await mount(-1);

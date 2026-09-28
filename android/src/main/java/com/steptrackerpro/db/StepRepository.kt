@@ -176,8 +176,8 @@ class StepRepository(context: Context) {
      * accepted yet is kept - with [keepUnsyncedRemote], one not uploaded;
      * with [keepUnsyncedHealth], one not mirrored - so an endpoint that is
      * down for longer than the retention window loses nothing. Kept days
-     * keep their recovered share and their integrity verdict, which the
-     * upload sends with them. Nothing is kept past [UNSYNCED_KEEP_DAYS]
+     * keep everything the upload sends with them: the recovered share, the
+     * integrity verdict, and the minutes and events its report is built from. Nothing is kept past [UNSYNCED_KEEP_DAYS]
      * however it stands, so storage stays bounded.
      */
     suspend fun prune(
@@ -193,8 +193,8 @@ class StepRepository(context: Context) {
             history.deleteOlderThan(ceiling)
         summaries.deleteOrphansOlderThan(cutoff)
         integrity.deleteOrphanDaysOlderThan(cutoff)
-        minuteRows.deleteOlderThan(cutoff)
-        integrity.deleteEventsOlderThan(cutoff)
+        minuteRows.deleteOrphansOlderThan(cutoff)
+        integrity.deleteOrphanEventsOlderThan(cutoff)
         return deleted
     }
 
