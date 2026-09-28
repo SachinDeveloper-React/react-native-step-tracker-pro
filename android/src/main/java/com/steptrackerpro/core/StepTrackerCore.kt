@@ -85,9 +85,14 @@ class StepTrackerCore private constructor(context: Context) {
         }
     }
 
-    private val lastEventAt = AtomicLong(0L)
+    // The in-memory intervals below - the event throttle, the source refresh,
+    // the source cache - are measured on the uptime clock: a wall clock the
+    // user sets back makes "now minus then" negative, and a throttle keyed
+    // on it would hold for as many hours as the clock moved. They start far
+    // in the past so the first one is never held back.
+    private val lastEventAt = AtomicLong(NEVER)
     private val trailingEventQueued = java.util.concurrent.atomic.AtomicBoolean(false)
-    private val lastSourceRefreshAt = AtomicLong(0L)
+    private val lastSourceRefreshAt = AtomicLong(NEVER)
     private val syncMutex = Mutex()
     private val sourceCache = SourceCache()
 
@@ -213,7 +218,10 @@ class StepTrackerCore private constructor(context: Context) {
             "serviceAlive" to com.steptrackerpro.service.StepTrackerService.isAlive,
             "shouldBeRunning" to shouldBeRunning(),
             "lastHeartbeatAt" to beat,
-            "heartbeatAgeMs" to (if (beat > 0L) now - beat else -1L),
+            // The heartbeat is stored across process deaths, so it is a wall
+            // time; after the clock is set back it can lie in the future, and
+            // an age from that is unknown rather than negative.
+            "heartbeatAgeMs" to (if (beat > 0L && now >= beat) now - beat else -1L),
             "lastSensorEventAt" to state.lastEventAt,
             "lastRecoveryAt" to state.lastRecoveryAt,
             "lastRecoveryReason" to state.lastRecoveryReason,
@@ -242,7 +250,7 @@ class StepTrackerCore private constructor(context: Context) {
         )
         val shown = displaySnapshot(snapshot, resolution)
 
-        val now = System.currentTimeMillis()
+        val now = android.os.SystemClock.elapsedRealtime()
         val previous = lastEventAt.get()
         if (force || now - previous >= config.eventThrottleMs) {
             lastEventAt.set(now)
@@ -260,7 +268,7 @@ class StepTrackerCore private constructor(context: Context) {
                 val res = resolveFromCache(
                     DayTotals(live.date, live.steps, live.distance, live.calories)
                 )
-                lastEventAt.set(System.currentTimeMillis())
+                lastEventAt.set(android.os.SystemClock.elapsedRealtime())
                 StepEventBus.emit(
                     StepEventBus.Events.STEPS_CHANGED,
                     com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, res), res)
@@ -891,7 +899,7 @@ class StepTrackerCore private constructor(context: Context) {
         if (sourcePolicy() == StepSourcePolicy.DEVICE) return
         val today = DateKeys.today()
         if (sourceCache.get(today) != null) return
-        val now = System.currentTimeMillis()
+        val now = android.os.SystemClock.elapsedRealtime()
         val last = lastSourceRefreshAt.get()
         if (now - last < SOURCE_REFRESH_MIN_INTERVAL_MS) return
         if (!lastSourceRefreshAt.compareAndSet(last, now)) return
@@ -1209,7 +1217,7 @@ class StepTrackerCore private constructor(context: Context) {
         fun get(date: String): List<StepSource>? {
             val entry = entries[date] ?: return null
             val ttl = if (date == DateKeys.today()) TODAY_TTL_MS else PAST_TTL_MS
-            if (System.currentTimeMillis() - entry.at > ttl) {
+            if (android.os.SystemClock.elapsedRealtime() - entry.at > ttl) {
                 entries.remove(date)
                 return null
             }
@@ -1219,7 +1227,7 @@ class StepTrackerCore private constructor(context: Context) {
         @Synchronized
         fun put(date: String, sources: List<StepSource>) {
             if (entries.size > MAX_ENTRIES) entries.clear()
-            entries[date] = Entry(System.currentTimeMillis(), sources)
+            entries[date] = Entry(android.os.SystemClock.elapsedRealtime(), sources)
         }
 
         @Synchronized
@@ -1371,6 +1379,9 @@ class StepTrackerCore private constructor(context: Context) {
          * phone's own count is the answer, and the read is retried next time.
          */
         const val HC_READ_TIMEOUT_MS = 4_000L
+
+        /** "Never happened" for an uptime-clock marker, far enough back that no interval holds it. */
+        const val NEVER = Long.MIN_VALUE / 4
 
         /**
          * A multi-day read - range stats, the sources list. Up to 35 days of

@@ -1420,7 +1420,10 @@ export interface TrackingHealth {
   shouldBeRunning: boolean;
   /** Epoch ms of the last heartbeat; 0 when the service has never run. */
   lastHeartbeatAt: number;
-  /** Milliseconds since the last heartbeat; -1 when there is none. */
+  /**
+   * Milliseconds since the last heartbeat; -1 when there is none, or when
+   * the phone's clock was set back past it and the age cannot be known.
+   */
   heartbeatAgeMs: number;
   /** Epoch ms of the last sensor sample. */
   lastSensorEventAt: number;

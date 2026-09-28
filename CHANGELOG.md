@@ -5,7 +5,39 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.4] - 2026-09-28
+
+### Fixed
+
+In-memory intervals were measured on the wall clock. After the user set the
+phone's clock back - hours, by hand; automatic time and time zone changes do
+not do this - "now minus then" went negative and each interval held until
+the clock caught up. All are measured on `SystemClock.elapsedRealtime()`
+now:
+
+- **Live step events stopped.** The `stepsChanged` throttle held every step,
+  and its trailing event waited as long as the clock had moved, so the
+  app's live count - `useStepTracker` included - froze for hours. The
+  notification, already on the uptime clock, and `getTodaySteps()` were
+  unaffected.
+- **The Health Connect grant cache** looked fresh, so a permission granted
+  or revoked meanwhile was not seen by reads; `getHealthConnectStatus()`
+  reads fresh and was right.
+- **Today's cached sources** did not expire, so a watch's steps looked stuck
+  in the app. Signed snapshots read fresh.
+- **The once-a-minute source refresh** stopped, so the notification stopped
+  picking up the watch.
+- **The once-a-minute integrity check** stopped; the end-of-day verdict and
+  the `clock_changed` event were not affected.
+- `getTrackingHealth().heartbeatAgeMs` reads -1 rather than a negative age
+  when the stored heartbeat lies in the future of a clock set back.
+
+Wall times stay where a time of day is meant - record and event timestamps,
+the clock-change detector, `bootId`.
+
 ## [2.3.3] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 ### Fixed
 
@@ -1210,6 +1242,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.4]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.4
 [2.3.3]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.3
 [2.3.2]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.2
 [2.3.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.1

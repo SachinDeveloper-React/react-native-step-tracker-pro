@@ -58,7 +58,8 @@ class IntegrityMonitor(
     @Volatile
     private var liveFlagged: Int = 0
 
-    private val lastEvaluationAt = AtomicLong(0L)
+    /** Uptime clock, so a clock set back cannot hold the once-a-minute check for hours. */
+    private val lastEvaluationAt = AtomicLong(com.steptrackerpro.core.StepTrackerCore.NEVER)
 
     /**
      * Called after an evaluation moved today's flagged total. Under exclude
@@ -130,7 +131,7 @@ class IntegrityMonitor(
     /** From the sensor path: re-judges today at most once a minute. */
     fun maybeEvaluate(force: Boolean = false) {
         if (!enabled) return
-        val now = System.currentTimeMillis()
+        val now = android.os.SystemClock.elapsedRealtime()
         val last = lastEvaluationAt.get()
         if (!force && now - last < EVALUATE_INTERVAL_MS) return
         if (!lastEvaluationAt.compareAndSet(last, now)) return

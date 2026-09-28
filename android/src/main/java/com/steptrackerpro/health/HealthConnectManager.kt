@@ -209,13 +209,15 @@ class HealthConnectManager(
      */
     suspend fun grantedPermissions(fresh: Boolean = false): Set<String> {
         if (!fresh) {
+            // Uptime clock: after the wall clock is set back, "now minus then"
+            // would be negative and the cache would look fresh for hours.
             grantedCache?.let { (at, set) ->
-                if (System.currentTimeMillis() - at < GRANT_CACHE_MS) return set
+                if (android.os.SystemClock.elapsedRealtime() - at < GRANT_CACHE_MS) return set
             }
         }
         val set = runCatching { client()?.permissionController?.getGrantedPermissions() }
             .getOrNull() ?: emptySet()
-        grantedCache = System.currentTimeMillis() to set
+        grantedCache = android.os.SystemClock.elapsedRealtime() to set
         val previous = lastGranted
         lastGranted = set
         if (previous != null && previous != set) onGrantsChanged?.invoke()
