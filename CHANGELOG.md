@@ -5,7 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.3] - 2026-09-28
+
+### Fixed
+
+- **The per-day refill's time is measured on the uptime clock.** Its
+  deadline and budget came from the wall clock, so a clock set back during
+  a range read could hand the refill more time than was left and time the
+  range out; set forward, less than there was. They now come from
+  `SystemClock.elapsedRealtime()`, the clock the range's own timeout runs
+  on.
+
 ## [2.3.2] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 ### Fixed
 
@@ -1197,6 +1210,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.3]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.3
 [2.3.2]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.2
 [2.3.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.1
 [2.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.0

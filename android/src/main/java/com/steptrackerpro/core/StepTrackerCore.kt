@@ -956,7 +956,9 @@ class StepTrackerCore private constructor(context: Context) {
         // not passed off as a range with no watch in it; the next call reads
         // again.
         var read = HealthConnectRead.READ
-        val deadline = System.currentTimeMillis() + HC_RANGE_READ_TIMEOUT_MS
+        // On the uptime clock, like the timeout itself: a clock the user
+        // moves mid-read cannot stretch or shrink what the refill is given.
+        val deadline = android.os.SystemClock.elapsedRealtime() + HC_RANGE_READ_TIMEOUT_MS
         val byDate = try {
             withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
                 healthConnect.readDailyStepsBySource(
@@ -1051,7 +1053,9 @@ class StepTrackerCore private constructor(context: Context) {
         ) {
             return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         }
-        val deadline = System.currentTimeMillis() + HC_RANGE_READ_TIMEOUT_MS
+        // On the uptime clock, like the timeout itself: a clock the user
+        // moves mid-read cannot stretch or shrink what the refill is given.
+        val deadline = android.os.SystemClock.elapsedRealtime() + HC_RANGE_READ_TIMEOUT_MS
         return try {
             withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
                 healthConnect.listSources(

@@ -361,9 +361,10 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.2** — the per-day refill
-takes only what is left of a range read's time, so it can no longer push the
-range past its timeout. **2.3.1** stopped `useStepStats` showing a stale
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.3** — the per-day refill
+measures its time on the uptime clock, so a clock change during a range read
+cannot miscount it. **2.3.2** made the refill take only what is left of a
+range read's time, so it can no longer push the range past its timeout. **2.3.1** stopped `useStepStats` showing a stale
 window when loads overlapped, made raising the goal fire `goalReached` again,
 and kept minute evidence with days held back for upload. **2.3.0** fixed a crash when a
 command reached the service after stop, a snapshot-made key passing for an

@@ -527,9 +527,10 @@ class HealthConnectManager(
         /** False inside [perDay], so a gap is never filled a day at a time twice over. */
         perDayFill: Boolean = true,
         /**
-         * Epoch ms by which the caller's own timeout ends the whole read. A
-         * per-day refill takes only what is left of it, so a slow first read
-         * cannot push the read as a whole past the caller's limit.
+         * `SystemClock.elapsedRealtime()` by which the caller's own timeout
+         * ends the whole read - the uptime clock, which a clock change cannot
+         * move. A per-day refill takes only what is left of it, so a slow
+         * first read cannot push the read as a whole past the caller's limit.
          */
         deadline: Long = Long.MAX_VALUE
     ): Map<String, List<StepSource>> {
@@ -697,7 +698,7 @@ class HealthConnectManager(
         // read again a day at a time instead - each day well inside the cap -
         // so a range agrees with the day view. Those per-day reads fall back
         // to aggregates themselves only for a day that alone outruns the cap.
-        val budget = perDayBudget(System.currentTimeMillis(), deadline)
+        val budget = perDayBudget(android.os.SystemClock.elapsedRealtime(), deadline)
         val filled = if (needsRecordingMethods && perDayFill && budget > 0) {
             val days = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget)
             // A day the budget ran out on is answered from aggregates - it
@@ -729,12 +730,12 @@ class HealthConnectManager(
         coverageStartMs: Long,
         budgetMs: Long
     ): Map<String, List<StepSource>> = kotlinx.coroutines.coroutineScope {
-        val deadline = System.currentTimeMillis() + budgetMs
+        val deadline = android.os.SystemClock.elapsedRealtime() + budgetMs
         val permits = kotlinx.coroutines.sync.Semaphore(PER_DAY_PARALLEL)
         DateKeys.rangeOf(first, last).map { date ->
             async {
                 permits.withPermit {
-                    val left = deadline - System.currentTimeMillis()
+                    val left = deadline - android.os.SystemClock.elapsedRealtime()
                     if (left <= 0) return@withPermit null
                     val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
                     kotlinx.coroutines.withTimeoutOrNull(left) {
@@ -1340,7 +1341,8 @@ class HealthConnectManager(
          * A per-day refill's time: [PER_DAY_BUDGET_MS], or what is left before
          * [deadline] once [PER_DAY_RESERVE_MS] is set aside, whichever is less.
          * Zero or less means there is no time for one - the gap is answered
-         * from aggregates at once.
+         * from aggregates at once. [nowMs] and [deadline] are on one clock:
+         * the uptime clock, as every caller passes them.
          */
         fun perDayBudget(nowMs: Long, deadline: Long): Long =
             if (deadline == Long.MAX_VALUE) {
