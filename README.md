@@ -361,13 +361,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.2.0** — unticking distance is
-no longer counted as refusing Health Connect, so `enableHealthConnect()` stops
-asking once steps are allowed; the permission request asks only for what the
-manifest declares, so an app without `WRITE_*` no longer fails; a partial
-distance read is no longer reported as measured; `authFailed` no longer
-depends on the clock; and `getSignedSnapshot()` returns a signed snapshot
-without the duplicate copy. **2.1.1** kept a user's watch steps and mirror
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.2.1** — a month of a busy
+watch no longer loses its newest days to the read cap, a range read that runs
+out of time says so, read types and writes an app sets itself must be
+declared again, and refusing to let the app write is no longer a refusal.
+**2.2.0** stopped counting an unticked distance as refusing Health Connect,
+fitted the permission request to the manifest, stopped reporting a partial
+distance read as measured, took the clock out of `authFailed`, and added
+`getSignedSnapshot()`. **2.1.1** kept a user's watch steps and mirror
 when they unticked distance or calories, and labelled distances as measured
 or derived. **2.1.0** signed the evidence behind a day's totals
 with them (`getVerificationSnapshot(date, { include })`: minutes, motion

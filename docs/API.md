@@ -184,12 +184,20 @@ calendar year. `rolling` uses the last 7 / 30 / 365 days ending today.
   bestDay: { date: '2026-09-03', steps: 14002, ... },
   days: [ /* zero-filled, ascending, today merged live */ ],
   goal: 70000,
-  goalProgress: 0.774
+  goalProgress: 0.774,
+  healthConnect: 'read',    // | 'not_consulted' | 'timed_out' | 'failed' (2.2.1)
 }
 ```
 
 `averageSteps` divides by elapsed days so a half-finished month is not diluted
 by days that have not happened yet.
+
+`healthConnect` says whether other apps' steps went into the days. Under
+`'timed_out'` or `'failed'` the days are this device's own count - not a range
+without a watch - so call again rather than showing them as final. A range
+reads up to 35 days of raw records, newest first; a month of a busy watch can
+run past the read's cap, and the days it did not reach are answered with each
+app's daily totals from Health Connect's aggregate API instead (2.2.1).
 
 ### `getStatsForRange(startDate, endDate): Promise<RangeStats>`
 ### `getHistory(startDate, endDate): Promise<DayRecord[]>`
@@ -856,7 +864,7 @@ the next foreground until nothing is left. Guidance text per manufacturer:
   grantedReadTypes: ['steps'], // of healthConnectReadTypes, what the user allowed
   canWriteSteps: true,         // WRITE_STEPS: enough to mirror this device
   grantedWriteTypes: ['steps'],
-  stepsGranted: true,          // steps allowed for all config turns on (2.2)
+  stepsGranted: true,          // READ_STEPS - or WRITE_STEPS for a mirror-only app (2.2)
   backgroundReadGranted: false,
   historyReadGranted: false,
   grantedPermissions: [],
@@ -894,8 +902,9 @@ provider if it is missing, otherwise request permissions, otherwise fall back to
 the settings screen once the sheet has stopped appearing. Wire it to a single
 button and re-read the status when the app is next foregrounded.
 
-It is done once steps are allowed (`stepsGranted`), whatever the user did
-with distance and calories (2.2): it does not show the sheet again for them,
+It is done once steps are allowed (`stepsGranted`: `READ_STEPS`, or
+`WRITE_STEPS` for an app with reads off), whatever the user did with writing,
+distance and calories (2.2, writing from 2.2.1): it does not show the sheet again for them,
 and never sends the user to settings over them. Ask for those with
 `requestHealthConnectPermissions()`.
 
@@ -1151,8 +1160,12 @@ Every app that published steps over the range, with what each contributed.
     },
   ],
   hasWearable: true,
+  healthConnect: 'read',    // | 'not_consulted' | 'timed_out' | 'failed' (2.2.1)
 }
 ```
+
+An empty `sources` under `healthConnect: 'timed_out'` or `'failed'` is not
+"no other apps": call again. `useHealthConnect` keeps its last list then.
 
 `lateWrittenSteps` counts steps from records the writing app last modified
 more than a day after they ended — a history pushed into Health Connect after
@@ -1526,7 +1539,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
 | `healthConnectReadActiveCalories` | `false` | also read active calories per source (`StepSource.activeCalories`); one more permission to declare |
-| `healthConnectReadTypes` | `['steps', 'distance', 'totalCalories']` | which record types reads cover, each one read permission to declare; `'steps'` is required. `['steps']` asks for `READ_STEPS` alone, and a day answered from Health Connect then derives distance and calories from the step count. See [PERMISSIONS.md](PERMISSIONS.md) |
+| `healthConnectReadTypes` | `['steps', 'distance', 'totalCalories']` | which record types reads cover, each one read permission to declare; `'steps'` is required. `['steps']` asks for `READ_STEPS` alone, and a day answered from Health Connect then derives distance and calories from the step count. Left at the default, a type the manifest does not declare is simply not read; a type you list yourself must be declared, or requests reject with `E_HEALTH_CONNECT_NOT_DECLARED`. See [PERMISSIONS.md](PERMISSIONS.md) |
 | `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |

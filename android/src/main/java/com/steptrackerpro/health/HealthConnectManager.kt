@@ -19,6 +19,7 @@ import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.records.metadata.Device
 import androidx.health.connect.client.records.metadata.Metadata
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
+import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ChangesTokenRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
@@ -285,6 +286,10 @@ class HealthConnectManager(
         val readTypes: Set<ReadType> = ReadType.ALL,
         /** Which types [write] covers. Steps always. */
         val writeTypes: Set<ReadType> = ReadType.ALL,
+        /** The app named [readTypes] itself: [forManifest] keeps every one of them. */
+        val readTypesExplicit: Boolean = false,
+        /** The app turned [write] on itself: [forManifest] keeps it. */
+        val writeExplicit: Boolean = false,
         /**
          * Permissions config would ask for that [forManifest] left out
          * because the manifest does not declare them. Reported in
@@ -308,15 +313,18 @@ class HealthConnectManager(
             }
 
         /**
-         * What steps need: `READ_STEPS` with reads on, `WRITE_STEPS` with
-         * writes on. Distance and calories are extras on top - a user who
-         * unticked them on the sheet has not refused Health Connect, and is
-         * neither counted as refusing nor asked again unprompted.
+         * What Health Connect needs to be on at all: `READ_STEPS` when reads
+         * are on - reading a watch is what the app gets out of it - and
+         * `WRITE_STEPS` only for an app that does nothing but mirror. Writing,
+         * distance and calories are extras on top: a user who unticked them
+         * on the sheet has not refused Health Connect, and is neither counted
+         * as refusing nor asked again unprompted.
          */
         val essential: Set<String>
-            get() = buildSet {
-                if (read) add(ReadType.STEPS.permission)
-                if (write) add(ReadType.STEPS.writePermission)
+            get() = when {
+                read -> setOf(ReadType.STEPS.permission)
+                write -> setOf(ReadType.STEPS.writePermission)
+                else -> emptySet()
             }
 
         /** [essential] is non-empty and every part of it is in [granted]. */
@@ -325,20 +333,21 @@ class HealthConnectManager(
 
         /**
          * This scope, fitted to what the app's manifest [declared]. What the
-         * package can do without is left out when undeclared rather than
-         * failing the request: the write set (writes are on by default, and
-         * an app that declares no `WRITE_STEPS` does not want them), and
-         * distance and calories among reads and writes. `READ_STEPS` with
-         * reads on, and every explicit opt-in - background reads, history,
-         * active calories - stay, so leaving those out of the manifest is
-         * still reported as the mistake it is.
+         * package uses only by default is left out when undeclared rather
+         * than failing the request: the write set (writes are on by default,
+         * and an app that declares no `WRITE_STEPS` does not want them), and
+         * distance and calories among the default read types and among
+         * writes. What the app asked for itself stays, so leaving it out of
+         * the manifest is still reported as the mistake it is: `READ_STEPS`
+         * with reads on, read types it named, writes it turned on, and every
+         * opt-in - background reads, history, active calories.
          */
         fun forManifest(declared: Set<String>): PermissionScope {
-            val writes = write && ReadType.STEPS.writePermission in declared
+            val writes = write && (writeExplicit || ReadType.STEPS.writePermission in declared)
             val fitted = copy(
                 write = writes,
                 readTypes = readTypes.filterTo(LinkedHashSet()) {
-                    it == ReadType.STEPS || it.permission in declared
+                    readTypesExplicit || it == ReadType.STEPS || it.permission in declared
                 },
                 writeTypes = if (writes) {
                     writeTypes.filterTo(LinkedHashSet()) {
@@ -527,8 +536,15 @@ class HealthConnectManager(
         // on the day it began rather than being split across both. Step records
         // are written in minutes-long slices by every source seen in practice,
         // so the error is bounded by one such slice per day.
-        readAll(hc, StepsRecord::class.java, start, end) { record ->
+        //
+        // Newest first: when a busy window - a watch and Health Connect's own
+        // count each writing a record a minute - outruns the page cap, the
+        // days lost are the oldest, not today. Whatever the read did not
+        // reach is answered from the aggregate API below.
+        var oldestRead = Long.MAX_VALUE
+        val stepsOutcome = readAll(hc, StepsRecord::class.java, start, end, newestFirst = true) { record ->
             val recordStart = record.startTime.toEpochMilli()
+            if (recordStart < oldestRead) oldestRead = recordStart
             val recordEnd = record.endTime.toEpochMilli()
             val date = DateKeys.of(recordStart)
             val pkg = record.metadata.dataOrigin.packageName
@@ -620,11 +636,91 @@ class HealthConnectManager(
             }
         }
 
-        return buckets.mapValues { (date, byPackage) ->
+        val read = buckets.mapValues { (date, byPackage) ->
             byPackage.values
                 .map { it.toStepSource(self, withCoverage = date == coverageDate) }
                 .sortedByDescending { it.steps }
         }
+        val incomplete = incompleteThrough(
+            stepsOutcome, oldestRead.takeIf { it != Long.MAX_VALUE }?.let { DateKeys.of(it) }, DateKeys.of(end.toEpochMilli())
+        ) ?: return read
+
+        // The day the read stopped in, and every day before it, are answered
+        // per origin from the aggregate API: exact totals without the
+        // per-record detail. Origins come from the part that was read and
+        // from the aggregate itself, so one that only wrote in the gap is
+        // still found.
+        val gapEnd = minOf(end, DateKeys.endOfDayInstant(incomplete))
+        val kinds = HashMap<String, StepSourceKind>()
+        val names = HashMap<String, String>()
+        read.values.flatten().forEach { source ->
+            if (kinds[source.packageName] == null || source.kind.isWearable) kinds[source.packageName] = source.kind
+            names[source.packageName] = source.appName
+        }
+        originsWithSteps(hc, start, gapEnd).forEach { pkg ->
+            kinds.getOrPut(pkg) { StepSourceCatalog.classify(pkg, null, self) }
+        }
+        val filled = aggregateBySource(start, gapEnd, kinds, names)
+        return read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete }
+    }
+
+    /**
+     * Every origin that wrote steps between two instants, from the aggregate
+     * API's list of contributors. Empty when it cannot be read.
+     */
+    private suspend fun originsWithSteps(hc: HealthConnectClient, start: Instant, end: Instant): Set<String> =
+        try {
+            hc.aggregate(
+                AggregateRequest(
+                    metrics = setOf(StepsRecord.COUNT_TOTAL),
+                    timeRangeFilter = TimeRangeFilter.between(start, end)
+                )
+            ).dataOrigins.mapTo(HashSet()) { it.packageName }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            emptySet()
+        }
+
+    /**
+     * Each of [kinds]' origins' daily totals from the aggregate API, as
+     * sources without per-record detail: no recording-method split, no hourly
+     * profile, no late-write share - the -1 and null every aggregate-answered
+     * day carries.
+     */
+    private suspend fun aggregateBySource(
+        start: Instant,
+        end: Instant,
+        kinds: Map<String, StepSourceKind>,
+        names: Map<String, String>
+    ): Map<String, List<StepSource>> {
+        val self = context.packageName
+        // readDailySteps asks for distance only when it is granted.
+        val distanceRead = ReadType.DISTANCE in grantedReadTypes()
+        val out = HashMap<String, ArrayList<StepSource>>()
+        for ((pkg, kind) in kinds) {
+            for (day in readDailySteps(start, end, setOf(pkg))) {
+                if (day.steps <= 0) continue
+                out.getOrPut(day.date) { ArrayList() }.add(
+                    StepSource(
+                        packageName = pkg,
+                        appName = names[pkg] ?: StepSourceCatalog.appName(pkg),
+                        kind = kind,
+                        steps = day.steps,
+                        distance = day.distance,
+                        calories = day.calories,
+                        lastRecordAt = minOf(
+                            DateKeys.endOfDayMillis(day.date), System.currentTimeMillis()
+                        ),
+                        isSelf = pkg == self,
+                        distanceSource = DistanceSource.of(
+                            read = distanceRead, seen = day.distance > 0.0, isSelf = pkg == self
+                        )
+                    )
+                )
+            }
+        }
+        return out.mapValues { (_, list) -> list.sortedByDescending { it.steps } }
     }
 
     /**
@@ -659,36 +755,11 @@ class HealthConnectManager(
         }
         if (kinds.isEmpty()) return emptyMap()
 
-        // readDailySteps asks for distance only when it is granted.
-        val distanceRead = ReadType.DISTANCE in grantedReadTypes()
-        val out = HashMap<String, ArrayList<StepSource>>()
-        for ((pkg, kind) in kinds) {
-            val perDay = readDailySteps(start, end, setOf(pkg))
-            for (day in perDay) {
-                if (day.steps <= 0) continue
-                out.getOrPut(day.date) { ArrayList() }.add(
-                    StepSource(
-                        packageName = pkg,
-                        appName = names[pkg] ?: StepSourceCatalog.appName(pkg),
-                        kind = kind,
-                        steps = day.steps,
-                        distance = day.distance,
-                        calories = day.calories,
-                        lastRecordAt = minOf(
-                            DateKeys.endOfDayMillis(day.date), System.currentTimeMillis()
-                        ),
-                        isSelf = pkg == self,
-                        distanceSource = DistanceSource.of(
-                            read = distanceRead, seen = day.distance > 0.0, isSelf = pkg == self
-                        )
-                    )
-                )
-            }
-        }
+        val out = HashMap<String, List<StepSource>>(aggregateBySource(start, end, kinds, names))
         // The recent window's raw numbers are exact and carry real timestamps;
         // let them override the aggregate for the days they cover.
-        recent.forEach { (date, sources) -> out[date] = ArrayList(sources) }
-        return out.mapValues { (_, list) -> list.sortedByDescending { it.steps } }
+        recent.forEach { (date, sources) -> out[date] = sources }
+        return out
     }
 
     /** Flattened view of [readDailyStepsBySource] over the whole range. */
@@ -894,7 +965,7 @@ class HealthConnectManager(
      * per minute.
      */
     /** How a paged read ended. */
-    private enum class ReadOutcome {
+    enum class ReadOutcome {
         /** Every page was read. */
         COMPLETE,
 
@@ -911,21 +982,28 @@ class HealthConnectManager(
         type: Class<T>,
         start: Instant,
         end: Instant,
+        newestFirst: Boolean = false,
         onRecord: (T) -> Unit
     ): ReadOutcome {
         var token: String? = null
         var pages = 0
         do {
-            val response = runCatching {
+            val response = try {
                 hc.readRecords(
                     ReadRecordsRequest(
                         recordType = type.kotlin,
                         timeRangeFilter = TimeRangeFilter.between(start, end),
+                        ascendingOrder = !newestFirst,
                         pageSize = PAGE_SIZE,
                         pageToken = token
                     )
                 )
-            }.getOrNull() ?: return ReadOutcome.FAILED
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                // A caller's timeout: stop, rather than carry on as a failed read.
+                throw cancelled
+            } catch (_: Exception) {
+                return ReadOutcome.FAILED
+            }
             response.records.forEach(onRecord)
             token = response.pageToken
             pages++
@@ -1175,6 +1253,19 @@ class HealthConnectManager(
             Device.TYPE_SMART_DISPLAY -> "smart_display"
             else -> "unknown"
         }
+
+        /**
+         * The last day a newest-first read did not fully cover, or null when
+         * it covered all of it. Records arrive newest first, so every day
+         * after the oldest record read is whole; that day itself may be cut
+         * part way, and every day before it was not reached. A read that got
+         * nothing at all before failing covered nothing, up to [lastDay].
+         */
+        fun incompleteThrough(outcome: ReadOutcome, oldestReadDay: String?, lastDay: String): String? =
+            when (outcome) {
+                ReadOutcome.COMPLETE -> null
+                else -> oldestReadDay ?: lastDay
+            }
 
         /**
          * What a set of grants lets this package do. Pure, so the partial

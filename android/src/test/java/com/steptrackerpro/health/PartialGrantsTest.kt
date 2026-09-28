@@ -103,6 +103,22 @@ class PartialGrantsTest {
     }
 
     @Test
+    fun `reading steps is enough - refusing to write them is not a refusal`() {
+        // Reads and writes both on: the user allowed reading steps and
+        // unticked writing them. Health Connect is on for this app.
+        assertEquals(setOf(readSteps), scope.essential)
+        assertTrue(scope.stepsGranted(setOf(readSteps)))
+    }
+
+    @Test
+    fun `an app that only mirrors needs WRITE_STEPS`() {
+        val mirrorOnly = HealthConnectManager.PermissionScope(read = false)
+        assertEquals(setOf(writeSteps), mirrorOnly.essential)
+        assertTrue(mirrorOnly.stepsGranted(setOf(writeSteps)))
+        assertFalse(mirrorOnly.stepsGranted(setOf(readSteps)))
+    }
+
+    @Test
     fun `steps are judged only for what config turns on`() {
         val readOnly = HealthConnectManager.PermissionScope(write = false)
         assertEquals(setOf(readSteps), readOnly.essential)
@@ -137,6 +153,55 @@ class PartialGrantsTest {
         assertTrue(HealthConnectManager.READ_ACTIVE_CALORIES in fitted.requested)
         HealthConnectManager.PERMISSION_HISTORY_READ?.let { assertTrue(it in fitted.requested) }
         assertFalse(fitted.write)
+    }
+
+    @Test
+    fun `read types the app named itself are kept, so a missing one is reported`() {
+        val named = HealthConnectManager.PermissionScope(
+            write = false,
+            readTypes = setOf(ReadType.STEPS, ReadType.DISTANCE),
+            readTypesExplicit = true
+        ).forManifest(setOf(readSteps))
+        assertEquals(setOf(ReadType.STEPS, ReadType.DISTANCE), named.readTypes)
+        assertTrue(readDistance in named.requested)
+        assertTrue(named.dropped.isEmpty())
+    }
+
+    @Test
+    fun `writes the app turned on itself are kept, so a missing WRITE_STEPS is reported`() {
+        val fitted = HealthConnectManager.PermissionScope(writeExplicit = true).forManifest(setOf(readSteps))
+        assertTrue(fitted.write)
+        assertTrue(writeSteps in fitted.requested)
+        // Distance and calorie writes stay optional: they are never configured.
+        assertFalse(writeDistance in fitted.requested)
+    }
+
+    // ---- an incomplete steps read ----------------------------------------
+
+    @Test
+    fun `a complete read leaves nothing to fill`() {
+        assertEquals(null, HealthConnectManager.incompleteThrough(HealthConnectManager.ReadOutcome.COMPLETE, "2026-09-10", "2026-09-28"))
+    }
+
+    @Test
+    fun `a cut read fills the day it stopped in and everything older`() {
+        // Newest first: days after the oldest record read are whole.
+        assertEquals(
+            "2026-09-10",
+            HealthConnectManager.incompleteThrough(HealthConnectManager.ReadOutcome.TRUNCATED, "2026-09-10", "2026-09-28")
+        )
+        assertEquals(
+            "2026-09-10",
+            HealthConnectManager.incompleteThrough(HealthConnectManager.ReadOutcome.FAILED, "2026-09-10", "2026-09-28")
+        )
+    }
+
+    @Test
+    fun `a read that got nothing fills the whole window`() {
+        assertEquals(
+            "2026-09-28",
+            HealthConnectManager.incompleteThrough(HealthConnectManager.ReadOutcome.FAILED, null, "2026-09-28")
+        )
     }
 
     @Test

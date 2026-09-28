@@ -72,6 +72,15 @@ data class StepTrackerConfig(
      * declares - one read permission instead of three.
      */
     val healthConnectReadTypes: List<String> = DEFAULT_READ_TYPES,
+    /**
+     * The app set [healthConnectReadTypes] itself, rather than leaving the
+     * default. A type it named is one it wants, so leaving its permission
+     * out of the manifest is a mistake to report; a default type the
+     * manifest leaves out is simply not read.
+     */
+    val healthConnectReadTypesExplicit: Boolean = false,
+    /** The app set [healthConnectWriteEnabled] itself - see [healthConnectReadTypesExplicit]. */
+    val healthConnectWriteExplicit: Boolean = false,
     /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
@@ -302,6 +311,8 @@ data class StepTrackerConfig(
         put("healthConnectIgnoreManualEntries", healthConnectIgnoreManualEntries)
         put("healthConnectReadActiveCalories", healthConnectReadActiveCalories)
         put("healthConnectReadTypes", JSONArray(healthConnectReadTypes))
+        put("healthConnectReadTypesExplicit", healthConnectReadTypesExplicit)
+        put("healthConnectWriteExplicit", healthConnectWriteExplicit)
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
         put("wearableTrust", wearableTrust)
@@ -412,6 +423,10 @@ data class StepTrackerConfig(
                 wearableTrust = json.optString("wearableTrust", fallback.wearableTrust),
                 wearableAllowlist = allowlist,
                 healthConnectReadTypes = readTypes,
+                // Absent before 2.2.1: read as defaults until the app's next
+                // initialize() passes the key again.
+                healthConnectReadTypesExplicit = json.optBoolean("healthConnectReadTypesExplicit", false),
+                healthConnectWriteExplicit = json.optBoolean("healthConnectWriteExplicit", false),
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,

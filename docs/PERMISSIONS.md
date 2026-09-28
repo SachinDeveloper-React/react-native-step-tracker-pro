@@ -104,16 +104,21 @@ eligible Play use case for the direct dialog:
 
 ### When an entry is missing
 
-- **What the package can do without is simply not asked for** (2.2). Writes
-  are on by default, but an app that declares no `WRITE_STEPS` is not asked
-  to write; an undeclared `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` or
-  distance or calorie write is left off the request, and the value is
-  derived. `writeRequired` in the status then reads `false`.
-- **`READ_STEPS` with reads on, and the explicit opt-ins** -
+- **What the package uses only by default is simply not asked for** (2.2).
+  Writes are on by default, but an app that declares no `WRITE_STEPS` - and
+  never set `healthConnectWriteEnabled` itself - is not asked to write; with
+  `healthConnectReadTypes` left at its default, an undeclared `READ_DISTANCE`
+  or `READ_TOTAL_CALORIES_BURNED` is left off the request, as is an
+  undeclared distance or calorie write, and the value is derived.
+  `writeRequired` in the status then reads `false`.
+- **What the app asked for itself must be declared.** `READ_STEPS` with reads
+  on, every type in a `healthConnectReadTypes` you set, `WRITE_STEPS` when you
+  set `healthConnectWriteEnabled: true`, and the opt-ins -
   `healthConnectBackgroundRead`, `healthConnectHistoryRead`,
-  `healthConnectReadActiveCalories` - still make
+  `healthConnectReadActiveCalories` - make
   `requestHealthConnectPermissions()` and `enableHealthConnect()` reject with
-  `E_HEALTH_CONNECT_NOT_DECLARED`, naming them. Health Connect itself would
+  `E_HEALTH_CONNECT_NOT_DECLARED`, naming them (2.2.1; 2.2.0 skipped listed
+  types and explicit writes quietly). Health Connect itself would
   silently leave an undeclared permission off its sheet, which looks exactly
   like the user refusing.
 - `getHealthConnectStatus().undeclaredPermissions` lists everything config
@@ -272,7 +277,9 @@ config turns reads or writes on - `canRead` against the types in
 
 **The user can untick any one permission** on the sheet. From 2.2 that is not
 counted as a refusal, and `enableHealthConnect()` stops asking once steps are
-allowed - `stepsGranted` in the status. Ask for distance with
+allowed - `stepsGranted` in the status: reading steps, or for an app that
+only mirrors, writing them. From 2.2.1 refusing to let the app write is not a
+refusal either, as long as it can read steps. Ask for distance with
 `requestHealthConnectPermissions()` when the app wants it; after two refusals
 of it Health Connect stops showing it, and the call comes back with it still
 missing - send the user to `openHealthConnectSettings()` then. From 2.1.1 steps

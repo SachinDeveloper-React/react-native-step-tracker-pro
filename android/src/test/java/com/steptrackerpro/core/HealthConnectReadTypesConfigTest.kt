@@ -29,6 +29,29 @@ class HealthConnectReadTypesConfigTest {
     }
 
     @Test
+    fun `whether the app set read types and writes itself survives the stored JSON`() {
+        val config = StepTrackerConfig(
+            healthConnectReadTypes = listOf("steps", "distance"),
+            healthConnectReadTypesExplicit = true,
+            healthConnectWriteExplicit = true
+        ).sanitised()
+        val restored = StepTrackerConfig.fromJson(JSONObject(config.toJson().toString())).sanitised()
+        assertEquals(true, restored.healthConnectReadTypesExplicit)
+        assertEquals(true, restored.healthConnectWriteExplicit)
+    }
+
+    @Test
+    fun `config stored before 2_2_1 reads as defaults`() {
+        val stored = StepTrackerConfig().toJson().apply {
+            remove("healthConnectReadTypesExplicit")
+            remove("healthConnectWriteExplicit")
+        }
+        val restored = StepTrackerConfig.fromJson(stored)
+        assertEquals(false, restored.healthConnectReadTypesExplicit)
+        assertEquals(false, restored.healthConnectWriteExplicit)
+    }
+
+    @Test
     fun `sanitising adds steps, drops unknown names and orders the rest`() {
         val config = StepTrackerConfig(
             healthConnectReadTypes = listOf("totalCalories", "heartRate", "totalCalories")

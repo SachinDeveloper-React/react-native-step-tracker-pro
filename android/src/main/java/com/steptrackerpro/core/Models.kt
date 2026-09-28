@@ -91,5 +91,28 @@ data class RangeStats(
     val bestDay: DayTotals?,
     val days: List<DayTotals>,
     val goal: Int?,
-    val goalProgress: Double?
+    val goalProgress: Double?,
+    /**
+     * Whether other apps' steps went into these days - one of
+     * [HealthConnectRead]. Null on the stored-only stats nothing resolved.
+     */
+    val healthConnect: String? = null
 )
+
+/**
+ * How a multi-day read of Health Connect went, so a range that fell back to
+ * this device's count says so instead of looking like a range with no watch.
+ */
+object HealthConnectRead {
+    /** Read; the days carry whatever other apps wrote. */
+    const val READ = "read"
+
+    /** Not asked: no provider, no grant for steps, or the `device` policy. */
+    const val NOT_CONSULTED = "not_consulted"
+
+    /** The read ran out of time; the days are this device's own. Call again. */
+    const val TIMED_OUT = "timed_out"
+
+    /** The read failed; the days are this device's own. Call again. */
+    const val FAILED = "failed"
+}

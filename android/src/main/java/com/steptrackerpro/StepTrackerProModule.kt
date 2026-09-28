@@ -991,12 +991,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getStepSources(startDate: String, endDate: String, promise: Promise) {
         launchSafely(promise) {
-            val sources = core.listSources(startDate, endDate)
+            val list = core.listSources(startDate, endDate)
+            val sources = list.sources
             promise.resolve(
                 Bridge.map(
                     mapOf(
                         "sources" to sources.map { it.toMap() },
-                        "hasWearable" to sources.any { !it.isSelf && it.isWearable }
+                        "hasWearable" to sources.any { !it.isSelf && it.isWearable },
+                        "healthConnect" to list.healthConnect
                     )
                 )
             )
@@ -1179,6 +1181,11 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             healthConnectWriteEnabled = patch.optBoolean(
                 "healthConnectWriteEnabled", current.healthConnectWriteEnabled
             ),
+            // Set once the app passes the key; a patch without it changes nothing.
+            healthConnectWriteExplicit = current.healthConnectWriteExplicit ||
+                (patch.hasKey("healthConnectWriteEnabled") && !patch.isNull("healthConnectWriteEnabled")),
+            healthConnectReadTypesExplicit = current.healthConnectReadTypesExplicit ||
+                (patch.hasKey("healthConnectReadTypes") && !patch.isNull("healthConnectReadTypes")),
             healthConnectBackgroundRead = patch.optBoolean(
                 "healthConnectBackgroundRead", current.healthConnectBackgroundRead
             ),

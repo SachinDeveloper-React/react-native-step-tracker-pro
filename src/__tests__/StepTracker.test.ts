@@ -1085,6 +1085,34 @@ describe('useHealthConnect()', () => {
     expect(result.sources).toEqual([]);
   });
 
+  it('keeps the last sources when a read times out', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, canReadSteps: true });
+    let result: UseHealthConnectResult | undefined;
+    function Probe() {
+      result = useHealthConnect({ refreshOnForeground: false });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe));
+    });
+    expect(result!.sources).toEqual([watch]);
+
+    // The next read runs out of time: not "the watch is gone".
+    native.when('getStepSources', {
+      sources: [],
+      hasWearable: false,
+      healthConnect: 'timed_out',
+    });
+    await TestRenderer.act(async () => {
+      await result!.refresh();
+    });
+    expect(native.calledWith('getStepSources')).toHaveLength(2);
+    expect(result!.sources).toEqual([watch]);
+    expect(result!.hasWearable).toBe(true);
+    await TestRenderer.act(async () => renderer!.unmount());
+  });
+
   it('falls back to canRead against a native side older than 2.1.1', async () => {
     native.when('getHealthConnectStatus', { ...baseStatus, canRead: true });
     await render();

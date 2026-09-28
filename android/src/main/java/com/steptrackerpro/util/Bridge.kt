@@ -121,6 +121,7 @@ object Bridge {
         putArray("days", days(stats.days))
         stats.goal?.let { putInt("goal", it) }
         stats.goalProgress?.let { putDouble("goalProgress", round(it, 4)) }
+        stats.healthConnect?.let { putString("healthConnect", it) }
     }
 
     fun map(values: Map<String, Any?>): WritableMap = Arguments.createMap().apply {

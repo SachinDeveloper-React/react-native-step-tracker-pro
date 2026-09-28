@@ -5,7 +5,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-09-28
+
+Fixes from a review of 2.2.0.
+
+### Fixed
+
+- **An incomplete steps read no longer drops the newest days.** A per-source
+  read over a range - monthly stats, the sources list - read oldest first and
+  stopped at its cap of 60,000 records, which a watch and Health Connect's
+  own count writing a record a minute reach in about three weeks: the most
+  recent days, today included, lost the watch and showed the phone's count.
+  Steps are now read newest first, and the day the read stopped in and every
+  day before it are answered from each app's daily totals through the
+  aggregate API. On an emulator with 92,160 records over 32 days, 2.2.0
+  returned exactly 60,000 steps for a 31-day window; 2.2.1 returns them all.
+- **A range read that runs out of time says so.** Range stats and the
+  sources list gave up after 4 seconds and fell back to this device without
+  a word. They now allow 15, and `RangeStats.healthConnect` and
+  `StepSourceList.healthConnect` report `'read'`, `'not_consulted'`,
+  `'timed_out'` or `'failed'`; `useHealthConnect` keeps its last sources on a
+  read that did not finish.
+- **Read types and writes the app set itself must be declared again.** 2.2.0
+  skipped any undeclared optional permission quietly, including a
+  `healthConnectReadTypes` entry the app listed and writes it turned on
+  itself - a mistake that should show at once. Only the defaults are skipped
+  now; what the app sets itself rejects with `E_HEALTH_CONNECT_NOT_DECLARED`,
+  as before 2.2.
+- **Refusing to let the app write is not a refusal.** With reads on,
+  `stepsGranted` needed `WRITE_STEPS` too, so a user who allowed reading and
+  unticked writing was counted as refusing and asked again. Reading steps is
+  enough now; `WRITE_STEPS` counts only for an app with reads off.
+
 ## [2.2.0] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 Fixes from a review of 2.1.1, and the additions they needed.
 
@@ -1034,6 +1068,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.2.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.1
 [2.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.0
 [2.1.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.1
 [2.1.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.0

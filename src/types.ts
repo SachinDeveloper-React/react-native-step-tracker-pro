@@ -914,6 +914,13 @@ export interface RangeStats {
   /** Present for weekly/monthly windows when a goal is configured. */
   goal?: number;
   goalProgress?: number;
+  /**
+   * Whether other apps' steps went into these days; see
+   * {@link HealthConnectRead}. Under `'timed_out'` or `'failed'` the days are
+   * this device's own count, not a range without a watch - call again.
+   * From 2.2.1.
+   */
+  healthConnect?: HealthConnectRead;
 }
 
 /**
@@ -1334,7 +1341,24 @@ export interface StepSourceList {
   sources: StepSource[];
   /** At least one wearable other than this device published steps. */
   hasWearable: boolean;
+  /**
+   * How the read went; see {@link HealthConnectRead}. An empty list under
+   * `'timed_out'` or `'failed'` is not "no other apps" - call again. From
+   * 2.2.1; optional in the type for objects built by hand.
+   */
+  healthConnect?: HealthConnectRead;
 }
+
+/**
+ * How a multi-day read of Health Connect went:
+ *
+ * - `'read'`: other apps' steps are in the result.
+ * - `'not_consulted'`: not asked - no provider, no grant for steps, or the
+ *   `'device'` policy.
+ * - `'timed_out'` / `'failed'`: the read did not finish; the result is this
+ *   device's own count. Call again.
+ */
+export type HealthConnectRead = 'read' | 'not_consulted' | 'timed_out' | 'failed';
 
 /** A wearable companion app found installed on this phone. */
 export interface CompanionApp {

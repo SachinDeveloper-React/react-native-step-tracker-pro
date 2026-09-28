@@ -177,7 +177,9 @@ class StepTrackerCore private constructor(context: Context) {
             backgroundRead = backgroundRead ?: config.healthConnectBackgroundRead,
             historyRead = historyRead ?: config.healthConnectHistoryRead,
             activeCalories = config.healthConnectReadActiveCalories,
-            readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes)
+            readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes),
+            readTypesExplicit = config.healthConnectReadTypesExplicit,
+            writeExplicit = config.healthConnectWriteExplicit
         ).forManifest(com.steptrackerpro.util.PermissionHelper.declaredPermissions(appContext))
     }
 
@@ -904,7 +906,10 @@ class StepTrackerCore private constructor(context: Context) {
         if (!shouldConsultHealthConnect()) {
             // Same rule as resolveDay(): today's baseline still applies.
             val baseline = if (sourcePolicy() == StepSourcePolicy.AUTO) storedBaseline() else null
-            if (baseline == null) return if (base === stored) stored else recomputeStats(base, base.days, goal)
+            if (baseline == null) {
+                return (if (base === stored) stored else recomputeStats(base, base.days, goal))
+                    .copy(healthConnect = HealthConnectRead.NOT_CONSULTED)
+            }
             val today = DateKeys.today()
             val days = base.days.map { day ->
                 if (day.date != today) return@map day
@@ -913,18 +918,31 @@ class StepTrackerCore private constructor(context: Context) {
                 )
                 StepContinuity.apply(raw, baseline, metrics).totals.copy(suspectSteps = day.suspectSteps)
             }
-            return recomputeStats(base, days, goal)
+            return recomputeStats(base, days, goal).copy(healthConnect = HealthConnectRead.NOT_CONSULTED)
         }
 
-        val byDate = runCatching {
-            withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
+        // A month of a busy watch is tens of thousands of records, so a range
+        // gets longer than a single day's read. Running out of time is said,
+        // not passed off as a range with no watch in it; the next call reads
+        // again.
+        var read = HealthConnectRead.READ
+        val byDate = try {
+            withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
                 healthConnect.readDailyStepsBySource(
                     DateKeys.startOfDayInstant(start),
                     minOf(DateKeys.endOfDayInstant(end), Instant.now()),
                     coverageStartForToday()
                 )
+            } ?: run {
+                read = HealthConnectRead.TIMED_OUT
+                emptyMap()
             }
-        }.getOrNull() ?: emptyMap()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            read = HealthConnectRead.FAILED
+            emptyMap()
+        }
 
         val policy = sourcePolicy()
         val preferred = preferredSourcePackage()
@@ -949,7 +967,7 @@ class StepTrackerCore private constructor(context: Context) {
             }
             if (totals.suspectSteps == day.suspectSteps) totals else totals.copy(suspectSteps = day.suspectSteps)
         }
-        return recomputeStats(base, resolved, goal)
+        return recomputeStats(base, resolved, goal).copy(healthConnect = read)
     }
 
     /**
@@ -993,23 +1011,31 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     /** Every Health Connect origin contributing to a range, this device included. */
-    suspend fun listSources(start: String, end: String): List<StepSource> {
+    suspend fun listSources(start: String, end: String): SourceList {
         val config = config()
-        if (config.healthConnectEnabled && config.healthConnectReadEnabled &&
-            healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
-            healthConnect.canReadSteps()
+        if (!(config.healthConnectEnabled && config.healthConnectReadEnabled &&
+                healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
+                healthConnect.canReadSteps())
         ) {
-            return runCatching {
-                withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
-                    healthConnect.listSources(
-                        DateKeys.startOfDayInstant(start),
-                        minOf(DateKeys.endOfDayInstant(end), Instant.now())
-                    )
-                }
-            }.getOrNull()?.let { stampTrust(it) } ?: emptyList()
+            return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         }
-        return emptyList()
+        return try {
+            withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
+                healthConnect.listSources(
+                    DateKeys.startOfDayInstant(start),
+                    minOf(DateKeys.endOfDayInstant(end), Instant.now())
+                )
+            }?.let { SourceList(stampTrust(it), HealthConnectRead.READ) }
+                ?: SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            SourceList(emptyList(), HealthConnectRead.FAILED)
+        }
     }
+
+    /** [listSources]' answer: the sources, and how the read went - one of [HealthConnectRead]. */
+    data class SourceList(val sources: List<StepSource>, val healthConnect: String)
 
     /**
      * Resolution from data already in the cache, with no Health Connect call.
@@ -1295,6 +1321,12 @@ class StepTrackerCore private constructor(context: Context) {
          * phone's own count is the answer, and the read is retried next time.
          */
         const val HC_READ_TIMEOUT_MS = 4_000L
+
+        /**
+         * A multi-day read - range stats, the sources list. Up to 35 days of
+         * raw records, and the aggregate fill for whatever those miss.
+         */
+        const val HC_RANGE_READ_TIMEOUT_MS = 15_000L
 
         /** A snapshot's raw records: up to 10,000 per type, so longer than a total's read. */
         const val HC_RECORDS_TIMEOUT_MS = 20_000L

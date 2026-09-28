@@ -120,8 +120,12 @@ export function useHealthConnect(
           daysAgo(windowDays.current),
           today()
         );
-        setSources(list.sources);
-        setHasWearable(list.hasWearable);
+        // A read that ran out of time or failed says nothing about the
+        // sources; keep the last list that was actually read.
+        if (list.healthConnect !== 'timed_out' && list.healthConnect !== 'failed') {
+          setSources(list.sources);
+          setHasWearable(list.hasWearable);
+        }
       }
       setCurrent(await StepTracker.getCurrentStepSource());
       setError(null);

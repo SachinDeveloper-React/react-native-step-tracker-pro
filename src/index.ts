@@ -32,6 +32,7 @@ export type {
   HealthConnectAvailability,
   HealthConnectChanges,
   HealthConnectDataType,
+  HealthConnectRead,
   HealthConnectDistanceRecord,
   HealthConnectReadType,
   HealthConnectRecord,
