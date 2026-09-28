@@ -5,7 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.2] - 2026-09-28
+
+### Fixed
+
+- **The per-day refill could still push a range past its timeout.** Its 8
+  seconds were counted from when it started, not against the range's 15:
+  after a slow first read the two together could run over, and the whole
+  range fell back to the phone's count. It now takes 8 seconds or what is
+  left of the range's time less 2 seconds for the aggregate fill, whichever
+  is less, and none at all when too little is left - the gap then comes
+  from aggregates straight away.
+- A stale doc comment on retention, left above the new one in 2.3.0.
+
 ## [2.3.1] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 Fixes from a review of 2.3.0.
 
@@ -1182,6 +1197,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.2]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.2
 [2.3.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.1
 [2.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.0
 [2.2.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.1

@@ -956,12 +956,14 @@ class StepTrackerCore private constructor(context: Context) {
         // not passed off as a range with no watch in it; the next call reads
         // again.
         var read = HealthConnectRead.READ
+        val deadline = System.currentTimeMillis() + HC_RANGE_READ_TIMEOUT_MS
         val byDate = try {
             withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
                 healthConnect.readDailyStepsBySource(
                     DateKeys.startOfDayInstant(start),
                     minOf(DateKeys.endOfDayInstant(end), Instant.now()),
-                    coverageStartForToday()
+                    coverageStartForToday(),
+                    deadline = deadline
                 )
             } ?: run {
                 read = HealthConnectRead.TIMED_OUT
@@ -1049,11 +1051,13 @@ class StepTrackerCore private constructor(context: Context) {
         ) {
             return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         }
+        val deadline = System.currentTimeMillis() + HC_RANGE_READ_TIMEOUT_MS
         return try {
             withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
                 healthConnect.listSources(
                     DateKeys.startOfDayInstant(start),
-                    minOf(DateKeys.endOfDayInstant(end), Instant.now())
+                    minOf(DateKeys.endOfDayInstant(end), Instant.now()),
+                    deadline
                 )
             }?.let { SourceList(stampTrust(it), HealthConnectRead.READ) }
                 ?: SourceList(emptyList(), HealthConnectRead.TIMED_OUT)

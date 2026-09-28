@@ -361,10 +361,11 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.1** — `useStepStats` no
-longer shows a stale window when loads overlap, the manual-exclusion refill
-cannot time out a whole range, raising the goal fires `goalReached` again, and
-days kept for upload keep their minute evidence. **2.3.0** fixed a crash when a
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.2** — the per-day refill
+takes only what is left of a range read's time, so it can no longer push the
+range past its timeout. **2.3.1** stopped `useStepStats` showing a stale
+window when loads overlapped, made raising the goal fire `goalReached` again,
+and kept minute evidence with days held back for upload. **2.3.0** fixed a crash when a
 command reached the service after stop, a snapshot-made key passing for an
 attested one, `stopTracking()` being undone by the next launch, retention
 deleting days never uploaded, and signed snapshots with an empty `sources`

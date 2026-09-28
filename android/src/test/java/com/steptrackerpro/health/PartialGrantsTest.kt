@@ -204,6 +204,25 @@ class PartialGrantsTest {
         )
     }
 
+    // ---- the per-day refill's share of the caller's time ------------------
+
+    @Test
+    fun `the refill gets eight seconds when the caller has plenty left`() {
+        assertEquals(8_000L, HealthConnectManager.perDayBudget(nowMs = 0L, deadline = 15_000L))
+        assertEquals(8_000L, HealthConnectManager.perDayBudget(nowMs = 0L, deadline = Long.MAX_VALUE))
+    }
+
+    @Test
+    fun `after a slow first read the refill gets only what is left, less the aggregate fill`() {
+        // The first read took 9 s of the range's 15: 6 s left, 2 s kept back.
+        assertEquals(4_000L, HealthConnectManager.perDayBudget(nowMs = 9_000L, deadline = 15_000L))
+    }
+
+    @Test
+    fun `with no time left there is no refill at all`() {
+        assertTrue(HealthConnectManager.perDayBudget(nowMs = 13_500L, deadline = 15_000L) <= 0L)
+    }
+
     @Test
     fun `a fully declared app is asked for everything, as before`() {
         val all = HealthConnectManager.READ_PERMISSIONS + HealthConnectManager.WRITE_PERMISSIONS

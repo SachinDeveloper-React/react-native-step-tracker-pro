@@ -525,7 +525,13 @@ class HealthConnectManager(
          */
         coverageStartMs: Long = 0L,
         /** False inside [perDay], so a gap is never filled a day at a time twice over. */
-        perDayFill: Boolean = true
+        perDayFill: Boolean = true,
+        /**
+         * Epoch ms by which the caller's own timeout ends the whole read. A
+         * per-day refill takes only what is left of it, so a slow first read
+         * cannot push the read as a whole past the caller's limit.
+         */
+        deadline: Long = Long.MAX_VALUE
     ): Map<String, List<StepSource>> {
         val hc = client() ?: return emptyMap()
         val self = context.packageName
@@ -539,7 +545,7 @@ class HealthConnectManager(
         // costs one query per origin per window rather than one page per
         // thousand records.
         val days = java.time.Duration.between(start, end).toDays()
-        if (days > RAW_READ_MAX_DAYS) return readDailyStepsBySourceAggregated(hc, start, end)
+        if (days > RAW_READ_MAX_DAYS) return readDailyStepsBySourceAggregated(hc, start, end, deadline)
 
         // date -> package -> accumulator
         val buckets = HashMap<String, HashMap<String, Accumulator>>()
@@ -691,8 +697,9 @@ class HealthConnectManager(
         // read again a day at a time instead - each day well inside the cap -
         // so a range agrees with the day view. Those per-day reads fall back
         // to aggregates themselves only for a day that alone outruns the cap.
-        val filled = if (needsRecordingMethods && perDayFill) {
-            val days = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs)
+        val budget = perDayBudget(System.currentTimeMillis(), deadline)
+        val filled = if (needsRecordingMethods && perDayFill && budget > 0) {
+            val days = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget)
             // A day the budget ran out on is answered from aggregates - it
             // loses the manual split, but the range keeps its other apps
             // rather than timing out as a whole.
@@ -710,7 +717,7 @@ class HealthConnectManager(
 
     /**
      * Each day from [first] to [last] read on its own - never filled a day at
-     * a time again - [PER_DAY_PARALLEL] at once, within [PER_DAY_BUDGET_MS].
+     * a time again - [PER_DAY_PARALLEL] at once, within [budgetMs].
      * A day with steps that was read comes back, even with no sources; a
      * day the budget did not reach is left out, for the caller to answer
      * some other way.
@@ -719,9 +726,10 @@ class HealthConnectManager(
         first: String,
         last: String,
         end: Instant,
-        coverageStartMs: Long
+        coverageStartMs: Long,
+        budgetMs: Long
     ): Map<String, List<StepSource>> = kotlinx.coroutines.coroutineScope {
-        val deadline = System.currentTimeMillis() + PER_DAY_BUDGET_MS
+        val deadline = System.currentTimeMillis() + budgetMs
         val permits = kotlinx.coroutines.sync.Semaphore(PER_DAY_PARALLEL)
         DateKeys.rangeOf(first, last).map { date ->
             async {
@@ -816,11 +824,12 @@ class HealthConnectManager(
     private suspend fun readDailyStepsBySourceAggregated(
         hc: HealthConnectClient,
         start: Instant,
-        end: Instant
+        end: Instant,
+        deadline: Long
     ): Map<String, List<StepSource>> {
         val self = context.packageName
         val discoveryStart = maxOf(start, end.minus(java.time.Duration.ofDays(RAW_READ_MAX_DAYS)))
-        val recent = readDailyStepsBySource(discoveryStart, end)
+        val recent = readDailyStepsBySource(discoveryStart, end, deadline = deadline)
         val kinds = HashMap<String, StepSourceKind>()
         val names = HashMap<String, String>()
         recent.values.flatten().forEach { source ->
@@ -838,10 +847,14 @@ class HealthConnectManager(
     }
 
     /** Flattened view of [readDailyStepsBySource] over the whole range. */
-    suspend fun listSources(start: Instant, end: Instant): List<StepSource> {
+    suspend fun listSources(
+        start: Instant,
+        end: Instant,
+        deadline: Long = Long.MAX_VALUE
+    ): List<StepSource> {
         val self = context.packageName
         val merged = HashMap<String, Accumulator>()
-        readDailyStepsBySource(start, end).values.flatten().forEach { source ->
+        readDailyStepsBySource(start, end, deadline = deadline).values.flatten().forEach { source ->
             val acc = merged.getOrPut(source.packageName) {
                 Accumulator(source.packageName, self)
             }
@@ -1317,12 +1330,24 @@ class HealthConnectManager(
         /** Days a per-day refill reads at once. */
         private const val PER_DAY_PARALLEL = 4
 
-        /**
-         * The share of a range read's time a per-day refill may take. Range
-         * reads get 15 s in all; the first read and the aggregate fill for
-         * whatever this does not reach need the rest.
-         */
+        /** The most a per-day refill may take, however much time is left. */
         private const val PER_DAY_BUDGET_MS = 8_000L
+
+        /** Kept back from a caller's deadline for the aggregate fill after a per-day refill. */
+        private const val PER_DAY_RESERVE_MS = 2_000L
+
+        /**
+         * A per-day refill's time: [PER_DAY_BUDGET_MS], or what is left before
+         * [deadline] once [PER_DAY_RESERVE_MS] is set aside, whichever is less.
+         * Zero or less means there is no time for one - the gap is answered
+         * from aggregates at once.
+         */
+        fun perDayBudget(nowMs: Long, deadline: Long): Long =
+            if (deadline == Long.MAX_VALUE) {
+                PER_DAY_BUDGET_MS
+            } else {
+                minOf(PER_DAY_BUDGET_MS, deadline - nowMs - PER_DAY_RESERVE_MS)
+            }
 
         /** Pages [changes] reads per call before handing back `hasMore`. */
         private const val MAX_CHANGE_PAGES = 20

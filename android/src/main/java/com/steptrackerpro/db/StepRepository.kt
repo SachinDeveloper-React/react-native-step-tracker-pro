@@ -170,15 +170,15 @@ class StepRepository(context: Context) {
         }
     }
 
-    /** Drops rows older than the retention window. Returns rows removed. */
     /**
-     * Deletes what is older than [retentionDays]. A day a sync target has not
-     * accepted yet is kept - with [keepUnsyncedRemote], one not uploaded;
-     * with [keepUnsyncedHealth], one not mirrored - so an endpoint that is
-     * down for longer than the retention window loses nothing. Kept days
-     * keep everything the upload sends with them: the recovered share, the
-     * integrity verdict, and the minutes and events its report is built from. Nothing is kept past [UNSYNCED_KEEP_DAYS]
-     * however it stands, so storage stays bounded.
+     * Deletes what is older than [retentionDays] and returns how many history
+     * rows went. A day a sync target has not accepted yet is kept - with
+     * [keepUnsyncedRemote], one not uploaded; with [keepUnsyncedHealth], one
+     * not mirrored - so an endpoint that is down for longer than the
+     * retention window loses nothing. Kept days keep everything the upload
+     * sends with them: the recovered share, the integrity verdict, and the
+     * minutes and events its report is built from. Nothing is kept past
+     * [UNSYNCED_KEEP_DAYS] however it stands, so storage stays bounded.
      */
     suspend fun prune(
         retentionDays: Int,
