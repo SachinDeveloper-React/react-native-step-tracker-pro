@@ -37,10 +37,21 @@ export const TurboModuleRegistry = {
   },
 };
 
+const appStateListeners = new Set<(state: string) => void>();
+
 export const AppState = {
-  addEventListener: () => ({ remove: () => {} }),
+  addEventListener: (_type: string, listener: (state: string) => void) => {
+    appStateListeners.add(listener);
+    return { remove: () => appStateListeners.delete(listener) };
+  },
   currentState: 'active',
 };
+
+/** Test hook: move the app to `state` and tell every AppState listener. */
+export function __setAppState(state: string) {
+  AppState.currentState = state;
+  appStateListeners.forEach((listener) => listener(state));
+}
 
 export type TurboModule = object;
 

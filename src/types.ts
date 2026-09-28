@@ -44,6 +44,13 @@ export interface StepTrackerConfig {
   notificationChannelName?: string;
   /** Show Pause/Resume actions on the notification. Default true. */
   notificationActions?: boolean;
+  /**
+   * How the notification shows on a locked screen. `'private'` (default)
+   * shows it but hides the count behind "Counting steps" when the user's
+   * lock-screen setting hides sensitive content - steps are health data.
+   * `'public'` shows the count always, as every release before 2.3 did.
+   */
+  notificationLockScreen?: 'private' | 'public';
   /** Minimum ms between notification redraws. Default 1000. */
   notificationThrottleMs?: number;
   /** Minimum ms between JS `stepsChanged` events. Default 500. */
@@ -482,6 +489,14 @@ export interface DeviceAttestation {
   securityLevel: 'strongbox' | 'tee' | 'software' | 'unknown';
   /** Epoch ms the key was generated. */
   createdAt: number;
+  /**
+   * What made the key: `'attestDevice'`, whose chain your server has, or
+   * `'sign'` - a signed snapshot before any `attestDevice()`, which no
+   * server has seen. Only an `'attestDevice'` key counts for
+   * `hasAttestationKey()`, signs uploads and satisfies signature auth.
+   * From 2.3; optional in the type for objects built by hand.
+   */
+  createdBy?: 'attestDevice' | 'sign';
 }
 
 /** Evidence `getVerificationSnapshot()` can add next to the totals. */
@@ -962,6 +977,12 @@ export interface VerificationSnapshot {
    * `manualSteps`, `recordingMethods` and `trustedWearable`.
    */
   sources: StepSource[];
+  /**
+   * Whether `sources` is what Health Connect holds, or empty because it was
+   * not asked, ran out of time or failed - never the same as "no other
+   * apps". Signed with the rest. From 2.3.
+   */
+  sourcesStatus?: HealthConnectRead;
   /** What the current policy resolved to, for comparison only. */
   resolved: ResolvedStepSource;
   capabilities: Pick<

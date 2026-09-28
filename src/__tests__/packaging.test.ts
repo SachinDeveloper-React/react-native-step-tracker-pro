@@ -6,6 +6,16 @@ const manifest = require('../../plugin/manifest') as {
     options?: object
   ) => { manifest: { 'uses-permission': Array<{ $: Record<string, string> }> } };
   minSdkFor: (current?: string) => string | null;
+  applyHealthActivities: (
+    manifest: { manifest: Record<string, unknown> },
+    options?: object
+  ) => {
+    manifest: {
+      $: Record<string, string>;
+      application: Array<Record<string, Array<{ $: Record<string, string> }>>>;
+    };
+  };
+  keepXml: (icon?: unknown) => string | null;
 };
 import * as mock from '../jestMock';
 import { StepTracker } from '../StepTracker';
@@ -72,6 +82,38 @@ describe('Expo config plugin', () => {
       names.filter((n) => n === 'android.permission.health.READ_STEPS')
     ).toHaveLength(1);
     expect(names).toHaveLength(6);
+  });
+
+  it('removes the Health Connect activities only when told Health Connect is off', () => {
+    const fresh = () => ({ manifest: { $: {}, application: [{ $: {} }] } });
+    // Left out, or on: untouched - Android 14 needs them to request anything.
+    expect(manifest.applyHealthActivities(fresh(), {})).toEqual(fresh());
+    expect(manifest.applyHealthActivities(fresh(), { healthConnect: true })).toEqual(
+      fresh()
+    );
+
+    const off = manifest.applyHealthActivities(fresh(), { healthConnect: false });
+    expect(off.manifest.$['xmlns:tools']).toBe('http://schemas.android.com/tools');
+    const app = off.manifest.application[0]!;
+    expect(app.activity).toEqual([
+      {
+        $: {
+          'android:name': 'com.steptrackerpro.health.HealthPrivacyPolicyActivity',
+          'tools:node': 'remove',
+        },
+      },
+    ]);
+    expect(app['activity-alias']![0]!.$['android:name']).toBe(
+      'com.steptrackerpro.health.ViewPermissionUsageActivity'
+    );
+  });
+
+  it('writes a keep rule for a custom notification icon', () => {
+    expect(manifest.keepXml(undefined)).toBeNull();
+    expect(manifest.keepXml('ic_stat_steps')).toContain(
+      'tools:keep="@drawable/ic_stat_steps"'
+    );
+    expect(() => manifest.keepXml('ic-stat')).toThrow(/drawable name/);
   });
 
   it('raises minSdkVersion to 26 and leaves a higher one alone', () => {

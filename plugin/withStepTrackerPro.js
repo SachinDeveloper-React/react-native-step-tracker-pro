@@ -6,7 +6,8 @@
  *       "healthConnect": { "read": true, "write": true, "backgroundRead": true },
  *       // or, for an app that reads steps alone:
  *       // "healthConnect": { "readTypes": ["steps"], "write": false },
- *       "batteryOptimizationPrompt": false
+ *       "batteryOptimizationPrompt": false,
+ *       "notificationIcon": "ic_stat_steps"
  *     }]
  *   ]
  *
@@ -15,7 +16,15 @@
  * Needs a development build (`expo prebuild`); Expo Go has no custom native
  * code.
  */
-const { permissionsFor, applyPermissions, minSdkFor } = require('./manifest');
+const path = require('path');
+const fs = require('fs');
+const {
+  permissionsFor,
+  applyPermissions,
+  applyHealthActivities,
+  keepXml,
+  minSdkFor,
+} = require('./manifest');
 
 function configPlugins() {
   try {
@@ -29,11 +38,23 @@ function configPlugins() {
 }
 
 function withStepTrackerPro(config, options = {}) {
-  const { withAndroidManifest, withGradleProperties } = configPlugins();
+  const { withAndroidManifest, withGradleProperties, withDangerousMod } = configPlugins();
   config = withAndroidManifest(config, (mod) => {
-    mod.modResults = applyPermissions(mod.modResults, options);
+    mod.modResults = applyHealthActivities(applyPermissions(mod.modResults, options), options);
     return mod;
   });
+  const keep = keepXml(options.notificationIcon);
+  if (keep) {
+    config = withDangerousMod(config, [
+      'android',
+      async (mod) => {
+        const dir = path.join(mod.modRequest.platformProjectRoot, 'app/src/main/res/raw');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'step_tracker_pro_keep.xml'), keep);
+        return mod;
+      },
+    ]);
+  }
   config = withGradleProperties(config, (mod) => {
     const entry = mod.modResults.find(
       (item) => item.type === 'property' && item.key === 'android.minSdkVersion'

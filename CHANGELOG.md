@@ -5,7 +5,87 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-09-28
+
+Fixes from a review of 2.2.1. Two defaults change - see Changed.
+
+### Fixed
+
+- **A command after stop crashed the app.** A command reaching the service
+  after tracking stopped - a Pause button left on screen, a config change
+  racing a stop - made it stop without `startForeground()`, and Android
+  killed the app with `ForegroundServiceDidNotStartInTimeException`. It now
+  promotes first, as the stop command always did. Reproduced on 2.2.1 on an
+  emulator; gone on 2.3.0.
+- **A key made by a signed snapshot passed for an attested one.** Signing
+  before any `attestDevice()` made an unattested key, and
+  `hasAttestationKey()` then returned true: an app that checked it never
+  attested, and uploads started carrying signatures from a key no server
+  had, which signature auth also accepted. Only a key from `attestDevice()`
+  counts now, for all three. `DeviceAttestation.createdBy` says which made
+  the current key.
+- **An empty `sources` in a snapshot could mean a failed read.** A timeout or
+  an error gave `sources: []`, signed. The snapshot now reads sources fresh
+  with 15 seconds, and carries `sourcesStatus` (`'read'`, `'not_consulted'`,
+  `'timed_out'`, `'failed'`) inside the signature. Each record of a `full`
+  upload carries it too.
+- **`stopTracking()` could be undone.** It only sent the service a command,
+  which Android may refuse while the app is in the background, so
+  `shouldAutoStart` stayed on and tracking returned at the next launch or
+  reboot; the snapshot it returned still said `running`. The module now
+  records the stop itself, and a service that misses the command stops on
+  its next heartbeat.
+- **Retention deleted days that were never uploaded.** An endpoint down for
+  longer than `historyRetentionDays` lost those days for good. Days a sync
+  target in use has not accepted are now kept, up to a year.
+- **Distance and calories were all-or-nothing.** A range read that hit the
+  cap dropped even today's measured distance. They are read newest first
+  like steps now, and only the days the read did not reach are derived.
+- **With `healthConnectIgnoreManualEntries` on, days filled from aggregates
+  kept their manual entries**, so a range could count what the day view
+  left out. Those days are read again one at a time instead.
+- **Cancellation was swallowed** by the single-day sources read, which then
+  carried on in a cancelled coroutine.
+- **Steps could be lost on phones that count with the step detector**: the
+  non-wake-up detector dropped steps once its buffer filled with the screen
+  off. The wake-up variant is used where the phone has one.
+- **`useStepStats` only reloaded at midnight.** It now also reloads on
+  foreground and, for a window with today in it, at most every 30 seconds
+  while steps come in, without flipping `loading`.
+- **A custom `notificationIcon` removed by resource shrinking fell back
+  silently.** It is logged now, the keep rule is documented, and the Expo
+  plugin writes it.
+
+### Changed
+
+- **The notification is private on the lock screen.** Steps are health
+  data: on a phone set to hide sensitive content when locked, it shows
+  "Counting steps" and no count. `notificationLockScreen: 'public'` restores
+  the old behaviour. Existing notification channels are left as they are;
+  the setting lives on each notification.
+- **`hasAttestationKey()` is false for a key only a snapshot made**, so an
+  install that never attested attests once after upgrading.
+
+### Added
+
+- `notificationLockScreen`, `DeviceAttestation.createdBy`,
+  `VerificationSnapshot.sourcesStatus`, `STATS_LIVE_REFRESH_MS`.
+- Expo plugin: `healthConnect: false` removes the Health Connect
+  privacy-policy activity and alias from an app that never uses Health
+  Connect; `notificationIcon` writes the keep rule.
+
+### Docs
+
+- The device integrity hints are called what they are: Magisk hides root
+  from all of them, so they are hints for review, and Play Integrity and
+  key attestation are what a server trusts.
+- An older build over a newer one drops the database, unsynced days
+  included - documented rather than changed, since the alternative is a
+  crash on every launch.
+
 ## [2.2.1] - 2026-09-28
+
+Published by hand, without npm provenance.
 
 Fixes from a review of 2.2.0.
 
@@ -1068,6 +1148,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.0
 [2.2.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.1
 [2.2.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.2.0
 [2.1.1]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.1.1

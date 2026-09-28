@@ -442,6 +442,10 @@ function normaliseConfig(
     'drop',
   ]);
   assertOneOf('remoteSyncPayload', config.remoteSyncPayload, ['totals', 'full']);
+  assertOneOf('notificationLockScreen', config.notificationLockScreen, [
+    'private',
+    'public',
+  ]);
   assertList('healthConnectReadTypes', config.healthConnectReadTypes, READ_TYPES, {
     nonEmpty: true,
   });
@@ -790,10 +794,13 @@ export const StepTracker = {
   },
 
   /**
-   * Whether the install already has a signing key. Attest once - on first
-   * run, or when your server has no key on file for the install - rather
-   * than on every launch: `attestDevice()` replaces the key each time,
-   * because a challenge can only be bound when a key is generated.
+   * Whether the install has a key from `attestDevice()` - the one your server
+   * has the chain of. Attest once - when this is false, or when your server
+   * has no key on file for the install - rather than on every launch:
+   * `attestDevice()` replaces the key each time, because a challenge can
+   * only be bound when a key is generated. A key a signed snapshot made
+   * before any attestation does not count (2.3); before 2.3 it did, and an
+   * app that checked this skipped attesting for good.
    */
   async hasAttestationKey(): Promise<boolean> {
     return call(() => getNativeModule().hasAttestationKey());

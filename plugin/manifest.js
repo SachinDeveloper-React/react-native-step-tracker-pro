@@ -6,7 +6,17 @@
  * From 2.0 the library's own manifest carries only what sensor-only counting
  * needs. These add what an app opts into:
  *
- *   healthConnect: true | { read, write, readTypes, backgroundRead, historyRead, activeCalories }
+ *   healthConnect: true | false | { read, write, readTypes, backgroundRead, historyRead, activeCalories }
+ *   notificationIcon: 'ic_stat_steps'
+ *
+ * `healthConnect: false` says the app never uses Health Connect: the
+ * privacy-policy activity and alias the library merges in for it are
+ * removed. Left out, they stay - Android 14 refuses Health Connect permission
+ * requests from an app without them, so they are only removed when asked.
+ *
+ * `notificationIcon` names the custom notification drawable, which the
+ * library finds by name at runtime - invisible to resource shrinking - so
+ * the plugin writes a keep rule for it.
  *
  * `readTypes` matches the `healthConnectReadTypes` config option: the read
  * permissions declared are the ones for those types, steps always.
@@ -64,6 +74,51 @@ function readTypesFor(readTypes) {
     .map((t) => READ_TYPE_PERMISSIONS[t]);
 }
 
+const TOOLS = 'http://schemas.android.com/tools';
+const HEALTH_ACTIVITY = 'com.steptrackerpro.health.HealthPrivacyPolicyActivity';
+const HEALTH_ALIAS = 'com.steptrackerpro.health.ViewPermissionUsageActivity';
+
+/**
+ * With `healthConnect: false`, marks the library's Health Connect
+ * privacy-policy activity and its alias for removal from the merged
+ * manifest. Anything else leaves the manifest as it is.
+ */
+function applyHealthActivities(manifest, options = {}) {
+  if (options.healthConnect !== false) return manifest;
+  const root = manifest.manifest;
+  root.$ = { ...(root.$ || {}), 'xmlns:tools': TOOLS };
+  const app = (root.application && root.application[0]) || {};
+  if (!root.application) root.application = [app];
+  const remove = (tag, name) => {
+    const list = app[tag] || [];
+    if (!list.some((entry) => entry.$ && entry.$['android:name'] === name)) {
+      list.push({ $: { 'android:name': name, 'tools:node': 'remove' } });
+    }
+    app[tag] = list;
+  };
+  remove('activity', HEALTH_ACTIVITY);
+  remove('activity-alias', HEALTH_ALIAS);
+  return manifest;
+}
+
+/**
+ * The resource file that keeps a drawable found only by name, or null when
+ * there is none. `shrinkResources` cannot see a name that arrives from
+ * JavaScript at runtime and would otherwise remove it.
+ */
+function keepXml(icon) {
+  if (icon == null) return null;
+  if (typeof icon !== 'string' || !/^[a-z0-9_]+$/.test(icon)) {
+    throw new Error(
+      'react-native-step-tracker-pro: notificationIcon must be a drawable name (a-z, 0-9, _)'
+    );
+  }
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>\n' +
+    `<resources xmlns:tools="${TOOLS}" tools:keep="@drawable/${icon}" />\n`
+  );
+}
+
 /** Adds each permission the options need that the manifest does not declare yet. */
 function applyPermissions(manifest, options = {}) {
   const root = manifest.manifest;
@@ -86,4 +141,4 @@ function minSdkFor(current) {
   return Number.isFinite(value) && value >= 26 ? null : '26';
 }
 
-module.exports = { permissionsFor, applyPermissions, minSdkFor };
+module.exports = { permissionsFor, applyPermissions, applyHealthActivities, keepXml, minSdkFor };

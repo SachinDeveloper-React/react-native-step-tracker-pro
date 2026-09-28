@@ -34,7 +34,12 @@ class NotificationFactory(private val context: Context) {
                 setShowBadge(false)
                 enableVibration(false)
                 enableLights(false)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                // No lock-screen visibility of its own: each notification says
+                // how it shows when locked - see notificationLockScreen - and
+                // a channel left unset does not override that. A channel
+                // created by an earlier release keeps PUBLIC, which does not
+                // override a PRIVATE notification either; one set to PRIVATE
+                // here would override a PUBLIC one.
             }
         manager.createNotificationChannel(channel)
     }
@@ -70,10 +75,37 @@ class NotificationFactory(private val context: Context) {
             .setShowWhen(false)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(
+                if (config.notificationLockScreen == StepTrackerConfig.LOCK_SCREEN_PUBLIC) {
+                    NotificationCompat.VISIBILITY_PUBLIC
+                } else {
+                    NotificationCompat.VISIBILITY_PRIVATE
+                }
+            )
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(openAppIntent())
+
+        if (config.notificationLockScreen != StepTrackerConfig.LOCK_SCREEN_PUBLIC) {
+            // Steps are health data. On a locked screen whose owner hides
+            // sensitive content, this shows instead: that tracking is on,
+            // and nothing about how much anyone has walked.
+            builder.setPublicVersion(
+                NotificationCompat.Builder(context, CHANNEL_ID)
+                    .setSmallIcon(resolveIcon(config))
+                    .setContentTitle(
+                        config.notificationChannelName ?: context.getString(R.string.stp_channel_name)
+                    )
+                    .setContentText(
+                        context.getString(if (paused) R.string.stp_paused_text else R.string.stp_locked_text)
+                    )
+                    .setOngoing(true)
+                    .setSilent(true)
+                    .setShowWhen(false)
+                    .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                    .build()
+            )
+        }
 
         if (config.notificationActions) {
             if (paused) {
@@ -103,9 +135,25 @@ class NotificationFactory(private val context: Context) {
 
     private fun resolveIcon(config: StepTrackerConfig): Int {
         val custom = config.notificationIcon ?: return R.drawable.stp_ic_steps
+        // Looked up by name, which resource shrinking cannot see: a release
+        // build with shrinkResources removes the drawable unless the app
+        // keeps it (docs/INSTALLATION.md). Said once, loudly, rather than
+        // falling back without a word.
         val id = context.resources.getIdentifier(custom, "drawable", context.packageName)
+        if (id == 0 && warnedIcon != custom) {
+            warnedIcon = custom
+            android.util.Log.w(
+                TAG,
+                "notificationIcon '$custom' is not a drawable in this app - using the default. " +
+                    "With shrinkResources on, keep it: tools:keep=\"@drawable/$custom\" (see docs/INSTALLATION.md)"
+            )
+        }
         return if (id != 0) id else R.drawable.stp_ic_steps
     }
+
+    /** The icon name last warned about, so a missing one is logged once, not per redraw. */
+    @Volatile
+    private var warnedIcon: String? = null
 
     /**
      * Launches the host app's main activity, reusing the existing task. Null when
@@ -146,6 +194,7 @@ class NotificationFactory(private val context: Context) {
         .replace("{goal}", formatCount(config.dailyGoal))
 
     companion object {
+        private const val TAG = "StepTrackerPro"
         const val CHANNEL_ID = "step_tracker_pro"
         const val NOTIFICATION_ID = 8_143
         const val EXTRA_FROM_NOTIFICATION = "stp_from_notification"

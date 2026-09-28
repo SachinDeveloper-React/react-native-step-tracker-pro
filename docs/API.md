@@ -69,6 +69,11 @@ anchor instead of the total, so paused steps are discarded rather than buffered.
 Flushes to the database, unregisters the sensors, cancels sync work, kills the
 service, and clears the auto-start-on-boot flag.
 
+The decision is recorded at once (2.3): the returned snapshot says `stopped`,
+and neither the next launch nor a reboot starts tracking again - even when the
+app is in the background and Android refuses to deliver the stop to the
+service. A service that misses it stops itself within a minute.
+
 ### `getTrackingState(): Promise<TrackingState>`
 
 `'idle' | 'running' | 'paused' | 'stopped' | 'unsupported'`.
@@ -231,6 +236,7 @@ split out.
     { packageName: 'com.example.other', kind: 'app', steps: 20000,
       manualSteps: 20000, isWearable: false, trustedWearable: false, ... },
   ],
+  sourcesStatus: 'read',      // | 'not_consulted' | 'timed_out' | 'failed' (2.3)
   resolved: { steps: 8240, kind: 'watch', packageName: 'com.fitbit.FitbitMobile',
               usedExternal: true, merged: false, manualStepsExcluded: 0, ... },
   capabilities: { hasStepCounter: true, hasStepDetector: true,
@@ -323,7 +329,11 @@ what it should trust in either shape.
 
 `resolved` is what the current policy chose, for comparison only. `sources`
 follows the same rules as every other Health Connect read — no provider, no
-grant or `stepSource: 'device'` leaves it empty, never an error — and each
+grant or `stepSource: 'device'` leaves it empty, never an error — and
+`sourcesStatus` says which: `'read'`, `'not_consulted'`, or `'timed_out'` /
+`'failed'` when the read did not finish (2.3). The snapshot reads sources
+fresh, with 15 seconds to do it, and signs the status with them, so a server
+never mistakes a read that failed for a day with no watch; and each
 source carries `manualSteps`, `recordingMethods` and `trustedWearable`.
 `coverageStartAt` is only known for today; a past day reads `0`. `clock`
 puts the wall clock next to a boot id derived from `elapsedRealtime`: a clock
@@ -510,9 +520,12 @@ call; a past day reads the verdict stored when it closed.
 }
 ```
 
-`device` holds cheap hints — each can be faked on a rooted phone — and is
-reported even with the checks off. [`attestDevice()`](#attestdevicechallenge-string-promisedeviceattestation)
-is the check a server can trust.
+`device` holds cheap hints — su paths, build properties, developer settings.
+Each can be faked on a rooted phone, and Magisk hides root from all of them
+as a matter of course, so treat them as hints for review, never as a verdict.
+They are reported even with the checks off. What a server can trust is
+[`attestDevice()`](#attestdevicechallenge-string-promisedeviceattestation)
+and [Play Integrity](#requestintegritytokenoptions-promiseintegritytoken).
 
 Events logged while the checks are on: `clock_changed` (`detail.jumpMs`),
 `timezone_changed`, `reboot`, `reset_today`, `history_cleared`,
@@ -592,7 +605,15 @@ Uploads to `remoteSyncUrl` carry the same kind of signature once a key exists
 Attest once, not on every launch. `attestDevice()` has to replace the key each
 time - Android can only bind a challenge when a key is generated - so check
 first, and only attest when the install has no key or your server has none
-on file for it:
+on file for it.
+
+A signed snapshot taken before any `attestDevice()` makes a key of its own,
+which no server has seen. From 2.3 that key does not count:
+`hasAttestationKey()` is false for it, `getAttestationKeyInfo().createdBy` is
+`'sign'` (against `'attestDevice'`), and it neither signs uploads nor satisfies
+`remoteSyncAuth: 'signature'`. Before 2.3 it counted, and an app that checked
+`hasAttestationKey()` never attested. After upgrading, such an install reports
+`false` and attests once.
 
 ```ts
 const info = await StepTracker.getAttestationKeyInfo(); // null when there is no key
@@ -742,6 +763,12 @@ integrity event log is kept, and records the clear.
 Deletes rows older than the window and returns how many were removed. Runs
 automatically at midnight and once a day via WorkManager, using
 `historyRetentionDays` from config.
+
+A day a sync target in use has not accepted yet is kept past the window (2.3):
+one not uploaded while `remoteSyncUrl` is set, one not mirrored while
+Health Connect writes are on and allowed. An endpoint that is down for longer
+than the window loses nothing. Nothing is kept past a year, however it
+stands.
 
 ---
 
@@ -1526,9 +1553,10 @@ than replaying missed events. `useStepTracker` already does this.
 | `calorieCoefficient` | 0.57 | kcal per kg per km |
 | `historyRetentionDays` | 35 | set 31 for a one-month window |
 | `notificationTitle` / `notificationText` | built-in | tokens: `{steps}` `{distance}` `{calories}` `{percent}` `{goal}` |
-| `notificationIcon` | bundled | drawable name in your app |
+| `notificationIcon` | bundled | drawable name in your app. Found by name, so with `shrinkResources` keep it - see [INSTALLATION.md](INSTALLATION.md#5-custom-notification-icon-recommended); a name that is not found logs a warning and uses the default |
 | `notificationChannelName` | "Step tracking" | shown in Android settings |
 | `notificationActions` | `true` | Pause/Resume/Open buttons |
+| `notificationLockScreen` | `'private'` | `'private'` hides the count behind "Counting steps" on a locked screen whose owner hides sensitive content - steps are health data; `'public'` always shows it, as before 2.3 |
 | `notificationThrottleMs` | 1000 | minimum ms between notification redraws |
 | `eventThrottleMs` | 500 | minimum ms between `stepsChanged` events |
 | `persistEveryNSteps` | 10 | database flush cadence |
@@ -1592,7 +1620,11 @@ drop without a sensor sample to carry it.
 const { stats, loading, error, reload } = useStepStats('week');
 ```
 
-`period` is `'week' | 'month' | 'year'`. Reloads automatically on `dayChanged`.
+`period` is `'week' | 'month' | 'year'`. Reloads on `dayChanged` and when the
+app comes back to the foreground, and - for a window that includes today -
+at most every 30 seconds (`STATS_LIVE_REFRESH_MS`) while steps come in, so
+today's bar moves while walking (2.3). Those refreshes leave `loading` alone;
+it covers the first load and `reload()`.
 
 ### `useHealthConnect(options?)`
 

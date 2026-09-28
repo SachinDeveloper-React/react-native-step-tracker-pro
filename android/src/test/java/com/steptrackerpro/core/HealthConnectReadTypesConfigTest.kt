@@ -52,6 +52,20 @@ class HealthConnectReadTypesConfigTest {
     }
 
     @Test
+    fun `the notification is private on a locked screen unless the app says public`() {
+        assertEquals("private", StepTrackerConfig().notificationLockScreen)
+        assertEquals("private", StepTrackerConfig(notificationLockScreen = "shown").sanitised().notificationLockScreen)
+        val public = StepTrackerConfig(notificationLockScreen = "public").sanitised()
+        assertEquals(
+            "public",
+            StepTrackerConfig.fromJson(JSONObject(public.toJson().toString())).sanitised().notificationLockScreen
+        )
+        // Config stored before 2.3 has no key: private, the new default.
+        val stored = StepTrackerConfig().toJson().apply { remove("notificationLockScreen") }
+        assertEquals("private", StepTrackerConfig.fromJson(stored).sanitised().notificationLockScreen)
+    }
+
+    @Test
     fun `sanitising adds steps, drops unknown names and orders the rest`() {
         val config = StepTrackerConfig(
             healthConnectReadTypes = listOf("totalCalories", "heartRate", "totalCalories")

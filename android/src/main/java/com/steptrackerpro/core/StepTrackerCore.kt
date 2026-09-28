@@ -56,6 +56,7 @@ class StepTrackerCore private constructor(context: Context) {
     val healthConnect = HealthConnectManager(appContext, state).apply {
         readActiveCalories = configStore.get().healthConnectReadActiveCalories
         readTypes = HealthConnectManager.ReadType.parse(configStore.get().healthConnectReadTypes)
+        needsRecordingMethods = configStore.get().healthConnectIgnoreManualEntries
     }
 
     /** Per-minute buckets, the detector, the event log and suspect-step arithmetic. */
@@ -105,6 +106,7 @@ class StepTrackerCore private constructor(context: Context) {
         metrics.config = saved
         healthConnect.readActiveCalories = saved.healthConnectReadActiveCalories
         healthConnect.readTypes = HealthConnectManager.ReadType.parse(saved.healthConnectReadTypes)
+        healthConnect.needsRecordingMethods = saved.healthConnectIgnoreManualEntries
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
         engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
         // A different policy or pin changes what the baseline means, so it is
@@ -386,7 +388,7 @@ class StepTrackerCore private constructor(context: Context) {
                 val stored = repository.getDay(newDate)
                 engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps)
             }
-            repository.prune(config().historyRetentionDays)
+            prune(config().historyRetentionDays)
             StepEventBus.emit(
                 StepEventBus.Events.DAY_CHANGED,
                 mapOf(
@@ -421,8 +423,22 @@ class StepTrackerCore private constructor(context: Context) {
         integrity.onHistoryCleared()
     }
 
-    suspend fun pruneHistory(retentionDays: Int): Int =
-        withContext(writeLane) { repository.prune(retentionDays) }
+    suspend fun pruneHistory(retentionDays: Int): Int = withContext(writeLane) { prune(retentionDays) }
+
+    /**
+     * Retention, sparing days a sync target that is actually in use has not
+     * accepted: remote when a URL is set, Health Connect when writes are on
+     * and allowed. A target that can never accept - writes never granted -
+     * does not hold history past the window.
+     */
+    suspend fun prune(retentionDays: Int): Int {
+        val config = config()
+        val keepRemote = !config.remoteSyncUrl.isNullOrEmpty()
+        val keepHealth = config.healthConnectEnabled && config.healthConnectWriteEnabled &&
+            healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
+            healthConnect.canWriteSteps()
+        return repository.prune(retentionDays, keepRemote, keepHealth)
+    }
 
     /** Writes whatever is in memory to the database. Called before shutdown. */
     fun flush(): DayTotals {
@@ -626,8 +642,17 @@ class StepTrackerCore private constructor(context: Context) {
      * with `trustedWearable` stamped - or nothing, under the same rules that
      * keep every other read off Health Connect when it cannot be consulted.
      */
-    suspend fun unresolvedSources(date: String): List<StepSource> =
-        if (shouldConsultHealthConnect()) stampTrust(sourcesForDay(date)) else emptyList()
+    suspend fun unresolvedSources(date: String, fresh: Boolean = false): SourceList {
+        if (!shouldConsultHealthConnect()) return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
+        // Fresh for evidence that gets signed: a cached list may be half a
+        // minute old, and a hot-path timeout is too short for a busy day.
+        val list = readSourcesForDay(
+            date,
+            timeoutMs = if (fresh) HC_RANGE_READ_TIMEOUT_MS else HC_READ_TIMEOUT_MS,
+            useCache = !fresh
+        )
+        return list.copy(sources = stampTrust(list.sources))
+    }
 
     /**
      * Everything a server needs to judge one day, with nothing resolved for
@@ -659,7 +684,8 @@ class StepTrackerCore private constructor(context: Context) {
         if (today) engine.reconcile()
         val device = dayTotals(date)
         val report = integrity.report(date)
-        val sources = unresolvedSources(date)
+        val sourceList = unresolvedSources(date, fresh = true)
+        val sources = sourceList.sources
         val resolved = resolveDay(date)
         val capabilities = com.steptrackerpro.util.PermissionHelper.capabilities(
             appContext, allowAccelerometer = config().accelerometerFallback
@@ -684,6 +710,10 @@ class StepTrackerCore private constructor(context: Context) {
                 0L
             },
             "sources" to sources.map { it.toMap() },
+            // Whether `sources` is what Health Connect holds, or empty because
+            // it was not asked, ran out of time or failed - never the same
+            // thing as "no other apps", and signed along with it.
+            "sourcesStatus" to sourceList.healthConnect,
             "resolved" to resolved.toMap(),
             "capabilities" to mapOf(
                 "hasStepCounter" to capabilities["hasStepCounter"],
@@ -1128,19 +1158,31 @@ class StepTrackerCore private constructor(context: Context) {
         return if (stored > startOfDay && state.activeDate == today) stored else startOfDay
     }
 
-    private suspend fun sourcesForDay(date: String): List<StepSource> {
-        sourceCache.get(date)?.let { return it }
+    private suspend fun sourcesForDay(date: String): List<StepSource> =
+        readSourcesForDay(date, HC_READ_TIMEOUT_MS, useCache = true).sources
+
+    /**
+     * One day's origins and how the read went. Only a finished read is
+     * cached; a timeout or a failure is tried again next time. A caller's
+     * own cancellation is passed on rather than read as a failed read.
+     */
+    private suspend fun readSourcesForDay(date: String, timeoutMs: Long, useCache: Boolean): SourceList {
+        if (useCache) sourceCache.get(date)?.let { return SourceList(it, HealthConnectRead.READ) }
         val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
         val start = DateKeys.startOfDayInstant(date)
-        if (!end.isAfter(start)) return emptyList()
+        if (!end.isAfter(start)) return SourceList(emptyList(), HealthConnectRead.READ)
         val coverage = if (date == DateKeys.today()) coverageStartForToday() else 0L
-        val sources = runCatching {
-            withTimeoutOrNull(HC_READ_TIMEOUT_MS) {
+        return try {
+            val sources = withTimeoutOrNull(timeoutMs) {
                 healthConnect.readDailyStepsBySource(start, end, coverage)[date].orEmpty()
-            }
-        }.getOrNull() ?: return emptyList() // a timeout is not cached: try again next read
-        sourceCache.put(date, sources)
-        return sources
+            } ?: return SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
+            sourceCache.put(date, sources)
+            SourceList(sources, HealthConnectRead.READ)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            SourceList(emptyList(), HealthConnectRead.FAILED)
+        }
     }
 
     /**

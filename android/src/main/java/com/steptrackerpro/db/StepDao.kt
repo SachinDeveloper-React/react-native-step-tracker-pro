@@ -100,6 +100,19 @@ interface StepHistoryDao {
     @Query("DELETE FROM step_history WHERE date < :cutoff")
     suspend fun deleteOlderThan(cutoff: String): Int
 
+    /**
+     * Retention that spares days a sync target still has to accept: with
+     * [keepRemote], rows not yet uploaded; with [keepHealth], rows not yet
+     * mirrored into Health Connect.
+     */
+    @Query(
+        """
+        DELETE FROM step_history WHERE date < :cutoff
+        AND NOT ((:keepRemote AND syncedRemote = 0) OR (:keepHealth AND synced = 0))
+        """
+    )
+    suspend fun deleteOlderThanKeepingUnsynced(cutoff: String, keepRemote: Boolean, keepHealth: Boolean): Int
+
     @Query("DELETE FROM step_history")
     suspend fun deleteAll()
 }
@@ -135,6 +148,10 @@ interface DailySummaryDao {
 
     @Query("DELETE FROM daily_summary WHERE date < :cutoff")
     suspend fun deleteOlderThan(cutoff: String): Int
+
+    /** Older than [cutoff] and with no history row left - kept rows keep their recovered share. */
+    @Query("DELETE FROM daily_summary WHERE date < :cutoff AND date NOT IN (SELECT date FROM step_history)")
+    suspend fun deleteOrphansOlderThan(cutoff: String): Int
 
     @Query("DELETE FROM daily_summary")
     suspend fun deleteAll()
@@ -230,6 +247,10 @@ interface IntegrityDao {
 
     @Query("DELETE FROM integrity_day WHERE date < :cutoff")
     suspend fun deleteDaysOlderThan(cutoff: String): Int
+
+    /** Older than [cutoff] and with no history row left - a kept upload keeps its verdict. */
+    @Query("DELETE FROM integrity_day WHERE date < :cutoff AND date NOT IN (SELECT date FROM step_history)")
+    suspend fun deleteOrphanDaysOlderThan(cutoff: String): Int
 
     @Query("DELETE FROM integrity_day WHERE date = :date")
     suspend fun deleteDay(date: String): Int

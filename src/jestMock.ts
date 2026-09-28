@@ -228,6 +228,7 @@ export const StepTracker = {
     sensor: 'step_counter',
     coverageStartAt: 0,
     sources: [],
+    sourcesStatus: 'not_consulted' as const,
     resolved: resolved(date),
     capabilities: {
       hasStepCounter: true,
@@ -267,6 +268,7 @@ export const StepTracker = {
     attested: false,
     securityLevel: 'software' as const,
     createdAt: 0,
+    createdBy: 'attestDevice' as const,
   })),
   hasAttestationKey: done(false),
   getAttestationKeyInfo: done(null),

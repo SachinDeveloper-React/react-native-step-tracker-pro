@@ -206,6 +206,11 @@ with `read`, `write` (both default `true`), `readTypes`, `backgroundRead`,
 alone - so pass the same list to both. Leave `healthConnect` out for
 sensor-only counting.
 `batteryOptimizationPrompt: true` adds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+`healthConnect: false` says the app never uses Health Connect and removes the
+privacy-policy activity and alias the library merges in for it (2.3). They
+are left alone otherwise: Android 14 refuses Health Connect permission
+requests from an app without them. `notificationIcon: "ic_stat_steps"` writes
+the keep rule [the custom icon needs](#5-custom-notification-icon-recommended).
 
 ## 5. Custom notification icon (recommended)
 
@@ -215,6 +220,20 @@ The bundled icon is a generic footprint. Drop a white-on-transparent
 ```ts
 await StepTracker.initialize({ notificationIcon: 'ic_stat_steps' });
 ```
+
+The library finds the icon by name at runtime, which resource shrinking cannot
+see. With `shrinkResources true` in a release build, keep it, or it is removed
+and the default icon shows. Add `android/app/src/main/res/raw/keep.xml`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_stat_steps" />
+```
+
+A name that is not found logs a warning under the `StepTrackerPro` tag once,
+and the default icon is used. With Expo, pass the name to the config plugin
+as `notificationIcon` and it writes the keep rule for you.
 
 ## 6. Build
 

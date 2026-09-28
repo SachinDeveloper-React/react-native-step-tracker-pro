@@ -87,6 +87,14 @@ check `getTrackingHealth()` and `checkPermissions()`.
   does not show.
 - The channel is created at `IMPORTANCE_LOW`; if the user turned the channel off
   it stays off. Send them to app notification settings.
+- **It shows, but the lock screen says "Counting steps" with no count.** That
+  is the default from 2.3, `notificationLockScreen: 'private'`, on a phone set
+  to hide sensitive content on the lock screen. Set `'public'` to show the
+  count there regardless.
+- **The icon is the default footprint in release builds only.** Resource
+  shrinking removed your drawable; keep it (see
+  [INSTALLATION.md](INSTALLATION.md#5-custom-notification-icon-recommended)).
+  Logcat has a `StepTrackerPro` warning naming it.
 
 ## Steps jumped after a reboot
 
@@ -98,6 +106,14 @@ before midnight. See [ARCHITECTURE.md](ARCHITECTURE.md#reboot).
 
 SharedPreferences and the Room database are cleared on uninstall. If you need
 history to survive reinstalls, sync to Health Connect or set `remoteSyncUrl`.
+
+## History is gone after installing an older build
+
+Installing a build with an older database version over a newer one - by hand
+or from a QA channel; Play never downgrades a user - drops the database and
+starts again, days not yet synced included. The alternative is a crash on
+every launch until the newer build is back. Upload or mirror before testing a
+downgrade on a device whose data matters.
 
 ## Build fails: Kotlin / Room version mismatch
 
@@ -159,6 +175,11 @@ says which of the three it was.
 Something in your app is delaying the service start past the 5-second window,
 usually a heavy `Application.onCreate`. The service calls `startForeground`
 first thing, so the delay is upstream.
+
+Before 2.3 it also came from the package itself: a command that reached the
+service after tracking was stopped - a Pause button still on screen, a config
+change racing a stop - stopped the service without `startForeground`, and the
+app crashed. Update.
 
 ## Health Connect permission sheet never opens
 

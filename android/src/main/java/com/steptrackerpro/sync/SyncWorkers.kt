@@ -98,7 +98,9 @@ class RemoteSyncWorker(
         // Signature-only auth stores no secret at all, so without a key there
         // is nothing to authenticate with. Not retried: the app attests first.
         val signatureOnly = config.remoteSyncAuth == RemoteSyncAuth.SIGNATURE
-        if (signatureOnly && !DeviceAttestation.hasKey()) {
+        // Only a key from attestDevice(): one a snapshot made on its own is
+        // one the server never registered, and it would refuse the upload.
+        if (signatureOnly && !DeviceAttestation.hasAttestedKey(applicationContext)) {
             authRefused(
                 core, attempt, status = null, reason = RemoteSyncStatus.NO_KEY,
                 auth = config.remoteSyncAuth, pending = pending.size
@@ -121,10 +123,12 @@ class RemoteSyncWorker(
         if (shape == RemotePayload.Shape.FULL) {
             withTimeoutOrNull(DETAIL_TIMEOUT_MS) {
                 for (day in pending) {
+                    val sourceList = detailOrNull { core.unresolvedSources(day.date) }
                     details[day.date] = RemotePayload.DayDetail(
                         stepSource = detailOrNull { core.resolveDay(day.date).toMap() } ?: emptyMap(),
-                        sources = detailOrNull { core.unresolvedSources(day.date).map { it.toMap() } }
-                            ?: emptyList(),
+                        sources = sourceList?.sources?.map { it.toMap() } ?: emptyList(),
+                        sourcesStatus = sourceList?.healthConnect
+                            ?: com.steptrackerpro.core.HealthConnectRead.FAILED,
                         // The device hints are the same for every record and
                         // travel with verification snapshots instead.
                         integrity = if (config.fraudDetectionEnabled) {
@@ -263,7 +267,7 @@ class RemoteSyncWorker(
             val sentRecords = records.map { it.copy(steps = RemotePayload.sentSteps(it, suspects, excludeSuspect)) }
             // Signed only once the app has asked for a key; an install that
             // never called attestDevice() uploads exactly as before.
-            val signature = if (DeviceAttestation.hasKey()) {
+            val signature = if (DeviceAttestation.hasAttestedKey(applicationContext)) {
                 runCatching { DeviceAttestation.sign(applicationContext, bytes) }.getOrNull()
             } else {
                 null
@@ -325,7 +329,7 @@ class RetentionWorker(
 
     override suspend fun doWork(): Result {
         val core = StepTrackerCore.get(applicationContext)
-        core.repository.prune(core.config().historyRetentionDays)
+        core.pruneHistory(core.config().historyRetentionDays)
         return Result.success()
     }
 

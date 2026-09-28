@@ -171,13 +171,31 @@ class StepRepository(context: Context) {
     }
 
     /** Drops rows older than the retention window. Returns rows removed. */
-    suspend fun prune(retentionDays: Int): Int {
-        val cutoff = DateKeys.minusDays(DateKeys.today(), retentionDays.coerceAtLeast(1))
-        summaries.deleteOlderThan(cutoff)
+    /**
+     * Deletes what is older than [retentionDays]. A day a sync target has not
+     * accepted yet is kept - with [keepUnsyncedRemote], one not uploaded;
+     * with [keepUnsyncedHealth], one not mirrored - so an endpoint that is
+     * down for longer than the retention window loses nothing. Kept days
+     * keep their recovered share and their integrity verdict, which the
+     * upload sends with them. Nothing is kept past [UNSYNCED_KEEP_DAYS]
+     * however it stands, so storage stays bounded.
+     */
+    suspend fun prune(
+        retentionDays: Int,
+        keepUnsyncedRemote: Boolean = false,
+        keepUnsyncedHealth: Boolean = false
+    ): Int {
+        val days = retentionDays.coerceAtLeast(1)
+        val today = DateKeys.today()
+        val cutoff = DateKeys.minusDays(today, days)
+        val ceiling = DateKeys.minusDays(today, maxOf(days, UNSYNCED_KEEP_DAYS))
+        val deleted = history.deleteOlderThanKeepingUnsynced(cutoff, keepUnsyncedRemote, keepUnsyncedHealth) +
+            history.deleteOlderThan(ceiling)
+        summaries.deleteOrphansOlderThan(cutoff)
+        integrity.deleteOrphanDaysOlderThan(cutoff)
         minuteRows.deleteOlderThan(cutoff)
-        integrity.deleteDaysOlderThan(cutoff)
         integrity.deleteEventsOlderThan(cutoff)
-        return history.deleteOlderThan(cutoff)
+        return deleted
     }
 
     /**
@@ -305,6 +323,9 @@ class StepRepository(context: Context) {
         }
 
     companion object {
+        /** The longest a day waiting on a sync target is kept past retention. */
+        const val UNSYNCED_KEEP_DAYS = 365
+
         /**
          * The event log's hard bound, whatever the retention. A clock that
          * is being changed in a loop, or a charger cable with a loose

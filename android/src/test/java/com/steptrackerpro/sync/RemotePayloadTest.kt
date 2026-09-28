@@ -104,9 +104,14 @@ class RemotePayloadTest {
 
         val second = records.getJSONObject(1)
         assertEquals(
-            setOf("date", "steps", "distance", "calories", "deviceSteps", "recoveredSteps", "stepSource", "sources"),
+            setOf(
+                "date", "steps", "distance", "calories", "deviceSteps", "recoveredSteps",
+                "stepSource", "sources", "sourcesStatus"
+            ),
             second.keySet()
         )
+        // Read, so the origins are what Health Connect holds.
+        assertEquals("read", second.getString("sourcesStatus"))
         // The stored row is this device's count, whatever the policy showed.
         assertEquals(11_204, second.getInt("steps"))
         assertEquals(11_204, second.getInt("deviceSteps"))
@@ -131,6 +136,9 @@ class RemotePayloadTest {
         assertFalse(first.getJSONObject("stepSource").getBoolean("usedExternal"))
         assertEquals(8_000, first.getJSONObject("stepSource").getInt("deviceSteps"))
         assertEquals(0, first.getInt("recoveredSteps"))
+        // A day the upload's detail pass never reached says so: its empty
+        // origins are not "no other apps".
+        assertEquals("timed_out", first.getString("sourcesStatus"))
     }
 
     @Test

@@ -1,5 +1,19 @@
 # Migrating
 
+## From 2.2 to 2.3
+
+Nothing to change in code for most apps; two defaults move.
+
+- **The notification is private on the lock screen.** On a phone set to hide
+  sensitive content when locked, it shows "Counting steps" instead of the
+  count. To keep showing the count, pass
+  `notificationLockScreen: 'public'`.
+- **`hasAttestationKey()` ignores a key a snapshot made.** If you sign
+  snapshots before attesting, that key was reported as attested and uploads
+  were signed with it. After the upgrade such an install reports `false`
+  and your usual "attest when there is no key" path runs once: expect one
+  new attestation per such install, and register the key it sends.
+
 ## From 1.x to 2.0
 
 For most apps the whole upgrade is: **add the Health Connect permissions you

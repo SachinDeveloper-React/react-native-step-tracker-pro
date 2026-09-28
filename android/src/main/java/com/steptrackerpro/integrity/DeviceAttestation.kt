@@ -45,6 +45,13 @@ object DeviceAttestation {
     private const val PREFS = "StepTrackerProIntegrity"
     private const val KEY_ATTESTED = "key_attested"
     private const val KEY_CREATED_AT = "key_created_at"
+    private const val KEY_CREATED_BY = "key_created_by"
+
+    /** [attest] made the key: the app sent its chain to a server. */
+    const val CREATED_BY_ATTEST = "attestDevice"
+
+    /** A first [sign] made the key: no server has seen it. */
+    const val CREATED_BY_SIGN = "sign"
 
     /** The Keystore caps an attestation challenge at 128 bytes. */
     const val MAX_CHALLENGE_BYTES = 128
@@ -71,12 +78,32 @@ object DeviceAttestation {
         prefs(context).edit()
             .putBoolean(KEY_ATTESTED, attested)
             .putLong(KEY_CREATED_AT, System.currentTimeMillis())
+            .putString(KEY_CREATED_BY, CREATED_BY_ATTEST)
             .apply()
         return describe(context) ?: emptyMap()
     }
 
     /** Whether a key exists yet - [attest] or a first [sign] made one. */
     fun hasKey(): Boolean = runCatching { keyStore().containsAlias(ALIAS) }.getOrDefault(false)
+
+    /**
+     * Whether the key was made by [attest] - the one a server has the chain
+     * of. A key a first [sign] made for a snapshot is one no server knows:
+     * it does not count as "attested already", it is not used to sign
+     * uploads, and it does not satisfy signature auth.
+     */
+    fun hasAttestedKey(context: Context): Boolean = hasKey() && createdBy(context) == CREATED_BY_ATTEST
+
+    /**
+     * Who made the current key. A key from before 2.3 carries no record:
+     * one reported as hardware-attested can only have come from [attest];
+     * any other is taken as a first [sign]'s, so the app attests again.
+     */
+    fun createdBy(context: Context): String {
+        val prefs = prefs(context)
+        prefs.getString(KEY_CREATED_BY, null)?.let { return it }
+        return if (prefs.getBoolean(KEY_ATTESTED, false)) CREATED_BY_ATTEST else CREATED_BY_SIGN
+    }
 
     /** The current key's id, chain and security level, or null when there is none. */
     fun describe(context: Context): Map<String, Any?>? {
@@ -92,7 +119,8 @@ object DeviceAttestation {
             "certificateChain" to chain.map { encoder.encodeToString(it.encoded) },
             "attested" to prefs(context).getBoolean(KEY_ATTESTED, false),
             "securityLevel" to securityLevel(store),
-            "createdAt" to prefs(context).getLong(KEY_CREATED_AT, 0L)
+            "createdAt" to prefs(context).getLong(KEY_CREATED_AT, 0L),
+            "createdBy" to createdBy(context)
         )
     }
 
@@ -109,6 +137,7 @@ object DeviceAttestation {
             prefs(context).edit()
                 .putBoolean(KEY_ATTESTED, false)
                 .putLong(KEY_CREATED_AT, System.currentTimeMillis())
+                .putString(KEY_CREATED_BY, CREATED_BY_SIGN)
                 .apply()
         }
         val privateKey = store.getKey(ALIAS, null) as PrivateKey

@@ -68,6 +68,14 @@ class HealthConnectManager(
     var readTypes: Set<ReadType> = ReadType.ALL
 
     /**
+     * Days must carry the recording-method split - `healthConnectIgnoreManualEntries`
+     * is on - so days an incomplete read missed are read again one at a time
+     * rather than answered from aggregates, which carry none.
+     */
+    @Volatile
+    var needsRecordingMethods: Boolean = false
+
+    /**
      * The record types `healthConnectReadTypes` can name - also the three
      * this package writes, so each carries its write permission too.
      */
@@ -512,7 +520,9 @@ class HealthConnectManager(
          * Records on that day are additionally split into the part before it,
          * reported as [StepSource.stepsBeforeCoverage]. 0 disables the split.
          */
-        coverageStartMs: Long = 0L
+        coverageStartMs: Long = 0L,
+        /** False inside [perDay], so a gap is never filled a day at a time twice over. */
+        perDayFill: Boolean = true
     ): Map<String, List<StepSource>> {
         val hc = client() ?: return emptyMap()
         val self = context.packageName
@@ -595,45 +605,58 @@ class HealthConnectManager(
         // figure is zeroed, reported `not_read`, and derived like any other
         // missing distance.
         val types = grantedReadTypes()
-        val accumulators = buckets.values.flatMap { it.values }
+        //
+        // Each is read newest first like steps, so a read the page cap cuts
+        // short keeps the days it did cover - today's measured distance
+        // survives a busy month - and only the day it stopped in and the
+        // days before it are discarded.
+        val lastDay = DateKeys.of(end.toEpochMilli())
+        /** Applies [whole] to each origin's day the read covered, [cut] to the rest. */
+        fun settle(outcome: ReadOutcome, oldest: Long, whole: (Accumulator) -> Unit, cut: (Accumulator) -> Unit) {
+            val through = incompleteThrough(outcome, oldest.takeIf { it != Long.MAX_VALUE }?.let { DateKeys.of(it) }, lastDay)
+            buckets.forEach { (date, byPackage) ->
+                byPackage.values.forEach { if (through == null || date > through) whole(it) else cut(it) }
+            }
+        }
         if (ReadType.DISTANCE in types) {
-            val outcome = readAll(hc, DistanceRecord::class.java, start, end) { record ->
-                val date = DateKeys.of(record.startTime.toEpochMilli())
-                val pkg = record.metadata.dataOrigin.packageName
-                buckets[date]?.get(pkg)?.let {
+            var oldest = Long.MAX_VALUE
+            val outcome = readAll(hc, DistanceRecord::class.java, start, end, newestFirst = true) { record ->
+                val at = record.startTime.toEpochMilli()
+                if (at < oldest) oldest = at
+                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
                     it.distance += record.distance.inMeters
                     it.distanceSeen = true
                 }
             }
-            accumulators.forEach {
-                if (outcome == ReadOutcome.COMPLETE) {
-                    it.distanceRead = true
-                } else {
-                    it.distance = 0.0
-                    it.distanceSeen = false
-                }
-            }
+            settle(outcome, oldest, whole = { it.distanceRead = true }, cut = {
+                it.distance = 0.0
+                it.distanceSeen = false
+            })
         }
         if (ReadType.TOTAL_CALORIES in types) {
-            val outcome = readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end) { record ->
-                val date = DateKeys.of(record.startTime.toEpochMilli())
-                val pkg = record.metadata.dataOrigin.packageName
-                buckets[date]?.get(pkg)?.let { it.calories += record.energy.inKilocalories }
+            var oldest = Long.MAX_VALUE
+            val outcome = readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end, newestFirst = true) { record ->
+                val at = record.startTime.toEpochMilli()
+                if (at < oldest) oldest = at
+                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
+                    it.calories += record.energy.inKilocalories
+                }
             }
-            if (outcome != ReadOutcome.COMPLETE) accumulators.forEach { it.calories = 0.0 }
+            settle(outcome, oldest, whole = {}, cut = { it.calories = 0.0 })
         }
         // Opt-in, and only once granted: an ungranted type would fail the read.
         if (readActiveCalories && grantedPermissions().contains(READ_ACTIVE_CALORIES)) {
             buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = 0.0 } }
-            val outcome = readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end) { record ->
-                val date = DateKeys.of(record.startTime.toEpochMilli())
-                val pkg = record.metadata.dataOrigin.packageName
-                buckets[date]?.get(pkg)?.let { it.activeCalories += record.energy.inKilocalories }
+            var oldest = Long.MAX_VALUE
+            val outcome = readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end, newestFirst = true) { record ->
+                val at = record.startTime.toEpochMilli()
+                if (at < oldest) oldest = at
+                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
+                    it.activeCalories += record.energy.inKilocalories
+                }
             }
             // A partial sum is reported as unknown, not as a low figure.
-            if (outcome != ReadOutcome.COMPLETE) {
-                buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = -1.0 } }
-            }
+            settle(outcome, oldest, whole = {}, cut = { it.activeCalories = -1.0 })
         }
 
         val read = buckets.mapValues { (date, byPackage) ->
@@ -660,8 +683,35 @@ class HealthConnectManager(
         originsWithSteps(hc, start, gapEnd).forEach { pkg ->
             kinds.getOrPut(pkg) { StepSourceCatalog.classify(pkg, null, self) }
         }
-        val filled = aggregateBySource(start, gapEnd, kinds, names)
+        // Aggregates carry no recording method, so a day answered from them
+        // cannot have manual entries taken out. With that rule on, the gap is
+        // read again a day at a time instead - each day well inside the cap -
+        // so a range agrees with the day view. Those per-day reads fall back
+        // to aggregates themselves only for a day that alone outruns the cap.
+        val filled = if (needsRecordingMethods && perDayFill) {
+            perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs)
+        } else {
+            aggregateBySource(start, gapEnd, kinds, names)
+        }
         return read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete }
+    }
+
+    /** Each day from [first] to [last] read on its own, never filled a day at a time again. */
+    private suspend fun perDay(
+        first: String,
+        last: String,
+        end: Instant,
+        coverageStartMs: Long
+    ): Map<String, List<StepSource>> {
+        val out = HashMap<String, List<StepSource>>()
+        for (date in DateKeys.rangeOf(first, last)) {
+            val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
+            val day = readDailyStepsBySource(
+                DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false
+            )
+            day[date]?.let { out[date] = it }
+        }
+        return out
     }
 
     /**

@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG: Required<
     | 'calorieCoefficient'
     | 'historyRetentionDays'
     | 'notificationActions'
+    | 'notificationLockScreen'
     | 'notificationThrottleMs'
     | 'eventThrottleMs'
     | 'persistEveryNSteps'
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG: Required<
   calorieCoefficient: 0.57,
   historyRetentionDays: 35,
   notificationActions: true,
+  notificationLockScreen: 'private',
   notificationThrottleMs: 1000,
   eventThrottleMs: 500,
   persistEveryNSteps: 10,

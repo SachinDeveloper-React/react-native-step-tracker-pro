@@ -28,6 +28,13 @@ data class StepTrackerConfig(
     val notificationIcon: String? = null,
     val notificationChannelName: String? = null,
     val notificationActions: Boolean = true,
+    /**
+     * How the notification shows on a locked screen: `private` (default)
+     * hides the count behind a generic line when the user's lock-screen
+     * setting hides sensitive content - steps are health data - and
+     * `public` shows it always, as before 2.3.
+     */
+    val notificationLockScreen: String = LOCK_SCREEN_PRIVATE,
     val notificationThrottleMs: Long = 1_000L,
     val eventThrottleMs: Long = 500L,
     val persistEveryNSteps: Int = 10,
@@ -249,6 +256,7 @@ data class StepTrackerConfig(
         preferredStepSourcePackage = preferredStepSourcePackage?.takeIf { it.isNotBlank() },
         wearableTrust = com.steptrackerpro.health.WearableTrust.from(wearableTrust).jsValue,
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+        notificationLockScreen = if (notificationLockScreen == LOCK_SCREEN_PUBLIC) LOCK_SCREEN_PUBLIC else LOCK_SCREEN_PRIVATE,
         healthConnectReadTypes = com.steptrackerpro.health.HealthConnectManager.ReadType
             .parse(healthConnectReadTypes)
             .sortedBy { it.ordinal }
@@ -299,6 +307,7 @@ data class StepTrackerConfig(
         put("notificationIcon", notificationIcon ?: JSONObject.NULL)
         put("notificationChannelName", notificationChannelName ?: JSONObject.NULL)
         put("notificationActions", notificationActions)
+        put("notificationLockScreen", notificationLockScreen)
         put("notificationThrottleMs", notificationThrottleMs)
         put("eventThrottleMs", eventThrottleMs)
         put("persistEveryNSteps", persistEveryNSteps)
@@ -345,6 +354,9 @@ data class StepTrackerConfig(
     }
 
     companion object {
+        const val LOCK_SCREEN_PRIVATE = "private"
+        const val LOCK_SCREEN_PUBLIC = "public"
+
         /** `healthConnectReadTypes` when unset: all three, as before 2.1. */
         val DEFAULT_READ_TYPES: List<String> = listOf("steps", "distance", "totalCalories")
 
@@ -383,6 +395,7 @@ data class StepTrackerConfig(
                 notificationActions = json.optBoolean(
                     "notificationActions", fallback.notificationActions
                 ),
+                notificationLockScreen = json.optString("notificationLockScreen", fallback.notificationLockScreen),
                 notificationThrottleMs = json.optLong(
                     "notificationThrottleMs", fallback.notificationThrottleMs
                 ),

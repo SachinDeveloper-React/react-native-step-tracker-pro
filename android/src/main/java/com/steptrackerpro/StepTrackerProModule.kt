@@ -252,8 +252,21 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun stopTracking(promise: Promise) {
         runSafely(promise) {
+            // The decision is recorded here, before the command: the OS may
+            // refuse startForegroundService() while the app is in the
+            // background, and a stop that only lived in that command left
+            // shouldAutoStart on - tracking came back at the next launch or
+            // reboot. A live service that misses the command stops itself on
+            // its next heartbeat.
+            val wasAlive = StepTrackerService.isAlive
+            core.state.shouldAutoStart = false
+            core.state.trackingState = TrackingState.STOPPED
+            core.flush()
             ServiceCommands.send(reactContext, ServiceCommands.ACTION_STOP)
             SyncScheduler.cancelAll(reactContext)
+            // The service announces its own stop; with none running, nobody
+            // else will.
+            if (!wasAlive) core.emitTrackingState("stopped")
             promise.resolve(cachedSnapshot())
         }
     }
@@ -536,7 +549,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     /** Whether the install already has a signing key, so an app attests once rather than every launch. */
     @ReactMethod
     override fun hasAttestationKey(promise: Promise) {
-        launchSafely(promise) { promise.resolve(DeviceAttestation.hasKey()) }
+        launchSafely(promise) { promise.resolve(DeviceAttestation.hasAttestedKey(reactContext)) }
     }
 
     /**
@@ -1164,6 +1177,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             notificationActions = patch.optBoolean(
                 "notificationActions", current.notificationActions
             ),
+            notificationLockScreen = patch.optString("notificationLockScreen", current.notificationLockScreen)
+                ?: current.notificationLockScreen,
             notificationThrottleMs = patch.optLong(
                 "notificationThrottleMs", current.notificationThrottleMs
             ),
@@ -1295,6 +1310,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "calorieCoefficient" to config.calorieCoefficient,
         "historyRetentionDays" to config.historyRetentionDays,
         "notificationActions" to config.notificationActions,
+        "notificationLockScreen" to config.notificationLockScreen,
         "healthConnectEnabled" to config.healthConnectEnabled,
         "healthConnectSyncIntervalMinutes" to config.healthConnectSyncIntervalMinutes,
         "healthConnectReadEnabled" to config.healthConnectReadEnabled,

@@ -6,5 +6,7 @@
     <string name="stp_action_pause">Pause</string>
     <string name="stp_action_resume">Resume</string>
     <string name="stp_paused_text">Tracking paused</string>
+    <!-- What a locked screen shows in place of the count, under notificationLockScreen: 'private'. -->
+    <string name="stp_locked_text">Counting steps</string>
     <string name="stp_privacy_policy_missing">No privacy policy URL is configured for this app.</string>
 </resources>

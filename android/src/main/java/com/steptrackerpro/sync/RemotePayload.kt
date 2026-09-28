@@ -43,7 +43,13 @@ object RemotePayload {
          * presence is what adds `suspectSteps` and `integrity` to a `full`
          * record; without it the record is exactly the 1.4 shape.
          */
-        val integrity: Map<String, Any?>? = null
+        val integrity: Map<String, Any?>? = null,
+        /**
+         * How [sources] was read - one of
+         * [com.steptrackerpro.core.HealthConnectRead] - so an empty list is
+         * never mistaken for "no other apps".
+         */
+        val sourcesStatus: String = com.steptrackerpro.core.HealthConnectRead.READ
     )
 
     /** The header carrying [idempotencyKey]. */
@@ -162,6 +168,12 @@ object RemotePayload {
                                     JSONArray().apply {
                                         detail?.sources?.forEach { put(JSONObject(it)) }
                                     }
+                                )
+                                // A day the upload's detail pass did not reach
+                                // before its budget ran out has no detail.
+                                put(
+                                    "sourcesStatus",
+                                    detail?.sourcesStatus ?: com.steptrackerpro.core.HealthConnectRead.TIMED_OUT
                                 )
                                 detail?.integrity?.let { report ->
                                     put("suspectSteps", suspects[record.date] ?: 0)

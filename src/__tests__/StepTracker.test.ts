@@ -4,6 +4,7 @@ import {
   Platform,
   __emit,
   __listenerCount,
+  __setAppState,
   setNativeModule,
 } from '../__mocks__/react-native';
 import StepTracker, { estimateStride, isSupported } from '../StepTracker';
@@ -12,6 +13,7 @@ import TestRenderer from 'react-test-renderer';
 import type { ReactTestRenderer } from 'react-test-renderer';
 import { useStepTracker } from '../hooks/useStepTracker';
 import { useHealthConnect } from '../hooks/useHealthConnect';
+import { STATS_LIVE_REFRESH_MS, useStepStats } from '../hooks/useStepStats';
 import type { UseHealthConnectResult } from '../hooks/useHealthConnect';
 import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
@@ -121,6 +123,7 @@ const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
   [{ remoteSyncPayload: 'all' as 'full' }, /remoteSyncPayload/],
   [{ sex: 'other' as 'unspecified' }, /sex/],
   [{ dailyGoal: Number.NaN }, /dailyGoal/],
+  [{ notificationLockScreen: 'hidden' as 'private' }, /notificationLockScreen/],
   [{ healthConnectReadTypes: [] }, /healthConnectReadTypes/],
   [
     { healthConnectReadTypes: ['steps', 'heartRate' as 'steps'] },
@@ -1117,5 +1120,65 @@ describe('useHealthConnect()', () => {
     native.when('getHealthConnectStatus', { ...baseStatus, canRead: true });
     await render();
     expect(native.calledWith('getStepSources')).toHaveLength(1);
+  });
+});
+
+describe('useStepStats()', () => {
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  afterEach(() => jest.useRealTimers());
+
+  async function mount(offset?: number) {
+    function Probe() {
+      useStepStats('week', { offset });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe));
+    });
+    return renderer!;
+  }
+
+  beforeEach(() => native.when('getWeeklyStats', { totalSteps: 1, days: [] }));
+
+  it('refreshes when the app comes back to the foreground', async () => {
+    const renderer = await mount();
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(1);
+    await TestRenderer.act(async () => __setAppState('active'));
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
+  it('refreshes this week at most every 30 seconds while steps come in', async () => {
+    jest.useFakeTimers();
+    const renderer = await mount();
+    await TestRenderer.act(async () => {
+      for (let i = 0; i < 20; i++) __emit('StepTrackerPro:stepsChanged', { steps: i });
+      await jest.advanceTimersByTimeAsync(0);
+    });
+    // The first burst refreshes once, at once.
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
+    await TestRenderer.act(async () => {
+      __emit('StepTrackerPro:stepsChanged', { steps: 21 });
+      await jest.advanceTimersByTimeAsync(STATS_LIVE_REFRESH_MS - 1);
+    });
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
+    await TestRenderer.act(async () => {
+      await jest.advanceTimersByTimeAsync(1);
+    });
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(3);
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
+  it('leaves a past week alone while steps come in', async () => {
+    jest.useFakeTimers();
+    const renderer = await mount(-1);
+    await TestRenderer.act(async () => {
+      __emit('StepTrackerPro:stepsChanged', { steps: 1 });
+      await jest.advanceTimersByTimeAsync(STATS_LIVE_REFRESH_MS * 2);
+    });
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(1);
+    await TestRenderer.act(async () => renderer.unmount());
   });
 });

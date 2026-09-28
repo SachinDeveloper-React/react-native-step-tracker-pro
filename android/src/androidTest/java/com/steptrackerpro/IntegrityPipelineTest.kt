@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.steptrackerpro.core.ConfigStore
 import com.steptrackerpro.core.DateKeys
+import com.steptrackerpro.core.DayTotals
+import com.steptrackerpro.core.SyncTarget
 import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.IntegrityFlag
 import com.steptrackerpro.core.JsonMaps
@@ -140,6 +142,9 @@ class IntegrityPipelineTest {
         assertEquals(suspect, (signed["suspectSteps"] as Number).toInt())
         // A 2.0-shaped call carries none of the evidence parts.
         assertFalse("include" in signed || "minutes" in signed)
+        // This test app holds no Health Connect grant: sources were not asked,
+        // and the signed payload says so rather than just being empty.
+        assertEquals("not_consulted", signed["sourcesStatus"])
 
         // With include, the evidence is inside the signed payload itself.
         val full = core.verificationSnapshot(
@@ -278,6 +283,64 @@ class IntegrityPipelineTest {
         val undeclared = core.healthConnect.status(scope)["undeclaredPermissions"] as List<String>
         assertTrue(undeclared.containsAll(HealthConnectManager.READ_PERMISSIONS + HealthConnectManager.WRITE_PERMISSIONS))
         assertEquals(false, core.healthConnect.status(scope)["stepsGranted"])
+    }
+
+    @Test
+    fun aKeyASnapshotMadeIsNotTakenForAnAttestedOne() {
+        val store = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (store.containsAlias(DeviceAttestation.ALIAS)) store.deleteEntry(DeviceAttestation.ALIAS)
+        context.getSharedPreferences("StepTrackerProIntegrity", Context.MODE_PRIVATE).edit().clear().commit()
+
+        // A signed snapshot before any attestDevice() makes a key of its own...
+        DeviceAttestation.sign(context, "payload".toByteArray())
+        assertTrue(DeviceAttestation.hasKey())
+        // ...which no server has seen: not "attested already", not for uploads.
+        assertFalse(DeviceAttestation.hasAttestedKey(context))
+        assertEquals(DeviceAttestation.CREATED_BY_SIGN, DeviceAttestation.describe(context)!!["createdBy"])
+
+        DeviceAttestation.attest(context, "challenge-7".toByteArray())
+        assertTrue(DeviceAttestation.hasAttestedKey(context))
+        assertEquals(DeviceAttestation.CREATED_BY_ATTEST, DeviceAttestation.describe(context)!!["createdBy"])
+    }
+
+    @Test
+    fun retentionKeepsDaysASyncTargetHasNotAccepted() = runBlocking {
+        val repo = core.repository
+        val today = DateKeys.today()
+        val old = DateKeys.minusDays(today, 60)
+        val older = DateKeys.minusDays(today, 61)
+        val ancient = DateKeys.minusDays(today, 400)
+        for (date in listOf(old, older, ancient)) repo.saveDay(DayTotals(date, 1_000, 700.0, 30.0))
+        repo.markSynced(SyncTarget.REMOTE, listOf(older))
+
+        // Remote in use: the day not yet uploaded survives a 35-day window,
+        // the uploaded one does not, and nothing survives past a year.
+        repo.prune(35, keepUnsyncedRemote = true)
+        assertEquals(1_000, repo.getDay(old).steps)
+        assertEquals(0, repo.getDay(older).steps)
+        assertEquals(0, repo.getDay(ancient).steps)
+
+        // No target in use: retention is retention.
+        repo.prune(35)
+        assertEquals(0, repo.getDay(old).steps)
+    }
+
+    @Test
+    fun theNotificationHidesTheCountOnALockedScreenByDefault() {
+        val factory = com.steptrackerpro.service.NotificationFactory(context)
+        val snapshot = core.displaySnapshot()
+        val private = factory.build(snapshot, StepTrackerConfig().sanitised(), core.metrics)
+        assertEquals(android.app.Notification.VISIBILITY_PRIVATE, private.visibility)
+        val shown = private.publicVersion
+        assertTrue(shown != null)
+        val text = shown!!.extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString()
+        assertFalse(text.any { it.isDigit() })
+
+        val public = factory.build(
+            snapshot, StepTrackerConfig(notificationLockScreen = "public").sanitised(), core.metrics
+        )
+        assertEquals(android.app.Notification.VISIBILITY_PUBLIC, public.visibility)
+        assertTrue(public.publicVersion == null)
     }
 
     @Test

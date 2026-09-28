@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { AppState } from 'react-native';
 import StepTracker, { isSupported } from '../StepTracker';
 import type { RangeOptions, RangeStats } from '../types';
 
@@ -11,7 +12,20 @@ export interface UseStepStatsResult {
   reload: () => Promise<void>;
 }
 
-/** Fetches a windowed summary and refreshes it when the day rolls over. */
+/**
+ * While steps come in, a window that includes today is refreshed at most
+ * this often - enough for today's bar to move while walking, without a
+ * native read per step.
+ */
+export const STATS_LIVE_REFRESH_MS = 30_000;
+
+/**
+ * Fetches a windowed summary and keeps it current: again when the day rolls
+ * over, when the app comes back to the foreground, and - for a window that
+ * includes today - every {@link STATS_LIVE_REFRESH_MS} while steps come in.
+ * Those refreshes are quiet: `loading` only covers the first load and
+ * explicit `reload()` calls, so a chart does not flicker as it updates.
+ */
 export function useStepStats(
   period: StatsPeriod,
   options: RangeOptions = {}
@@ -22,34 +36,64 @@ export function useStepStats(
 
   const { mode, offset } = options;
 
-  const reload = useCallback(async () => {
-    if (!isSupported()) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const opts: RangeOptions = { mode, offset };
-      const next =
-        period === 'week'
-          ? await StepTracker.getWeeklyStats(opts)
-          : period === 'month'
-            ? await StepTracker.getMonthlyStats(opts)
-            : await StepTracker.getYearlyStats(opts);
-      setStats(next);
-      setError(null);
-    } catch (e) {
-      setError(e as Error);
-    } finally {
-      setLoading(false);
-    }
-  }, [period, mode, offset]);
+  const load = useCallback(
+    async (quiet: boolean) => {
+      if (!isSupported()) {
+        setLoading(false);
+        return;
+      }
+      if (!quiet) setLoading(true);
+      try {
+        const opts: RangeOptions = { mode, offset };
+        const next =
+          period === 'week'
+            ? await StepTracker.getWeeklyStats(opts)
+            : period === 'month'
+              ? await StepTracker.getMonthlyStats(opts)
+              : await StepTracker.getYearlyStats(opts);
+        setStats(next);
+        setError(null);
+      } catch (e) {
+        setError(e as Error);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [period, mode, offset]
+  );
+
+  const reload = useCallback(() => load(false), [load]);
+
+  // Only a window that has today in it moves with each step.
+  const live = mode === 'rolling' || (offset ?? 0) === 0;
 
   useEffect(() => {
-    void reload();
-    const sub = StepTracker.addListener('dayChanged', () => void reload());
-    return () => sub.remove();
-  }, [reload]);
+    void load(false);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastLive = 0;
+    const onSteps = () => {
+      if (!live || timer) return;
+      // Trailing: the refresh after a burst of steps includes all of them.
+      const wait = Math.max(0, lastLive + STATS_LIVE_REFRESH_MS - Date.now());
+      timer = setTimeout(() => {
+        timer = null;
+        lastLive = Date.now();
+        void load(true);
+      }, wait);
+    };
+    const subs = [
+      StepTracker.addListener('dayChanged', () => void load(false)),
+      StepTracker.addListener('stepsChanged', onSteps),
+    ];
+    const app = AppState.addEventListener('change', (next) => {
+      if (next === 'active') void load(true);
+    });
+    return () => {
+      subs.forEach((sub) => sub.remove());
+      app.remove();
+      if (timer) clearTimeout(timer);
+    };
+  }, [load, live]);
 
   return { stats, loading, error, reload };
 }

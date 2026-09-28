@@ -92,6 +92,15 @@ class StepTrackerService : Service(), SensorEventListener {
 
     private val heartbeat = object : Runnable {
         override fun run() {
+            // stopTracking() from JS turns tracking off in the module first
+            // and only then sends ACTION_STOP, which the OS may refuse to
+            // deliver while the app is in the background. The next beat
+            // finishes the job instead of counting on for someone who asked
+            // it to stop.
+            if (!core.state.shouldAutoStart) {
+                stopTracking()
+                return
+            }
             core.state.lastHeartbeatAt = System.currentTimeMillis()
             // The last minutes of a walk are judged even when no step follows
             // them, and under exclude mode the shade follows the verdict.
@@ -169,7 +178,12 @@ class StepTrackerService : Service(), SensorEventListener {
         integritySignals = IntegritySignals(this, core)
         sensorManager = getSystemService(SENSOR_SERVICE) as? SensorManager
         counterSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
-        detectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+        // The detector reports each step as an event, so a non-wake-up one
+        // loses steps once the hub's buffer fills with the CPU asleep - the
+        // counter only loses timing. Its wake-up variant, where the phone
+        // has one, wakes the CPU to deliver instead.
+        detectorSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR, true)
+            ?: sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
         // The wake-up variant keeps delivering with the CPU asleep and needs
         // no wake lock; most budget phones only have the non-wake-up one.
         accelerometerSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER, true)
@@ -201,7 +215,7 @@ class StepTrackerService : Service(), SensorEventListener {
         // worth taking on a path the user hits deliberately. When the service
         // was already in the foreground this is a no-op re-post.
         if (action == ServiceCommands.ACTION_STOP) {
-            promoteToForeground()
+            promoteToForeground(reportFailure = false)
             stopTracking()
             return START_NOT_STICKY
         }
@@ -212,6 +226,12 @@ class StepTrackerService : Service(), SensorEventListener {
         // returns START_STICKY, and the OS restarting it would resurrect
         // tracking nobody asked for.
         if (!explicitStart && !core.state.shouldAutoStart) {
+            // Delivered through startForegroundService() - a Pause button left
+            // on screen, a config change racing a stop - so the OS still
+            // expects startForeground() within its deadline. Promote first,
+            // exactly as ACTION_STOP does, then leave. A sticky restart has
+            // no intent and no deadline, and promoting is harmless there.
+            if (intent != null) promoteToForeground(reportFailure = false)
             stopForegroundCompat()
             stopSelf()
             return START_NOT_STICKY
@@ -461,10 +481,15 @@ class StepTrackerService : Service(), SensorEventListener {
         }
 
         detectorSensor?.let { sensor ->
+            // A wake-up detector delivering every step at once would wake
+            // the CPU ten thousand times a day; batched, it wakes it once
+            // per batch, and the steps are late by that much at most. A
+            // non-wake-up one keeps delivering at once while awake.
             val ok = manager.registerListener(
                 this,
                 sensor,
                 SensorManager.SENSOR_DELAY_NORMAL,
+                if (sensor.isWakeUpSensor) DETECTOR_WAKE_UP_LATENCY_US else MAX_REPORT_LATENCY_US,
                 handler
             )
             if (ok) {
@@ -719,7 +744,12 @@ class StepTrackerService : Service(), SensorEventListener {
     // ---- notification ----------------------------------------------------
 
     /** @return false when the promotion failed and the service must not continue. */
-    private fun promoteToForeground(): Boolean {
+    /**
+     * @param reportFailure false on the way out: a stop that cannot promote
+     *   is still a stop, and an `error` event would tell JS tracking failed
+     *   to start when nobody asked it to.
+     */
+    private fun promoteToForeground(reportFailure: Boolean = true): Boolean {
         val config = core.config()
         notifications.ensureChannel(config)
         val notification = notifications.build(core.displaySnapshot(), config, core.metrics)
@@ -741,7 +771,7 @@ class StepTrackerService : Service(), SensorEventListener {
             // ForegroundServiceDidNotStartInTimeException. The caller stops the
             // service instead of carrying on and reporting itself as running.
             Log.e(TAG, "startForeground failed", error)
-            StepEventBus.emit(
+            if (reportFailure) StepEventBus.emit(
                 StepEventBus.Events.ERROR,
                 mapOf(
                     "code" to "E_SERVICE_START_FAILED",
@@ -828,6 +858,9 @@ class StepTrackerService : Service(), SensorEventListener {
          * this cheap because the SoC sensor hub does the counting either way.
          */
         private const val MAX_REPORT_LATENCY_US = 0
+
+        /** How long a wake-up step detector may hold steps before waking the CPU. */
+        private const val DETECTOR_WAKE_UP_LATENCY_US = 5_000_000
 
         /** Widest plausible age for a batched sample, used to sanity-check HALs. */
         private const val MAX_EVENT_AGE_MS = 60_000L

@@ -361,10 +361,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.2.1** — a month of a busy
-watch no longer loses its newest days to the read cap, a range read that runs
-out of time says so, read types and writes an app sets itself must be
-declared again, and refusing to let the app write is no longer a refusal.
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.0** — fixes a crash when a
+command reached the service after stop, a snapshot-made key passing for an
+attested one, `stopTracking()` being undone by the next launch, retention
+deleting days never uploaded, and signed snapshots with an empty `sources`
+that could have been a failed read; the notification is now private on the
+lock screen by default. **2.2.1** kept a month of a busy watch from losing its
+newest days to the read cap, and made read types and writes an app sets
+itself need declaring again.
 **2.2.0** stopped counting an unticked distance as refusing Health Connect,
 fitted the permission request to the manifest, stopped reporting a partial
 distance read as measured, took the clock out of `authFailed`, and added
