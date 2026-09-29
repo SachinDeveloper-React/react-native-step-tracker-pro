@@ -46,6 +46,7 @@ class StepCounterEngineTest {
     private val backfills = mutableListOf<Map<String, Int>>()
     private val backfillReasons = mutableListOf<StepCounterEngine.BackfillReason>()
     private val observed = mutableListOf<Triple<Long, Long, Int>>()
+    private val observedTimed = mutableListOf<Boolean>()
 
     private fun now() = fakeNow
 
@@ -74,6 +75,7 @@ class StepCounterEngineTest {
         backfills.clear()
         backfillReasons.clear()
         observed.clear()
+        observedTimed.clear()
         engine = StepCounterEngine(
             state,
             MetricsCalculator(StepTrackerConfig()),
@@ -86,7 +88,10 @@ class StepCounterEngineTest {
             backfills += shares
             backfillReasons += reason
         }
-        engine.onObserved = { from, to, steps -> observed += Triple(from, to, steps) }
+        engine.onObserved = { from, to, steps, timed ->
+            observed += Triple(from, to, steps)
+            observedTimed += timed
+        }
     }
 
     @Test
@@ -101,6 +106,20 @@ class StepCounterEngineTest {
         // Nothing new, nothing observed.
         engine.onCounterSample(120f, t2 + 1_000L)
         assertEquals(2, observed.size)
+        assertEquals(listOf(true, true), observedTimed)
+    }
+
+    @Test
+    fun untimedSamplesAreCountedAndObservedUntimed() {
+        val t1 = now()
+        engine.onCounterSample(50f, t1)
+        // Samples whose own timestamps were unusable: every step counts, and
+        // the timeline is told only their arrival is known.
+        engine.onCounterSample(52f, t1 + 500L, timed = false)
+        engine.onDetectorSample(1, t1 + 900L, timed = false)
+        assertEquals(53, engine.snapshot().steps)
+        assertEquals(listOf(Triple(0L, t1, 50), Triple(t1, t1 + 500L, 2), Triple(t1 + 500L, t1 + 900L, 1)), observed)
+        assertEquals(listOf(true, false, false), observedTimed)
     }
 
     @Test
@@ -389,6 +408,34 @@ class StepCounterEngineTest {
 
         // Yesterday's cumulative reading must not leak into today.
         assertEquals(35, engine.onCounterSample(5040f, now())!!.steps)
+    }
+
+    @Test
+    fun theDayEndsAtMidnightWithoutWaitingForAStep() {
+        // Late yesterday as above, and the phone still since.
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 4100f
+        state.anchorSteps = 0
+        state.lastRawValue = 5000f
+        state.stepsToday = 900
+        state.lastEventAt = bootAt(DateKeys.yesterday(), 23) + 59 * 60_000L + 30_000L
+        fakeBoot = bootAt(DateKeys.yesterday(), 8)
+        fakeNow = bootAt(DateKeys.today(), 0) + 30_000L
+
+        // The service's heartbeat, or any read of the day.
+        assertTrue(engine.rollIfNeeded())
+        assertEquals(1, rollovers.size)
+        assertEquals(DateKeys.yesterday(), rollovers[0].first.date)
+        assertEquals(900, rollovers[0].first.steps)
+        assertEquals(DateKeys.today(), engine.snapshot().date)
+        assertEquals(0, engine.snapshot().steps)
+        assertFalse(engine.rollIfNeeded())
+
+        // The first sample still places the steps since the last reading on
+        // both sides of midnight, and does not close the day a second time.
+        assertEquals(5, engine.onCounterSample(5010f, now())!!.steps)
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 5)), backfills)
+        assertEquals(1, rollovers.size)
     }
 
     @Test

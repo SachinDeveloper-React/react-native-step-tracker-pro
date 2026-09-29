@@ -74,6 +74,12 @@ and neither the next launch nor a reboot starts tracking again - even when the
 app is in the background and Android refuses to deliver the stop to the
 service. A service that misses it stops itself within a minute.
 
+The sync, retention and watchdog jobs stay cancelled until `startTracking()`:
+`initialize()` and `updateConfig()` schedule them only while tracking is on
+(2.3.6); before, the next launch's `initialize()` scheduled the sync and
+retention jobs again. `syncNow()` still uploads a stopped tracker's pending
+days on request.
+
 ### `getTrackingState(): Promise<TrackingState>`
 
 `'idle' | 'running' | 'paused' | 'stopped' | 'unsupported'`.
@@ -467,13 +473,17 @@ walking with a power bank plugged in is flagged `charging`, and a marathon
 runs past `maxContinuousMinutes` — which is why the default `mode` is `'flag'`
 and the verdict is meant for a server that weighs several signals together.
 
-**What the timing rules protect.** Steps delivered in one lump after a
-silence — a sensor batch that overflowed with the screen off, or the first
-sample after a dead process — have no known minute. They are stored as
-`untimedSteps` at the minute they arrived in and never judged for cadence,
-steadiness or stamina: spreading them across the gap would invent exactly the
-metronomic count `steady_cadence` looks for. Steps credited by gap recovery
-are not in any minute at all; only the daily cap can reach them.
+**What the timing rules protect.** With the screen off, the phone's sensor
+hub holds a walk's steps and delivers them minutes later in one batch; each
+keeps the minute it was taken in, up to 30 minutes late (2.3.6). Steps whose
+minute is unknown — a batch that overflowed, the first sample after a dead
+process, or samples whose own timestamps are unusable or older than that —
+are stored as `untimedSteps` at the minute they arrived in and never judged
+for cadence, steadiness or stamina: piling them into their arrival minute as
+timed steps would flag an honest walk for a cadence nobody walks at, and
+spreading them across the gap would invent exactly the metronomic count
+`steady_cadence` looks for. Steps credited by gap recovery are not in any
+minute at all; only the daily cap can reach them.
 
 **`mode: 'exclude'`** also takes `suspectSteps` out of every number this
 package shows or sends: `getTodaySteps()`, `stepsChanged`, the notification,
@@ -991,8 +1001,10 @@ request starts from a clean sheet rather than being sent to settings.
 
 ### `readHealthConnectSteps(startIso, endIso)`
 
-ISO-8601 instants. Aggregated per day across every source Health Connect knows
-about, so it includes a paired watch, not just your app.
+ISO-8601 instants with a zone, start before end, as for
+[`getHealthConnectRecords()`](#gethealthconnectrecordsstartiso-endiso-options-promisehealthconnectrecordlist).
+Aggregated per day across every source Health Connect knows about, so it
+includes a paired watch, not just your app.
 
 ```ts
 { totalSteps: 82310, records: [ { date, steps, distance, calories, synced } ] }
@@ -1033,7 +1045,10 @@ as stored - for a server that wants the evidence rather than a total.
 }
 ```
 
-ISO-8601 instants with a zone, start before end. Unlike the aggregated reads
+ISO-8601 instants with a zone, start before end: `Z` or an offset such as
+`+05:30`. Both go to native as UTC (2.3.6), the only form Android 8–13
+parses; before, an offset failed there with `E_UNKNOWN`. A time with no zone names no
+instant and rejects with `E_INVALID_CONFIG`. Unlike the aggregated reads
 it does not fall back quietly: it rejects with
 `E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`.
 
@@ -1352,11 +1367,24 @@ wearable total arriving in jumps cannot fire a goal twice.
 
 Runs Health Connect sync inline and queues the remote upload. The remote result
 arrives later on the `syncCompleted` event, since WorkManager waits for a
-network.
+network. Until then its entry in the list says so rather than claiming an
+outcome (2.3.6):
+
+```ts
+{ target: 'remote', syncedRecords: 0, failedRecords: 0, success: true, queued: true }
+```
+
+`success` there means the upload was queued. Its `syncCompleted` fires even
+when there turns out to be nothing to send.
 
 ### `getPendingSyncCount(): Promise<number>`
 
-Days written locally but not yet mirrored. Non-zero offline is normal.
+Days a sync target in use has not accepted yet: not uploaded, when
+`remoteSyncUrl` is set; not mirrored into Health Connect, when writes are on
+and granted. Today does not count towards Health Connect, which writes it
+again on every pass. With neither target in use it is 0 (2.3.6); before, it
+counted the days an unused target had never taken, so it never reached 0.
+Non-zero offline is normal.
 
 ### `getSyncStatus(): Promise<SyncStatus>`
 
@@ -1408,9 +1436,12 @@ if (remote.authFailed) {
 
 With `remoteSyncUrl` set, a WorkManager job POSTs every day not yet uploaded
 (`syncedRemote: false`) once an hour when a network is available, with
-exponential backoff, and marks them uploaded on any 2xx. `syncNow()` queues
-the same job immediately. The URL must be `https://` unless
-`remoteSyncAllowHttp` is set; `remoteSyncHeaders` go on every request.
+exponential backoff, and marks them uploaded on any 2xx - each day only if it
+has not changed since the upload read it (2.3.6), so a day a
+`historyBackfilled` recovery grew while the upload was in flight goes again
+with its new total. `syncNow()` queues the same job immediately. The URL must
+be `https://` unless `remoteSyncAllowHttp` is set; `remoteSyncHeaders` go on
+every request.
 
 **Authentication.** `remoteSyncHeaders` are sealed with an AES key in the
 Android Keystore before they are stored, never written in the clear; headers
@@ -1594,9 +1625,9 @@ than replaying missed events. `useStepTracker` already does this.
 | `accelerometerFallback` | `true` | count over the accelerometer on phones with neither step sensor — see [ARCHITECTURE.md](ARCHITECTURE.md#the-accelerometer-fallback) |
 | `accelerometerWakeLock` | `true` | hold a partial wake lock while sampling a non-wake-up accelerometer, so counting survives the screen going off |
 | `accelerometerThreshold` | `0.9` | m/s² of linear acceleration that counts as a step; raise for vehicle false positives, lower for missed gentle walks |
-| `motionSampling` | `{ enabled: false }` | `{ enabled, windowSeconds?: 10, intervalMinutes?: 5 }` — periodic accelerometer windows reduced to features on device; see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow) |
+| `motionSampling` | `{ enabled: false }` | `{ enabled?, windowSeconds?: 10, intervalMinutes?: 5 }` — periodic accelerometer windows reduced to features on device; see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Patched key by key: a key left out keeps its value |
 | `motionWindowRetention` | 288 | how many motion windows to keep; a day at five-minute intervals |
-| `fraudDetection` | `{ enabled: false }` | `{ enabled, mode?: 'flag' \| 'exclude', maxCadenceSpm?: 200, steadyCadenceMinutes?: 30, maxContinuousMinutes?: 180, maxDailySteps?: 50000, flagWhileCharging?: true, activityRecognition?: false }` — per-minute buckets, the event log and the fraud detector; `0` turns a threshold off. See [Integrity checks](#integrity-checks) |
+| `fraudDetection` | `{ enabled: false }` | `{ enabled?, mode?: 'flag' \| 'exclude', maxCadenceSpm?: 200, steadyCadenceMinutes?: 30, maxContinuousMinutes?: 180, maxDailySteps?: 50000, flagWhileCharging?: true, activityRecognition?: false }` — per-minute buckets, the event log and the fraud detector; `0` turns a threshold off. Patched key by key: `updateConfig({ fraudDetection: { mode: 'exclude' } })` changes the mode alone. See [Integrity checks](#integrity-checks) |
 
 ---
 

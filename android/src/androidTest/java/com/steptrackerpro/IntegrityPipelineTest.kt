@@ -21,6 +21,7 @@ import com.steptrackerpro.health.HealthConnectManager
 import com.steptrackerpro.integrity.ActivityRecognitionBridge
 import com.steptrackerpro.service.BootReceiver
 import com.steptrackerpro.integrity.DeviceAttestation
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -312,7 +313,7 @@ class IntegrityPipelineTest {
         val older = DateKeys.minusDays(today, 61)
         val ancient = DateKeys.minusDays(today, 400)
         for (date in listOf(old, older, ancient)) repo.saveDay(DayTotals(date, 1_000, 700.0, 30.0))
-        repo.markSynced(SyncTarget.REMOTE, listOf(older))
+        repo.markSynced(SyncTarget.REMOTE, listOf(repo.getDay(older)))
         // The evidence a full upload's integrity report is built from.
         val oldMinute = DateKeys.startOfDayMillis(old) + 9 * 3_600_000L
         val olderMinute = DateKeys.startOfDayMillis(older) + 9 * 3_600_000L
@@ -336,6 +337,113 @@ class IntegrityPipelineTest {
         repo.prune(35)
         assertEquals(0, repo.getDay(old).steps)
         assertEquals(0, repo.minutes(old, old).size)
+    }
+
+    @Test
+    fun aDayThatGrewWhileItWasSyncingStaysQueued() = runBlocking {
+        val repo = core.repository
+        val yesterday = DateKeys.yesterday()
+        val before = DateKeys.minusDays(yesterday, 1)
+        for (target in SyncTarget.entries) {
+            repo.clear()
+            repo.saveDay(DayTotals(before, 4_000, 2_800.0, 120.0))
+            repo.saveDay(DayTotals(yesterday, 6_000, 4_200.0, 180.0))
+            // A sync reads what is pending and sends it, and while it is in
+            // flight the morning's first sample backfills yesterday.
+            val sent = repo.unsynced(target)
+            repo.addToDay(yesterday, 300, core.metrics)
+            repo.markSynced(target, sent)
+            // The day that did not change is done; the one that grew is
+            // still queued, with its new total, until that is sent.
+            val pending = repo.unsynced(target)
+            assertEquals(listOf(yesterday), pending.map { it.date })
+            assertEquals(6_300, pending.single().steps)
+            repo.markSynced(target, pending)
+            assertTrue(repo.unsynced(target).isEmpty())
+        }
+    }
+
+    @Test
+    fun onlyTargetsInUseHaveAnythingPending() = runBlocking {
+        val repo = core.repository
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        repo.saveDay(DayTotals(yesterday, 6_000, 4_200.0, 180.0))
+        repo.saveDay(DayTotals(today, 1_000, 700.0, 30.0))
+        assertEquals(0, repo.countPending(remote = false, health = false, today = today))
+        // Health Connect sync writes today on every pass and never marks it,
+        // so today never waits on it; an endpoint has both days to accept.
+        assertEquals(1, repo.countPending(remote = false, health = true, today = today))
+        assertEquals(2, repo.countPending(remote = true, health = false, today = today))
+        assertEquals(2, repo.countPending(remote = true, health = true, today = today))
+        repo.markSynced(SyncTarget.HEALTH_CONNECT, listOf(repo.getDay(yesterday)))
+        assertEquals(0, repo.countPending(remote = false, health = true, today = today))
+
+        // No URL, and no Health Connect grant in this test app: nothing is
+        // waiting on anything, however many rows are unmarked.
+        core.updateConfig(core.config().copy(remoteSyncUrl = null))
+        assertEquals(0, core.pendingSyncCount())
+        core.updateConfig(core.config().copy(remoteSyncUrl = "https://example.com/steps"))
+        assertEquals(2, core.pendingSyncCount())
+    }
+
+    @Test
+    fun aStoppedTrackerGetsNoBackgroundWorkBackFromTheNextLaunch() {
+        fun scheduled(name: String) = runBlocking {
+            androidx.work.WorkManager.getInstance(context)
+                .getWorkInfosForUniqueWorkFlow(name).first().any { !it.state.isFinished }
+        }
+        // No remote URL: a scheduled upload would really go out from here.
+        val mirror = com.steptrackerpro.sync.HealthConnectSyncWorker.NAME
+        val retention = com.steptrackerpro.sync.RetentionWorker.NAME
+
+        // Tracking on: a config change schedules the background work.
+        core.state.shouldAutoStart = true
+        core.updateConfig(core.config().copy(healthConnectEnabled = true, healthConnectWriteEnabled = true))
+        assertTrue(scheduled(mirror))
+        assertTrue(scheduled(retention))
+
+        // stopTracking() records the stop and cancels it...
+        core.state.shouldAutoStart = false
+        com.steptrackerpro.sync.SyncScheduler.cancelAll(context)
+        // ...and the next launch's initialize() runs the config through again.
+        core.updateConfig(core.config())
+        assertFalse(scheduled(mirror))
+        assertFalse(scheduled(retention))
+    }
+
+    @Test
+    fun aReadAfterMidnightIsOfTheNewDayWithoutAStep() = runBlocking {
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        val events = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val subscriber = com.steptrackerpro.util.StepEventBus.Subscriber { name, payload -> events += name to payload }
+        com.steptrackerpro.util.StepEventBus.subscribe(subscriber)
+        try {
+            // 900 steps yesterday, and none since midnight to end the day.
+            core.state.activeDate = yesterday
+            core.state.stepsToday = 900
+
+            // getStepsForDate(today) and getCurrentStepSource() read this.
+            val resolved = core.resolveDay(today)
+            assertEquals(today, resolved.totals.date)
+            assertEquals(0, resolved.totals.steps)
+            assertEquals(today, core.engine.snapshot().date)
+
+            // The closing day is saved and announced; queued behind that on
+            // the write lane, this returns once it has happened.
+            core.pruneHistory(core.config().historyRetentionDays)
+            assertEquals(900, core.repository.getDay(yesterday).steps)
+            val dayChanged = events.single { it.first == com.steptrackerpro.util.StepEventBus.Events.DAY_CHANGED }.second
+            assertEquals(yesterday, dayChanged["previousDate"])
+            assertEquals(900, dayChanged["previousDaySteps"])
+            // And the live count moved on without a step to carry it.
+            val live = events.last { it.first == com.steptrackerpro.util.StepEventBus.Events.STEPS_CHANGED }.second
+            assertEquals(today, live["date"])
+            assertFalse(core.rollDayIfDue())
+        } finally {
+            com.steptrackerpro.util.StepEventBus.unsubscribe(subscriber)
+        }
     }
 
     @Test

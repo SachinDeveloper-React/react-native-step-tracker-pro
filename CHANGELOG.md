@@ -5,6 +5,79 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.6] - 2026-09-29
+
+Fixes from a review of 2.3.5.
+
+### Fixed
+
+- **Honest walks were flagged as fraud.** A sensor sample more than a minute
+  old had its time replaced with the moment it arrived. With the screen off
+  and the CPU asleep, the phone's step counter keeps a walk's samples in the
+  sensor hub and delivers them in one batch minutes later, so the whole walk
+  landed in one minute: hundreds of steps, a strong `cadence` flag, and those
+  steps counted in `suspectSteps` - and taken out of every number under
+  `mode: 'exclude'`. A sample up to 30 minutes late now keeps the time it was
+  taken, read on the elapsed-realtime clock or, for the HALs that stamp it,
+  the wall clock. One whose timestamp is unusable or older is parked as
+  `untimedSteps` at the minute it arrived in, never as timed steps. A JVM
+  test walks five minutes with the screen off and delivers them in one
+  batch: stamped with the arrival they make one 550-step minute and a
+  cadence flag, placed by their own timestamps six minutes of about 110 and
+  no flag.
+- **Steps added to a day during an upload were never uploaded.** A
+  successful upload marked every day it sent as done, even one that changed
+  while the request was in flight. A backfill for yesterday landing then -
+  likely on Xiaomi, Oppo and Vivo phones, where the app opens in the morning
+  and calls `syncNow()` just as the first sample backfills the night the
+  service was killed - never reached the server. Health Connect sync had the
+  same race. A day is marked done only if it has not changed since the sync
+  read it, so one that grew goes again with its new total.
+- **The day changed only on the first step after midnight.** A phone lying
+  still kept yesterday's total in the notification, `getStepsForDate(today)`
+  and `getCurrentStepSource()` answered with yesterday's date and count, and
+  `dayChanged`, the closing day's final save and its end-of-day verdict
+  waited for the first step or the app being opened. The service's
+  once-a-minute heartbeat and every read of a day now end the day when the
+  date has moved on, and `stepsChanged` follows for the new day.
+- **`getHealthConnectRecords()` failed with `E_UNKNOWN` on Android 8–13 for
+  an instant with an offset** such as `+05:30`: native parses with
+  `Instant.parse`, which before Android 14 reads only a `Z` time. It and
+  `readHealthConnectSteps()`, which checked nothing, now send UTC, converted
+  in JS. A time with no zone names no instant and rejects with
+  `E_INVALID_CONFIG`; it failed on every version before.
+- **`getPendingSyncCount()` never reached 0 without a remote URL, or with
+  Health Connect writes off.** It counted days any target had not taken,
+  whether the app used that target or not. It now counts the days a target
+  in use has not accepted, and leaves today out for Health Connect, which
+  writes it again on every pass.
+- **`syncNow()` reported the queued remote upload as `success: true` with an
+  `error`.** The entry says `queued: true` instead and carries no error, and
+  the upload's `syncCompleted` now fires even when there is nothing to send.
+- **The next launch undid `stopTracking()`'s cancelling of background
+  work.** It cancels the sync and retention jobs, and `initialize()`
+  scheduled them again on every launch. `initialize()` and `updateConfig()`
+  schedule them only while tracking is on.
+- **A partial `fraudDetection` or `motionSampling` patch failed the type
+  check.** `enabled` was required in both types, so
+  `updateConfig({ fraudDetection: { mode: 'exclude' } })` did not compile,
+  though native patches these objects key by key. It is optional now.
+
+### Added
+
+- `SyncEvent.queued`.
+
+### Docs
+
+- `remoteSyncHeaders` was documented as stored in the clear. It has been
+  sealed with an Android Keystore key since 2.0.
+- ARCHITECTURE said zero report latency made late samples no practical
+  concern. It makes the hub deliver on time only while the CPU is awake; a
+  sleeping phone gets its samples in a batch minutes late. What that means
+  for the minute buckets and for midnight is now written down: steps taken
+  just before midnight on a sleeping phone and delivered after it still
+  count towards the new day.
+
 ## [2.3.5] - 2026-09-28
 
 ### Fixed
@@ -1254,6 +1327,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.6]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.6
 [2.3.5]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.5
 [2.3.4]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.4
 [2.3.3]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.3

@@ -172,9 +172,25 @@ clears the day's continuity baseline, and blanks the anchor so the next sample
 goes through gap recovery — which is how the handful of steps between the last
 sample before midnight and the first after it end up on the right sides.
 
-Sensor batching is set to zero latency, so a sample delivered after midnight for
-steps taken before it is not a practical concern. If you raise
-`MAX_REPORT_LATENCY_US` to save battery, that trade-off comes back.
+The first sample after midnight runs it, and so does
+`StepTrackerCore.rollDayIfDue()` — from the service's once-a-minute heartbeat
+and before every read of a day — which then sends `stepsChanged` for the new
+day. Before 2.3.6, waiting for a sample alone left a phone lying still
+across midnight on yesterday: the notification kept yesterday's total,
+`getStepsForDate(today)` and `getCurrentStepSource()` answered with
+yesterday's date and count, and `dayChanged`, the closing day's final save
+and its verdict all waited for the first step of the morning.
+
+Zero report latency does not make samples punctual. It makes the hub hand over
+each change as it happens *while the CPU is awake*. With the screen off and the
+CPU asleep, the default step counter — a non-wake-up sensor — keeps its
+samples in the hub's FIFO and delivers them in one batch when something next
+wakes the CPU, often minutes later. Each keeps its own timestamp, and the
+service reads up to 30 minutes of that lateness back into the time the step was
+taken (`SensorEventTime`), so the minute buckets place the walk where it
+happened. Which *day* a sample counts towards is still decided when it
+arrives: steps taken in the last minutes before midnight on a sleeping phone,
+and delivered after it, count towards the new day.
 
 ### Process death
 
@@ -271,9 +287,19 @@ ever changes a count.
 
 **Minute buckets.** The engine reports every delta it *watched* — never one
 gap recovery credited in one go, never a paused one — through
-`onObserved(from, to, steps)`, where `from` and `to` are the previous and
-current samples' event times. `MinuteAttribution` places it: a delta after up
-to a minute of silence is split across the minutes it overlaps, in
+`onObserved(from, to, steps, timed)`, where `from` and `to` are the previous
+and current samples' event times. An event time is when the step was taken,
+not when its sample arrived: a batch the hub held while the CPU slept arrives
+minutes late, and `SensorEventTime` reads each sample's own timestamp back — on
+the elapsed-realtime clock, or on the wall clock for the HALs that stamp that
+— up to 30 minutes old. A timestamp that fits neither is replaced with the
+arrival time and the sample is reported `timed = false`. Stamping those with
+the arrival as if it were known, which is what happened to anything over a
+minute old before 2.3.6, put a whole screen-off walk into the minute its batch
+arrived in: hundreds of honest steps in one minute, and a strong `cadence`
+flag on them. `MinuteAttribution` places each delta: an untimed one is parked
+as `untimedSteps` at its arrival minute, however few its steps; a delta after
+up to a minute of silence is split across the minutes it overlaps, in
 proportion, with cumulative rounding so the shares always sum back; a few
 steps after a longer silence are a walk starting and belong to the arrival
 minute; more than 20 after a longer silence is a lump — a hub FIFO that
@@ -442,8 +468,9 @@ the React module share the process, so that flag is definitive: a SIGKILL
 takes it with the process and only `onDestroy` clears it otherwise. The
 service also stamps a heartbeat every 60 s from its sensor thread even when
 the user is still, so `heartbeatAgeMs` says how long ago it was last known to
-be alive. Every non-user start is recorded (`recoveryCount`,
-`lastRecoveryReason`) so an app can decide when to show the OEM guidance.
+be alive; the same beat ends the day at midnight when no step does. Every
+non-user start is recorded (`recoveryCount`, `lastRecoveryReason`) so an app
+can decide when to show the OEM guidance.
 
 Notification updates are throttled to `notificationThrottleMs` and skipped when
 the step count has not changed, so a walk does not redraw the shade sixty times
@@ -488,8 +515,19 @@ Health Connect sync has no network constraint because Health Connect is entirely
 on-device. Offline sync is still sync. Only the optional `remoteSyncUrl` upload
 waits for connectivity, and nothing else waits on it.
 
+The jobs belong to a tracker that is on. The service schedules them when
+tracking starts, a config change reschedules them while it is on, and
+`stopTracking()` cancels them. `initialize()` and `updateConfig()` leave a
+stopped tracker without them; before 2.3.6 they scheduled them on every
+launch, which brought back what a stop had cancelled.
+
 Today's row is written to Health Connect on every pass but left `synced = 0`,
-because it is still moving. Closed days are marked synced once written.
+because it is still moving. Closed days are marked synced once written — each
+only while it still holds the count the pass read. A backfill can land on a
+day while a pass is in flight — the first sample of the morning on a phone
+whose OEM killed the service overnight, backfilling yesterday — and it
+re-queues the day; marking it done over that would keep the new steps out for
+good. Remote uploads mark their days the same way.
 
 A day a wearable owns is skipped and marked done rather than written. Skipping
 is the point — Health Connect keeps origins separate, so writing this phone's
@@ -498,9 +536,10 @@ Marking it done rather than leaving it queued matters too: nothing about that da
 will ever make it writable, so a pending row would be retried for as long as it
 stays in retention.
 
-Remote uploads classify the response: 2xx marks the rows uploaded; 401 and
-403 raise `syncAuthFailed` and end the attempt without a retry, because the
-same credentials would be refused again; anything else, or no response, is
+Remote uploads classify the response: 2xx marks the rows uploaded — those
+still holding the count the upload read; 401 and 403 raise `syncAuthFailed`
+and end the attempt without a retry, because the same credentials would be
+refused again; anything else, or no response, is
 retried with backoff. Every outcome is also written to `StepStateStore`, filed
 under the moment the attempt read its credentials, because the worker
 usually runs with no JS to hear the event. `getSyncStatus()` reads it back;

@@ -93,7 +93,23 @@ class RemoteSyncWorker(
         }
 
         val pending = core.repository.unsynced(SyncTarget.REMOTE, limit = 200)
-        if (pending.isEmpty()) return Result.success()
+        if (pending.isEmpty()) {
+            // syncNow() told JS this run's outcome arrives as syncCompleted;
+            // with nothing to send, that is the outcome. The hourly run
+            // stays quiet.
+            if (inputData.getBoolean(KEY_ON_DEMAND, false)) {
+                StepEventBus.emit(
+                    StepEventBus.Events.SYNC_COMPLETED,
+                    mapOf(
+                        "target" to "remote",
+                        "syncedRecords" to 0,
+                        "failedRecords" to 0,
+                        "success" to true
+                    )
+                )
+            }
+            return Result.success()
+        }
 
         // Signature-only auth stores no secret at all, so without a key there
         // is nothing to authenticate with. Not retried: the app attests first.
@@ -162,7 +178,12 @@ class RemoteSyncWorker(
         }
 
         if (outcome == RemotePayload.Outcome.UPLOADED) {
-            core.repository.markSynced(SyncTarget.REMOTE, pending.map { it.date })
+            // Only days still holding the count this upload read. A
+            // backfill for yesterday landing while it was in flight - the
+            // first sample of the morning on a phone whose OEM killed the
+            // service overnight - re-queued the day, and marking it done
+            // would keep those steps off the server for good.
+            core.repository.markSynced(SyncTarget.REMOTE, pending)
             core.state.recordRemoteSuccess(attempt)
             StepEventBus.emit(
                 StepEventBus.Events.SYNC_COMPLETED,
@@ -310,6 +331,10 @@ class RemoteSyncWorker(
 
     companion object {
         const val NAME = "stp_remote_sync"
+
+        /** Input flag on the run `syncNow()` queues, which always reports on `syncCompleted`. */
+        const val KEY_ON_DEMAND = "onDemand"
+
         private const val MAX_ATTEMPTS = 5
         private const val REQUEST_TIMEOUT_MS = 45_000L
 

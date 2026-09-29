@@ -244,12 +244,23 @@ function utf8Length(value: string): number {
   return encodeURIComponent(value).replace(/%[0-9A-F]{2}/gi, 'x').length;
 }
 
-function isIsoInstant(value: string): boolean {
-  return typeof value === 'string' && /T/.test(value) && !Number.isNaN(Date.parse(value));
-}
+/** A date, a time and a zone: `Z` or an offset like `+05:30`. */
+const ISO_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/i;
 
-function assertInstantRange(startIso: string, endIso: string): void {
-  if (!isIsoInstant(startIso) || !isIsoInstant(endIso)) {
+/**
+ * Checks two instants and returns them in UTC, as `toISOString()` writes
+ * them. Native parses with `Instant.parse`, which before Android 14 takes
+ * only a `Z` time: an offset like `+05:30` failed there as `E_UNKNOWN`. A
+ * time with no zone at all names no instant, so it is refused here rather
+ * than read in whatever zone the phone is in.
+ */
+function utcInstantRange(startIso: string, endIso: string): [string, string] {
+  const valid = (value: string) =>
+    typeof value === 'string' &&
+    ISO_INSTANT.test(value) &&
+    !Number.isNaN(Date.parse(value));
+  if (!valid(startIso) || !valid(endIso)) {
     throw new StepTrackerError(
       'E_INVALID_CONFIG',
       "Instants must be ISO-8601 with a zone, e.g. '2026-09-01T00:00:00Z'"
@@ -258,6 +269,7 @@ function assertInstantRange(startIso: string, endIso: string): void {
   if (Date.parse(startIso) >= Date.parse(endIso)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'startIso must be before endIso');
   }
+  return [new Date(startIso).toISOString(), new Date(endIso).toISOString()];
 }
 
 /** Rejects a value that is present but not one of `allowed`. */
@@ -392,10 +404,10 @@ async function getHealthConnectRecords(
   endIso: string,
   options?: HealthConnectRecordOptions
 ): Promise<HealthConnectRecordList<AnyHealthConnectRecord>> {
-  assertInstantRange(startIso, endIso);
+  const [start, end] = utcInstantRange(startIso, endIso);
   const native = recordTypesOption(options);
   return call(() =>
-    getNativeModule().getHealthConnectRecords(startIso, endIso, native)
+    getNativeModule().getHealthConnectRecords(start, end, native)
   ) as Promise<HealthConnectRecordList<AnyHealthConnectRecord>>;
 }
 
@@ -1070,14 +1082,21 @@ export const StepTracker = {
     return call(() => getNativeModule().revokeHealthConnectPermissions());
   },
 
-  /** ISO-8601 instants, e.g. '2026-09-01T00:00:00Z'. */
+  /**
+   * Steps per day across every app Health Connect knows about, between two
+   * ISO-8601 instants with a zone - '2026-09-01T00:00:00Z' or
+   * '2026-09-01T00:00:00+05:30'. Rejects with `E_INVALID_CONFIG` for a time
+   * with no zone, or a start not before the end.
+   */
   async readHealthConnectSteps(
     startIso: string,
     endIso: string
   ): Promise<{ totalSteps: number; records: DayRecord[] }> {
-    return call(() =>
-      getNativeModule().readHealthConnectSteps(startIso, endIso)
-    ) as Promise<{ totalSteps: number; records: DayRecord[] }>;
+    const [start, end] = utcInstantRange(startIso, endIso);
+    return call(() => getNativeModule().readHealthConnectSteps(start, end)) as Promise<{
+      totalSteps: number;
+      records: DayRecord[];
+    }>;
   },
 
   /** Upserts one day's steps/distance/calories into Health Connect. */
@@ -1193,11 +1212,21 @@ export const StepTracker = {
     return call(() => getNativeModule().getSyncStatus()) as Promise<SyncStatus>;
   },
 
+  /**
+   * Days a sync target in use has not accepted yet: not uploaded, when
+   * `remoteSyncUrl` is set; not mirrored into Health Connect, when writes
+   * are on and granted - today aside, which every pass writes again. 0 with
+   * neither in use.
+   */
   async getPendingSyncCount(): Promise<number> {
     return call(() => getNativeModule().getPendingSyncCount());
   },
 
-  /** Runs Health Connect + remote sync immediately instead of waiting for WorkManager. */
+  /**
+   * Runs Health Connect sync now and queues the remote upload, which waits
+   * for a network. The remote entry comes back `queued: true`; its outcome
+   * arrives on the `syncCompleted` event.
+   */
   async syncNow(): Promise<SyncEvent[]> {
     const result = (await call(() => getNativeModule().syncNow())) as {
       results: SyncEvent[];

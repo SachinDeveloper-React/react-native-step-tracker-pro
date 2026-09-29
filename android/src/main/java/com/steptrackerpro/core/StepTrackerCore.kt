@@ -67,7 +67,7 @@ class StepTrackerCore private constructor(context: Context) {
     val engine = StepCounterEngine(state, metrics).apply {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
         onBackfill = { shares, reason -> handleBackfill(shares, reason) }
-        onObserved = { from, to, steps -> integrity.onObserved(from, to, steps) }
+        onObserved = { from, to, steps, timed -> integrity.onObserved(from, to, steps, timed) }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
         gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
     }
@@ -75,14 +75,17 @@ class StepTrackerCore private constructor(context: Context) {
     init {
         // Exclude mode: a verdict that moved today's flagged total moved the
         // shown number too, and JS hears about it without waiting for a step.
-        integrity.onLiveChanged = {
-            val live = engine.snapshot()
-            val resolution = resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
-            StepEventBus.emit(
-                StepEventBus.Events.STEPS_CHANGED,
-                com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, resolution), resolution)
-            )
-        }
+        integrity.onLiveChanged = { emitLiveSteps() }
+    }
+
+    /** `stepsChanged` with the live count as shown, for a change no sensor sample carried. */
+    private fun emitLiveSteps() {
+        val live = engine.snapshot()
+        val resolution = resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+        StepEventBus.emit(
+            StepEventBus.Events.STEPS_CHANGED,
+            com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, resolution), resolution)
+        )
     }
 
     // The in-memory intervals below - the event throttle, the source refresh,
@@ -153,7 +156,11 @@ class StepTrackerCore private constructor(context: Context) {
                 force = previous.fraudDetectionEnabled && !saved.fraudDetectionEnabled
             )
         }
-        SyncScheduler.schedule(appContext, saved)
+        // Background work belongs to a tracker that is on: the service
+        // schedules it when tracking starts, and stopTracking() cancels it.
+        // Scheduling it here regardless - initialize() runs this on every
+        // launch - brought back the jobs a stop had cancelled.
+        if (shouldBeRunning()) SyncScheduler.schedule(appContext, saved)
         return saved
     }
 
@@ -435,17 +442,29 @@ class StepTrackerCore private constructor(context: Context) {
 
     /**
      * Retention, sparing days a sync target that is actually in use has not
-     * accepted: remote when a URL is set, Health Connect when writes are on
-     * and allowed. A target that can never accept - writes never granted -
+     * accepted. A target that can never accept - writes never granted -
      * does not hold history past the window.
      */
-    suspend fun prune(retentionDays: Int): Int {
+    suspend fun prune(retentionDays: Int): Int =
+        repository.prune(retentionDays, remoteSyncInUse(), healthMirrorInUse())
+
+    /**
+     * Days a sync target in use has not accepted yet, as `getPendingSyncCount()`
+     * reports them. A target not in use has nothing pending: without a URL
+     * nothing is ever uploaded, and with writes off nothing is ever mirrored.
+     */
+    suspend fun pendingSyncCount(): Int =
+        repository.countPending(remoteSyncInUse(), healthMirrorInUse(), DateKeys.today())
+
+    /** Uploads have somewhere to go. */
+    private fun remoteSyncInUse(): Boolean = !config().remoteSyncUrl.isNullOrEmpty()
+
+    /** Days can be mirrored into Health Connect: writes on in config, a provider, and the grant. */
+    private suspend fun healthMirrorInUse(): Boolean {
         val config = config()
-        val keepRemote = !config.remoteSyncUrl.isNullOrEmpty()
-        val keepHealth = config.healthConnectEnabled && config.healthConnectWriteEnabled &&
+        return config.healthConnectEnabled && config.healthConnectWriteEnabled &&
             healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
             healthConnect.canWriteSteps()
-        return repository.prune(retentionDays, keepRemote, keepHealth)
     }
 
     /** Writes whatever is in memory to the database. Called before shutdown. */
@@ -472,8 +491,25 @@ class StepTrackerCore private constructor(context: Context) {
 
     // ---- reads -----------------------------------------------------------
 
+    /**
+     * Ends the day when the date has moved on and no sample has come along to
+     * do it - a phone lying still across midnight. Until then the
+     * notification and every read of today would still be yesterday's total
+     * under yesterday's date, and `dayChanged`, the closing day's final save
+     * and its verdict would wait for the first step of the morning. The
+     * service's heartbeat calls this, and so does every read of a day.
+     *
+     * @return true when the day rolled over.
+     */
+    fun rollDayIfDue(): Boolean {
+        if (!engine.rollIfNeeded()) return false
+        emitLiveSteps()
+        return true
+    }
+
     /** Today's live totals, straight from the counter rather than the database. */
     fun liveToday(): DayTotals {
+        rollDayIfDue()
         val snapshot = engine.snapshot()
         return DayTotals(
             snapshot.date,
@@ -491,8 +527,10 @@ class StepTrackerCore private constructor(context: Context) {
         return repository.stats(start, end, goal, live)
     }
 
-    suspend fun dayTotals(date: String): DayTotals =
-        if (date == DateKeys.today()) liveToday() else repository.getDay(date)
+    suspend fun dayTotals(date: String): DayTotals {
+        rollDayIfDue()
+        return if (date == DateKeys.today()) liveToday() else repository.getDay(date)
+    }
 
     /** Stored rows for a range, as they are, with each day's suspect steps stamped on. */
     suspend fun history(start: String, end: String): List<DayTotals> {
@@ -1281,7 +1319,7 @@ class StepTrackerCore private constructor(context: Context) {
         var succeeded = 0
         var failed = 0
         var skipped = 0
-        val syncedDates = ArrayList<String>(targets.size)
+        val done = ArrayList<DayTotals>(targets.size)
         for (day in targets) {
             // A day a wearable already owns must not be mirrored from here.
             // Health Connect keeps origins separate, so writing this phone's
@@ -1292,18 +1330,20 @@ class StepTrackerCore private constructor(context: Context) {
                 // Marked done rather than left pending: nothing about this day
                 // will ever make it writable, and leaving it queued would have
                 // the worker retry it for as long as it stays in retention.
-                if (day.date != today.date) syncedDates.add(day.date)
+                if (day.date != today.date) done.add(day)
                 continue
             }
             if (healthConnect.writeDay(mirrorTotals(day))) {
                 succeeded++
                 // Today stays unsynced: it is still moving.
-                if (day.date != today.date) syncedDates.add(day.date)
+                if (day.date != today.date) done.add(day)
             } else {
                 failed++
             }
         }
-        repository.markSynced(SyncTarget.HEALTH_CONNECT, syncedDates)
+        // Only days still holding the count this pass read: one a backfill
+        // grew meanwhile stays queued, and the next pass writes its new total.
+        repository.markSynced(SyncTarget.HEALTH_CONNECT, done)
         state.lastHealthSyncAt = System.currentTimeMillis()
         // Our own records just changed, so the cached origin split is stale.
         sourceCache.invalidate()

@@ -47,7 +47,8 @@ import kotlin.math.roundToInt
  *    against the anchor alone is not enough, because the anchor is zero for the
  *    whole of any day the device booted on.
  *  - **Midnight.** The previous day is finalised through [onDayRollover] and the
- *    anchor is re-pinned with `anchorSteps = 0`.
+ *    anchor is re-pinned with `anchorSteps = 0` - by the first sample after
+ *    it, or by [rollIfNeeded] when none comes.
  *  - **Resume after pause.**
  *
  * All mutation happens under the instance lock; sensor callbacks arrive on the
@@ -79,11 +80,13 @@ class StepCounterEngine(
     /**
      * Invoked with steps this device watched being taken, and the span they
      * were taken in: from the previous sample's event time to this one's.
-     * Never called for steps gap recovery credited in one go, nor for paused
-     * samples. Feeds the per-minute integrity timeline; the callee must be
-     * cheap, because it runs under this engine's lock on the sensor thread.
+     * `timed` is false when this sample's own timestamp was unusable and
+     * `toMillis` is only when it arrived. Never called for steps gap
+     * recovery credited in one go, nor for paused samples. Feeds the
+     * per-minute integrity timeline; the callee must be cheap, because it
+     * runs under this engine's lock on the sensor thread.
      */
-    var onObserved: ((fromMillis: Long, toMillis: Long, steps: Int) -> Unit)? = null
+    var onObserved: ((fromMillis: Long, toMillis: Long, steps: Int, timed: Boolean) -> Unit)? = null
 
     /** Why a past day is being credited after the fact. Values match the JS event. */
     enum class BackfillReason(val jsValue: String) {
@@ -186,11 +189,26 @@ class StepCounterEngine(
     }
 
     /**
+     * Ends the active day when the local date has moved on and no sample has
+     * come along to do it - a phone lying still across midnight.
+     *
+     * @return true when the day rolled over.
+     */
+    @Synchronized
+    fun rollIfNeeded(): Boolean {
+        val before = state.activeDate
+        rollDateIfNeeded()
+        return state.activeDate != before
+    }
+
+    /**
      * @param rawValue cumulative steps since boot from TYPE_STEP_COUNTER.
+     * @param timed false when [eventAtMillis] is only when the sample
+     *   arrived, its own timestamp being unusable; see [SensorEventTime].
      * @return a snapshot when the total changed, otherwise null.
      */
     @Synchronized
-    fun onCounterSample(rawValue: Float, eventAtMillis: Long): StepSnapshot? {
+    fun onCounterSample(rawValue: Float, eventAtMillis: Long, timed: Boolean = true): StepSnapshot? {
         if (rawValue < 0f || rawValue.isNaN()) return null
         rollDateIfNeeded()
         val previousEventAt = state.lastEventAt
@@ -327,7 +345,7 @@ class StepCounterEngine(
         // What this sample added beyond what recovery credited in one go is
         // what the sensor was seen counting.
         val observed = total - previous - recoveredNow
-        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed)
+        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed, timed)
 
         if (total == previous) return null
         pendingCommit += (total - previous)
@@ -338,9 +356,11 @@ class StepCounterEngine(
      * TYPE_STEP_DETECTOR fires once per step and carries no cumulative value,
      * so the running total is incremented directly. Only used on devices with
      * no step counter, where steps are lost while the process is dead.
+     *
+     * @param timed as for [onCounterSample].
      */
     @Synchronized
-    fun onDetectorSample(steps: Int, eventAtMillis: Long): StepSnapshot? {
+    fun onDetectorSample(steps: Int, eventAtMillis: Long, timed: Boolean = true): StepSnapshot? {
         if (steps <= 0) return null
         rollDateIfNeeded()
         // A first-ever sample on a detector-only or accelerometer device is
@@ -373,7 +393,7 @@ class StepCounterEngine(
         // next counter sample re-pin instead of recomputing from a stale anchor.
         reanchorOnNextSample = true
         pendingCommit += steps
-        onObserved?.invoke(previousEventAt, eventAtMillis, steps)
+        onObserved?.invoke(previousEventAt, eventAtMillis, steps, timed)
         return snapshot()
     }
 

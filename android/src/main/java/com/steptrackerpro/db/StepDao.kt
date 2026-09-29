@@ -24,8 +24,19 @@ interface StepHistoryDao {
     @Query("SELECT * FROM step_history WHERE syncedRemote = 0 ORDER BY date ASC LIMIT :limit")
     suspend fun findUnsyncedRemote(limit: Int = 100): List<StepHistoryEntity>
 
-    @Query("SELECT COUNT(*) FROM step_history WHERE synced = 0 OR syncedRemote = 0")
-    suspend fun countUnsynced(): Int
+    /**
+     * Days a sync target in use has not accepted: with [remote], not
+     * uploaded; with [health], not mirrored - [today] aside, which Health
+     * Connect sync writes on every pass and never marks, because it is
+     * still moving.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM step_history
+        WHERE (:remote AND syncedRemote = 0) OR (:health AND synced = 0 AND date != :today)
+        """
+    )
+    suspend fun countPending(remote: Boolean, health: Boolean, today: String): Int
 
     @Query("SELECT COUNT(*) FROM step_history WHERE syncedRemote = 0")
     suspend fun countUnsyncedRemote(): Int
@@ -74,11 +85,18 @@ interface StepHistoryDao {
         )
     }
 
-    @Query("UPDATE step_history SET synced = 1, updatedAt = :updatedAt WHERE date IN (:dates)")
-    suspend fun markSyncedHealth(dates: List<String>, updatedAt: Long = System.currentTimeMillis()): Int
+    /**
+     * Marks a day mirrored only while it still holds [steps], the count the
+     * sync read from it. A write that changed the day meanwhile - a backfill
+     * growing it - also re-queued it, and marking it done over that would
+     * keep the new steps out of Health Connect for good.
+     */
+    @Query("UPDATE step_history SET synced = 1, updatedAt = :updatedAt WHERE date = :date AND steps = :steps")
+    suspend fun markSyncedHealthIfUnchanged(date: String, steps: Int, updatedAt: Long): Int
 
-    @Query("UPDATE step_history SET syncedRemote = 1, updatedAt = :updatedAt WHERE date IN (:dates)")
-    suspend fun markSyncedRemote(dates: List<String>, updatedAt: Long = System.currentTimeMillis()): Int
+    /** As [markSyncedHealthIfUnchanged], for the remote upload. */
+    @Query("UPDATE step_history SET syncedRemote = 1, updatedAt = :updatedAt WHERE date = :date AND steps = :steps")
+    suspend fun markSyncedRemoteIfUnchanged(date: String, steps: Int, updatedAt: Long): Int
 
     /** Overwrites a day outright, downwards included. */
     @Transaction

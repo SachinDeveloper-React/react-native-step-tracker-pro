@@ -90,9 +90,9 @@ class IntegrityMonitor(
     // ---- inputs ----------------------------------------------------------------
 
     /** From the engine, under its lock: keep it to an in-memory append. */
-    fun onObserved(fromMs: Long, toMs: Long, steps: Int) {
+    fun onObserved(fromMs: Long, toMs: Long, steps: Int, timed: Boolean = true) {
         if (!enabled) return
-        timeline.record(fromMs, toMs, steps, charging, activity)
+        timeline.record(fromMs, toMs, steps, charging, activity, timed)
     }
 
     /**

@@ -36,10 +36,10 @@ data class MinuteSample(
     /** Steps whose timing is known to within this minute. */
     val steps: Int,
     /**
-     * Steps that arrived in one lump after a silence - a sensor hub whose
-     * batch overflowed, or a process that was dead - so the minute they were
-     * taken in is unknown. Parked at the minute they arrived in, and never
-     * used for a cadence judgement.
+     * Steps whose minute is unknown: they arrived in one lump after a
+     * silence - a sensor hub whose batch overflowed, or a process that was
+     * dead - or in samples whose own timestamps were unusable. Parked at the
+     * minute they arrived in, and never used for a cadence judgement.
      */
     val untimedSteps: Int = 0,
     /** Of [totalSteps], how many arrived while the phone was plugged in. */
@@ -69,8 +69,13 @@ data class MinuteSample(
  * sample and this one". With the hardware counter reporting on every change
  * that interval is well under a second while walking, and each batched
  * sample keeps its own timestamp when the hub buffers them with the screen
- * off - so almost every delta has an exact time. Two cases do not:
+ * off - [SensorEventTime] reads it back, however late the batch arrived - so
+ * almost every delta has an exact time. Three cases do not:
  *
+ *  - **An untimed sample.** Its own timestamp was unusable, so only its
+ *    arrival is known. Its steps are parked, untimed, at the minute they
+ *    arrived in, however few: a batch of them arriving together would
+ *    otherwise read as a whole walk taken in that one minute.
  *  - **A lump.** More than [LUMP_STEPS] steps after more than
  *    [MAX_TIMED_GAP_MS] of silence: the hub's FIFO overflowed and only the
  *    latest reading survived, or the process was dead and the first sample
@@ -99,9 +104,11 @@ object MinuteAttribution {
 
     fun minuteOf(epochMs: Long): Long = Math.floorDiv(epochMs, MINUTE_MS) * MINUTE_MS
 
-    fun attribute(fromMs: Long, toMs: Long, steps: Int): List<Share> {
+    /** @param timed false when [toMs] is only when the sample arrived. */
+    fun attribute(fromMs: Long, toMs: Long, steps: Int, timed: Boolean = true): List<Share> {
         if (steps <= 0 || toMs <= 0L) return emptyList()
         val arrival = minuteOf(toMs)
+        if (!timed) return listOf(Share(arrival, 0, steps))
         val gap = toMs - fromMs
         if (fromMs <= 0L || gap <= 0L) {
             // No previous sample to measure from, or a clock that moved
@@ -159,9 +166,10 @@ class StepTimeline {
         toMs: Long,
         steps: Int,
         charging: Boolean,
-        activity: ActivityState
+        activity: ActivityState,
+        timed: Boolean = true
     ) {
-        for (share in MinuteAttribution.attribute(fromMs, toMs, steps)) {
+        for (share in MinuteAttribution.attribute(fromMs, toMs, steps, timed)) {
             val entry = pending.getOrPut(share.minuteStart) { Pending() }
             val total = share.timed + share.untimed
             entry.timed += share.timed

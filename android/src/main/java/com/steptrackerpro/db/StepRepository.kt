@@ -154,7 +154,9 @@ class StepRepository(context: Context) {
         return rows.map { it.toTotals(recovered[it.date]) }
     }
 
-    suspend fun countUnsynced(): Int = history.countUnsynced()
+    /** See [StepHistoryDao.countPending]. */
+    suspend fun countPending(remote: Boolean, health: Boolean, today: String): Int =
+        history.countPending(remote, health, today)
 
     /** Days not yet accepted by [target]. */
     suspend fun countUnsynced(target: SyncTarget): Int = when (target) {
@@ -162,11 +164,22 @@ class StepRepository(context: Context) {
         SyncTarget.REMOTE -> history.countUnsyncedRemote()
     }
 
-    suspend fun markSynced(target: SyncTarget, dates: List<String>) {
-        if (dates.isEmpty()) return
-        when (target) {
-            SyncTarget.HEALTH_CONNECT -> history.markSyncedHealth(dates)
-            SyncTarget.REMOTE -> history.markSyncedRemote(dates)
+    /**
+     * Marks [days] accepted by [target], each only while its stored count is
+     * still the one in [days] - the count the sync read and sent from. A day
+     * that changed while the sync was in flight, a backfill landing on it,
+     * stays queued so the steps added meanwhile go out on the next pass.
+     */
+    suspend fun markSynced(target: SyncTarget, days: List<DayTotals>) {
+        if (days.isEmpty()) return
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            for (day in days) {
+                when (target) {
+                    SyncTarget.HEALTH_CONNECT -> history.markSyncedHealthIfUnchanged(day.date, day.steps, now)
+                    SyncTarget.REMOTE -> history.markSyncedRemoteIfUnchanged(day.date, day.steps, now)
+                }
+            }
         }
     }
 

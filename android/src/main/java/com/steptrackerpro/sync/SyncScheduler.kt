@@ -9,6 +9,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.steptrackerpro.core.StepTrackerConfig
 import java.util.concurrent.TimeUnit
 
@@ -110,6 +111,9 @@ object SyncScheduler {
                             .setRequiredNetworkType(NetworkType.CONNECTED)
                             .build()
                     )
+                    // Reports even when there is nothing to send: the caller
+                    // was told to listen for the outcome.
+                    .setInputData(workDataOf(RemoteSyncWorker.KEY_ON_DEMAND to true))
                     .build()
             )
         }

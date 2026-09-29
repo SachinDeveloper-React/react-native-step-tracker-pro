@@ -158,9 +158,14 @@ export interface StepTrackerConfig {
   /** Optional HTTPS endpoint that unsynced day records get POSTed to. */
   remoteSyncUrl?: string;
   /**
-   * Sent with every upload. Stored in the app's private SharedPreferences in
-   * the clear, like the rest of config — use short-lived tokens, not
-   * long-lived secrets. Never returned by `getConfig()`.
+   * Sent with every upload. Sealed with AES-GCM under a key in the Android
+   * Keystore before they are stored, so the stored copy is useless without
+   * that key; only on a device whose Keystore cannot be used are they kept
+   * in the clear in the app's private storage. Headers a 1.x release stored
+   * in the clear are sealed on first read. The key is not backed up: after a
+   * restore onto a new phone uploads go out without them until the app sets
+   * them again, and `syncAuthFailed` says when. Never returned by
+   * `getConfig()`. `remoteSyncAuth: 'signature'` stores no secret at all.
    */
   remoteSyncHeaders?: Record<string, string>;
   /**
@@ -269,7 +274,12 @@ export interface StepTrackerConfig {
  * anybody anything.
  */
 export interface FraudDetectionConfig {
-  enabled: boolean;
+  /**
+   * Default false. Like every key here, one a patch leaves out keeps its
+   * current value: `updateConfig({ fraudDetection: { mode: 'exclude' } })`
+   * changes the mode alone.
+   */
+  enabled?: boolean;
   /**
    * `'flag'` (default) reports suspect steps and changes no number.
    * `'exclude'` also takes them out of every number this package shows,
@@ -458,11 +468,17 @@ export interface IntegrityReport {
 export interface StepMinute {
   /** Epoch ms of the minute's start. */
   minuteStart: number;
-  /** Steps whose timing is known to within the minute. */
+  /**
+   * Steps whose timing is known to within the minute - including steps the
+   * sensor hub held while the screen was off and delivered late, which keep
+   * the minute they were taken in.
+   */
   steps: number;
   /**
-   * Steps that arrived in one lump after a silence — a sensor batch that
-   * overflowed, or a dead process — parked at the minute they arrived in.
+   * Steps whose minute is unknown, parked at the minute they arrived in: a
+   * lump after a silence — a sensor batch that overflowed, or a dead
+   * process — or samples whose own timestamps were unusable or more than 30
+   * minutes old.
    */
   untimedSteps: number;
   chargingSteps: number;
@@ -780,7 +796,12 @@ export interface SuspiciousActivityEvent {
  * `getMotionWindows()`.
  */
 export interface MotionSamplingConfig {
-  enabled: boolean;
+  /**
+   * Default false. Like every key here, one a patch leaves out keeps its
+   * current value: `updateConfig({ motionSampling: { intervalMinutes: 2 } })`
+   * changes the interval alone.
+   */
+  enabled?: boolean;
   /** Length of one window in seconds. Default 10, at most 60. */
   windowSeconds?: number;
   /** Minutes between windows. Default 5, at least 1. */
@@ -1511,6 +1532,13 @@ export interface SyncEvent {
   error?: string;
   /** Worth another attempt. False for states only the user can change. */
   retryable?: boolean;
+  /**
+   * The remote entry `syncNow()` returns: the upload was queued, not run -
+   * it waits for a network - so nothing is synced or failed yet, and its
+   * outcome arrives on the `syncCompleted` event, even when there turns out
+   * to be nothing to send.
+   */
+  queued?: boolean;
 }
 
 /** Fired when the app answering for the user's steps changes. */

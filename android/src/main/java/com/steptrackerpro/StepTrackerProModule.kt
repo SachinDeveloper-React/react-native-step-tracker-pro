@@ -1082,7 +1082,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     override fun getPendingSyncCount(promise: Promise) {
-        launchSafely(promise) { promise.resolve(core.repository.countUnsynced()) }
+        launchSafely(promise) { promise.resolve(core.pendingSyncCount()) }
     }
 
     @ReactMethod
@@ -1093,13 +1093,15 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             val config = core.config()
             if (!config.remoteSyncUrl.isNullOrEmpty()) {
                 SyncScheduler.runNow(reactContext, config)
+                // Nothing has been uploaded yet, and nothing has failed: the
+                // upload is queued, and its outcome arrives on syncCompleted.
                 results.add(
                     mapOf(
                         "target" to "remote",
                         "syncedRecords" to 0,
                         "failedRecords" to 0,
                         "success" to true,
-                        "error" to "Queued: listen for syncCompleted"
+                        "queued" to true
                     )
                 )
             }

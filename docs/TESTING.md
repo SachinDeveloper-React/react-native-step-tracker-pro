@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (83 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, integrity config (137 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (168 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, integrity config (203 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -54,15 +54,18 @@ The JVM suite pins the fraud detector with synthetic days: an ordinary walk,
 a treadmill session and a run raise nothing; a swing gadget's metronomic
 count, minutes faster than anyone walks, a charger, a car ride and a hand
 shake are each flagged; lumps of untimed steps are never judged for
-cadence; and the daily cap takes only the excess.
+cadence; and the daily cap takes only the excess. It also walks five minutes
+with the screen off and delivers them in one late batch, as a sleeping phone
+does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Forty-five cases: thirty-three drive the engine, three build the
-Room database as an older version from the exported schema, migrate real
-rows to the current version and check every one survived, five run the
-integrity layer end to end through the real core, database and Keystore, and
-four check that remote-sync headers are sealed, read back and migrated from
-1.x. Among them:
+sensor. Sixty cases: thirty-five drive the engine, three build the Room
+database as an older version from the exported schema, migrate real rows to
+the current version and check every one survived, fifteen run the integrity
+layer, sync bookkeeping and background work end to end through the real core,
+database and Keystore, four check that remote-sync headers are sealed, read
+back and migrated from 1.x, and three pin when `goalReached` fires. Among
+them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -77,6 +80,7 @@ four check that remote-sync headers are sealed, read back and migrated from
 | `wallClockJumpIsNotMistakenForAReboot` | an NTP correction doubles the day |
 | `smallBackwardsJitterIsIgnoredNotReanchored` | a HAL that wobbles a step backwards creeps the total upward |
 | `midnightRolloverFinalisesPreviousDay` | day totals never close, or leak forward |
+| `theDayEndsAtMidnightWithoutWaitingForAStep` | a phone lying still across midnight keeps yesterday's total until the first step of the morning |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |
 | `commitThresholdControlsDatabaseWrites` | a write per step, or no writes at all |
@@ -85,12 +89,17 @@ four check that remote-sync headers are sealed, read back and migrated from
 | `calendarWeekIsMondayAnchoredAndSevenDaysLong` | weekly stats window |
 | `observedDeltasCarryTheSpanTheyWereTakenIn` | minute buckets land on the wrong minutes |
 | `stepsCreditedByRecoveryAreNotObserved` | a recovered lump is judged as if it were walked in one minute |
+| `untimedSamplesAreCountedAndObservedUntimed` | steps from a sample with an unusable timestamp are lost, or judged as if their arrival were when they were taken |
 | `migrate4To5KeepsMotionWindowsAndAddsTheIntegrityTables` | upgrading to 1.5 loses motion windows or history |
 | `aSwingGadgetIsFlaggedExcludedLoggedAndSigned` | the detector, exclude mode, the event log or snapshot signing is broken end to end |
 | `withoutPlayServicesActivityRecognitionIsUnavailableNotACrash` | an app without Play Services crashes, or believes it has Activity Recognition |
 | `aRebootIsLoggedOncePerBootCountNotPerBroadcast` | a forged or repeated boot broadcast writes fake reboots into the integrity log |
 | `healthConnectPermissionsTheAppDoesNotDeclareAreReported` | a missing manifest entry fails silently instead of naming itself |
 | `headersAreSealedNotStoredInTheClear` / `plaintextHeadersFromOneXAreMigratedOnFirstRead` | remote-sync credentials sit in SharedPreferences in the clear |
+| `aDayThatGrewWhileItWasSyncingStaysQueued` | steps a backfill adds to a day while it uploads never reach the server or Health Connect |
+| `aReadAfterMidnightIsOfTheNewDayWithoutAStep` | `getStepsForDate(today)` answers with yesterday's date and count until a step |
+| `onlyTargetsInUseHaveAnythingPending` | `getPendingSyncCount()` never reaches 0 without a remote URL or Health Connect writes |
+| `aStoppedTrackerGetsNoBackgroundWorkBackFromTheNextLaunch` | the next `initialize()` undoes the job cancelling `stopTracking()` did |
 
 ### Compatibility builds
 
@@ -236,9 +245,13 @@ zeroes the hardware counter.
 ### Midnight rollover
 
 No root needed. Settings → System → Date & time → turn off automatic, set the
-date forward one day. Then take a few steps.
+date forward one day. Leave the phone still for a minute first, then take a
+few steps.
 
-- [ ] `dayChanged` fires with yesterday's total
+- [ ] before any step, within a minute: the notification reads today's count
+      and `dayChanged` fires with yesterday's total
+- [ ] `getStepsForDate(today)` and `getCurrentStepSource()` answer for today,
+      not with yesterday's date and count
 - [ ] today starts at 0, not at yesterday's number
 - [ ] yesterday's row is in the database with its final count
 
@@ -315,9 +328,25 @@ adb shell svc wifi disable && adb shell svc data disable
 ```
 
 - [ ] counting, notification, stats and history all work unchanged
-- [ ] `getPendingSyncCount()` rises if `remoteSyncUrl` is set
+- [ ] `getPendingSyncCount()` rises if `remoteSyncUrl` is set, and stays 0
+      with no `remoteSyncUrl` and Health Connect writes off
 - [ ] after re-enabling the network, `syncCompleted` fires for `target: 'remote'`
       within the hour, and pending drops to 0
+- [ ] `syncNow()` returns the remote entry with `queued: true` and no `error`,
+      and its `syncCompleted` follows, even with nothing pending
+
+### Stop
+
+```sh
+# WorkManager's own listing of enqueued work, by unique name
+adb shell am broadcast -a androidx.work.diagnostics.REQUEST_DIAGNOSTICS -p $PKG
+adb logcat -d -s WM-DiagnosticsWrkr
+```
+
+- [ ] while tracking: `stp_retention`, `stp_watchdog` and, as configured,
+      `stp_health_connect_sync` and `stp_remote_sync` are enqueued
+- [ ] after `stopTracking()` and a relaunch that calls `initialize()`: none of
+      them are
 
 ### Goals
 
@@ -339,6 +368,10 @@ adb shell dumpsys battery reset
 ```
 
 - [ ] walk 5 minutes normally: `suspectSteps` is 0, no strong flag
+- [ ] walk 5 minutes with the screen off, then turn it on: `getStepMinutes()`
+      spreads those steps over the minutes they were walked in, about 110
+      each, with no `cadence` flag - not all of them in the minute the screen
+      came on
 - [ ] shake the phone hard in your hand for 2 minutes: a `cadence` flag, and with a motion window open a `shake` flag
 - [ ] walk 3 minutes with `dumpsys battery set ac 1`: a `charging` flag covering those steps, `charging_started` in `events`
 - [ ] with a swing gadget, or the phone on a pendulum, for 40 minutes: a `steady_cadence` flag

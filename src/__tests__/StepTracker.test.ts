@@ -296,6 +296,17 @@ describe('updateConfig()', () => {
     });
   });
 
+  it('patches one key of fraudDetection or motionSampling without restating enabled', async () => {
+    // Native patches these objects key by key, so the types must not demand
+    // `enabled` - this compiling is half the test.
+    await StepTracker.updateConfig({ fraudDetection: { mode: 'exclude' } });
+    await StepTracker.updateConfig({ motionSampling: { intervalMinutes: 2 } });
+    expect(native.calledWith('updateConfig')).toEqual([
+      [{ fraudDetection: { mode: 'exclude' } }],
+      [{ motionSampling: { intervalMinutes: 2 } }],
+    ]);
+  });
+
   it.each(INVALID_CONFIGS)('rejects %j like initialize does', async (config, message) => {
     await expect(StepTracker.updateConfig(config)).rejects.toMatchObject({
       code: 'E_INVALID_CONFIG',
@@ -614,12 +625,63 @@ describe('date validation', () => {
       StepTracker.getHealthConnectRecords('2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z')
     ).resolves.toEqual({ records: [], truncated: false });
     expect(native.calledWith('getHealthConnectRecords')).toEqual([
-      ['2026-09-01T00:00:00Z', '2026-09-02T00:00:00Z', { recordTypes: ['steps'] }],
+      [
+        '2026-09-01T00:00:00.000Z',
+        '2026-09-02T00:00:00.000Z',
+        { recordTypes: ['steps'] },
+      ],
     ]);
     native.when('getHealthConnectChanges', { tokenExpired: true, nextToken: null });
     await expect(StepTracker.getHealthConnectChanges('tok')).resolves.toMatchObject({
       tokenExpired: true,
     });
+  });
+
+  it('raw Health Connect reads send UTC, the only form Android 8-13 parses', async () => {
+    native.when('getHealthConnectRecords', { records: [], truncated: false });
+    native.when('readHealthConnectSteps', { totalSteps: 0, records: [] });
+    await StepTracker.getHealthConnectRecords(
+      '2026-09-01T00:00:00+05:30',
+      '2026-09-01T12:30:00.250-04:00'
+    );
+    await StepTracker.readHealthConnectSteps(
+      '2026-09-01T00:00:00+05:30',
+      '2026-09-02T00:00:00+05:30'
+    );
+    expect(native.calledWith('getHealthConnectRecords')).toEqual([
+      [
+        '2026-08-31T18:30:00.000Z',
+        '2026-09-01T16:30:00.250Z',
+        { recordTypes: ['steps'] },
+      ],
+    ]);
+    expect(native.calledWith('readHealthConnectSteps')).toEqual([
+      ['2026-08-31T18:30:00.000Z', '2026-09-01T18:30:00.000Z'],
+    ]);
+  });
+
+  it('an instant with no zone, or a date alone, is refused before native', async () => {
+    const bad: Array<[string, string]> = [
+      ['2026-09-01T00:00:00', '2026-09-02T00:00:00Z'],
+      ['2026-09-01T00:00:00Z', '2026-09-02T00:00:00'],
+      ['2026-09-01', '2026-09-02'],
+      ['Tue Sep 01 2026 00:00:00 GMT+0530', '2026-09-02T00:00:00Z'],
+    ];
+    for (const [start, end] of bad) {
+      await expect(StepTracker.getHealthConnectRecords(start, end)).rejects.toMatchObject(
+        {
+          code: 'E_INVALID_CONFIG',
+          message: expect.stringMatching(/with a zone/),
+        }
+      );
+      await expect(StepTracker.readHealthConnectSteps(start, end)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+      });
+    }
+    await expect(
+      StepTracker.readHealthConnectSteps('2026-09-02T00:00:00Z', '2026-09-01T00:00:00Z')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG', message: /before/ });
+    expect(native.calls).toHaveLength(0);
   });
 
   it('raw records and change tracking take record types, steps by default', async () => {
@@ -664,8 +726,8 @@ describe('date validation', () => {
     });
     expect(native.calledWith('getHealthConnectRecords')).toEqual([
       [
-        '2026-09-01T00:00:00Z',
-        '2026-09-02T00:00:00Z',
+        '2026-09-01T00:00:00.000Z',
+        '2026-09-02T00:00:00.000Z',
         { recordTypes: ['steps', 'distance'] },
       ],
     ]);
@@ -673,6 +735,31 @@ describe('date validation', () => {
       [{ recordTypes: ['steps'] }],
       [{ recordTypes: ['steps', 'distance'] }],
     ]);
+  });
+
+  it('syncNow() unwraps its results, the queued upload flagged rather than erroring', async () => {
+    const results = [
+      {
+        target: 'health_connect',
+        syncedRecords: 2,
+        failedRecords: 0,
+        skippedRecords: 0,
+        success: true,
+        error: null,
+        retryable: false,
+      },
+      {
+        target: 'remote',
+        syncedRecords: 0,
+        failedRecords: 0,
+        success: true,
+        queued: true,
+      },
+    ];
+    native.when('syncNow', { results });
+    const events = await StepTracker.syncNow();
+    expect(events).toEqual(results);
+    expect(events.filter((e) => e.queued).map((e) => e.error)).toEqual([undefined]);
   });
 
   it('getSyncStatus() passes the stored outcome through', async () => {

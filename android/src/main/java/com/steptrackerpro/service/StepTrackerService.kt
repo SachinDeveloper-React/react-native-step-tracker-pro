@@ -19,6 +19,7 @@ import android.util.Log
 import com.steptrackerpro.core.AccelerometerStepDetector
 import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.MotionWindowSampler
+import com.steptrackerpro.core.SensorEventTime
 import com.steptrackerpro.core.SensorSource
 import com.steptrackerpro.core.StepTrackerConfig
 import com.steptrackerpro.core.StepTrackerCore
@@ -102,6 +103,11 @@ class StepTrackerService : Service(), SensorEventListener {
                 return
             }
             core.state.lastHeartbeatAt = System.currentTimeMillis()
+            // Midnight ends the day whether or not a step comes along to end
+            // it. A phone lying still would otherwise keep yesterday's total
+            // in the shade, and hold back dayChanged and the closing day's
+            // save and verdict, until the first step of the morning.
+            if (core.rollDayIfDue()) pushNotification(force = true)
             // The last minutes of a walk are judged even when no step follows
             // them, and under exclude mode the shade follows the verdict.
             // Both are no-ops with detection off; the redraw dedupes on the
@@ -684,8 +690,12 @@ class StepTrackerService : Service(), SensorEventListener {
         }
 
         val snapshot = when (sensorEvent.sensor.type) {
-            Sensor.TYPE_STEP_COUNTER -> core.engine.onCounterSample(values[0], eventTime(sensorEvent))
-            Sensor.TYPE_STEP_DETECTOR -> core.engine.onDetectorSample(1, eventTime(sensorEvent))
+            Sensor.TYPE_STEP_COUNTER -> eventTime(sensorEvent).let {
+                core.engine.onCounterSample(values[0], it.atMillis, it.timed)
+            }
+            Sensor.TYPE_STEP_DETECTOR -> eventTime(sensorEvent).let {
+                core.engine.onDetectorSample(1, it.atMillis, it.timed)
+            }
             Sensor.TYPE_ACCELEROMETER -> {
                 if (values.size < 3) return
                 // The detector only uses differences between timestamps, so
@@ -695,7 +705,11 @@ class StepTrackerService : Service(), SensorEventListener {
                 val steps = accelerometer?.onSample(
                     values[0], values[1], values[2], sensorEvent.timestamp / 1_000_000L
                 ) ?: 0
-                if (steps > 0) core.engine.onDetectorSample(steps, eventTime(sensorEvent)) else null
+                if (steps > 0) {
+                    eventTime(sensorEvent).let { core.engine.onDetectorSample(steps, it.atMillis, it.timed) }
+                } else {
+                    null
+                }
             }
             else -> null
         } ?: return
@@ -728,16 +742,14 @@ class StepTrackerService : Service(), SensorEventListener {
     }
 
     /**
-     * Sensor timestamps are documented as elapsed-realtime nanos, but several
-     * OEM HALs report wall-clock nanos instead, which turns the delta into
-     * nonsense. Fall back to "now" whenever it lands outside a plausible
-     * batching window rather than storing a garbage timestamp.
+     * When the sample was taken - which, for a batch the hub held while the
+     * CPU slept, can be many minutes before it arrived - and whether its
+     * timestamp could say. See [SensorEventTime].
      */
-    private fun eventTime(event: SensorEvent): Long {
-        val now = System.currentTimeMillis()
-        val ageMs = (SystemClock.elapsedRealtimeNanos() - event.timestamp) / 1_000_000L
-        return if (ageMs in 0..MAX_EVENT_AGE_MS) now - ageMs else now
-    }
+    private fun eventTime(event: SensorEvent): SensorEventTime.Resolved =
+        SensorEventTime.resolve(
+            event.timestamp, SystemClock.elapsedRealtimeNanos(), System.currentTimeMillis()
+        )
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
@@ -861,9 +873,6 @@ class StepTrackerService : Service(), SensorEventListener {
 
         /** How long a wake-up step detector may hold steps before waking the CPU. */
         private const val DETECTOR_WAKE_UP_LATENCY_US = 5_000_000
-
-        /** Widest plausible age for a batched sample, used to sanity-check HALs. */
-        private const val MAX_EVENT_AGE_MS = 60_000L
 
         /** 25 Hz. Gait is 1–3 Hz; this is eight samples per step at a run. */
         private const val ACCELEROMETER_PERIOD_US = 40_000

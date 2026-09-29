@@ -52,6 +52,19 @@ class StepTimelineTest {
     }
 
     @Test
+    fun `an untimed sample parks untimed at arrival, however few its steps`() {
+        assertEquals(
+            listOf(MinuteAttribution.Share(t0, 0, 1)),
+            MinuteAttribution.attribute(t0 + 500, t0 + 1_000, 1, timed = false)
+        )
+        // Not spread across its span either: only its arrival is known.
+        assertEquals(
+            listOf(MinuteAttribution.Share(t0 + 60_000, 0, 30)),
+            MinuteAttribution.attribute(t0 + 30_000, t0 + 70_000, 30, timed = false)
+        )
+    }
+
+    @Test
     fun `no previous sample or a clock that went backwards keeps only the arrival`() {
         assertEquals(listOf(MinuteAttribution.Share(t0, 5, 0)), MinuteAttribution.attribute(0L, t0 + 1, 5))
         assertEquals(listOf(MinuteAttribution.Share(t0, 0, 90)), MinuteAttribution.attribute(t0 + 9_000, t0 + 1, 90))
@@ -69,6 +82,14 @@ class StepTimelineTest {
         assertEquals(MinuteSample(t0, 5, 0, chargingSteps = 2, stillSteps = 0, vehicleSteps = 3), drained[0])
         assertEquals(MinuteSample(t0 + 60_000, 4, 0, chargingSteps = 0, stillSteps = 4, vehicleSteps = 0), drained[1])
         assertTrue(timeline.drain().isEmpty())
+    }
+
+    @Test
+    fun `the timeline keeps an untimed sample untimed, tags and all`() {
+        val timeline = StepTimeline()
+        timeline.record(t0 + 1_000, t0 + 2_000, 2, charging = true, activity = ActivityState.UNKNOWN)
+        timeline.record(t0 + 2_000, t0 + 2_001, 3, charging = true, activity = ActivityState.UNKNOWN, timed = false)
+        assertEquals(listOf(MinuteSample(t0, 2, 3, chargingSteps = 5)), timeline.drain())
     }
 
     @Test
