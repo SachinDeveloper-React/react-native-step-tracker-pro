@@ -21,6 +21,11 @@ Codes: `E_UNSUPPORTED_PLATFORM`, `E_NO_SENSOR`, `E_NOT_INITIALIZED`,
 `E_NOT_TRACKING`, `E_UNKNOWN`. `E_SENSOR_UNAVAILABLE` arrives on the `error`
 event rather than as a rejection.
 
+`E_DATABASE` means the on-device database failed - a full disk, a corrupt
+file (2.3.7); before, those arrived as `E_UNKNOWN`. `E_NOT_INITIALIZED` is never sent:
+every method works before `initialize()`, on the config stored last or the
+defaults. It stays in the type for code that checks for it, and goes in 3.0.
+
 Which calls you need depends on your [usage mode](USAGE_MODES.md).
 
 ---
@@ -75,10 +80,12 @@ app is in the background and Android refuses to deliver the stop to the
 service. A service that misses it stops itself within a minute.
 
 The sync, retention and watchdog jobs stay cancelled until `startTracking()`:
-`initialize()` and `updateConfig()` schedule them only while tracking is on
-(2.3.6); before, the next launch's `initialize()` scheduled the sync and
-retention jobs again. `syncNow()` still uploads a stopped tracker's pending
-days on request.
+after a stop, `initialize()` and `updateConfig()` do not schedule them (2.3.6);
+before, the next launch's `initialize()` scheduled the sync and retention jobs
+again. A tracker that never started is not stopped - an app that only reads
+Health Connect, or a user who never allowed activity recognition, keeps its
+hourly upload and daily retention (2.3.7). `syncNow()` still uploads a stopped
+tracker's pending days on request.
 
 ### `getTrackingState(): Promise<TrackingState>`
 
@@ -161,9 +168,11 @@ credited in one go by [gap recovery](ARCHITECTURE.md#gap-recovery) — the
 share of an overnight kill apportioned to the day, a reboot's since-boot
 steps, an install's since-boot claim — rather than observed sample by sample.
 An apportionment is an estimate, so a server judging the day wants it
-separately. It grows when a past day is backfilled (`historyBackfilled`), is
-`0` for a day counted live and for every day stored before 1.4.0, and never
-includes anything from Health Connect. Also on `StepSnapshot`.
+separately. It grows when gap recovery backfills a past day
+(`historyBackfilled` with `reason: 'gap'` or `'reboot'`) - not for a
+`'late'` backfill, whose steps were watched being taken - is `0` for a day
+counted live and for every day stored before 1.4.0, and never includes
+anything from Health Connect. Also on `StepSnapshot`.
 
 `suspectSteps` is how many of this device's steps for the day the
 [integrity checks](#integrity-checks) flagged — `0` unless
@@ -337,9 +346,11 @@ what it should trust in either shape.
 follows the same rules as every other Health Connect read — no provider, no
 grant or `stepSource: 'device'` leaves it empty, never an error — and
 `sourcesStatus` says which: `'read'`, `'not_consulted'`, or `'timed_out'` /
-`'failed'` when the read did not finish (2.3). The snapshot reads sources
-fresh, with 15 seconds to do it, and signs the status with them, so a server
-never mistakes a read that failed for a day with no watch; and each
+`'failed'` when the read did not finish (2.3). A snapshot taken in the
+background without `READ_HEALTH_DATA_IN_BACKGROUND` is `'not_consulted'`
+(2.3.7): Health Connect refuses that read, so it is not made. The snapshot reads
+sources fresh, with 15 seconds to do it, and signs the status with them, so a
+server never mistakes a read that failed for a day with no watch; and each
 source carries `manualSteps`, `recordingMethods` and `trustedWearable`.
 `coverageStartAt` is only known for today; a past day reads `0`. `clock`
 puts the wall clock next to a boot id derived from `elapsedRealtime`: a clock
@@ -373,9 +384,12 @@ A server-side rule set that fits this shape:
   otherwise cap it at what the phone covered
   (`deviceSteps`, or the part before `coverageStartAt` on an install day);
 - never re-bucket a day already paid: a later snapshot for the same `date`
-  with a higher `deviceSteps` is a `historyBackfilled` recovery, and whether
-  to honour it is policy, not arithmetic — `gapRecovery: 'today_capped'`
-  or `'drop'` stops it happening at all;
+  with a higher `deviceSteps` is a `historyBackfilled` recovery, or steps
+  taken before midnight that the phone delivered after it, and whether to
+  honour it is policy, not arithmetic — `gapRecovery: 'today_capped'` or
+  `'drop'` stops it happening at all. Settling yesterday a few minutes after
+  midnight on a phone that slept through it is when late steps are likeliest;
+  a snapshot taken then already waits for them;
 - use `health.recoveryCount` and `aggressiveOem` to explain a low day, not
   to inflate one;
 - with the [integrity checks](#integrity-checks) on, take `suspectSteps` off
@@ -484,6 +498,17 @@ timed steps would flag an honest walk for a cadence nobody walks at, and
 spreading them across the gap would invent exactly the metronomic count
 `steady_cadence` looks for. Steps credited by gap recovery are not in any
 minute at all; only the daily cap can reach them.
+
+A batch like that can cross midnight. Its steps count towards the day they
+were taken on, the one their minutes are on, and that day is judged with
+them (2.3.7): a shaker left running up to midnight on a sleeping phone is flagged on
+the day it counted for, not passed to the next day unjudged. When the day had
+already closed - the screen came on, or a read ended it, before the batch was
+read - the steps are added to it afterwards and announced with
+`historyBackfilled` (`reason: 'late'`), under the default `gapRecovery:
+'split'`. The policies that never change a closed day decide differently:
+`'today'` and `'today_capped'` give them to the new day as recovered steps,
+and `'drop'` discards them.
 
 **`mode: 'exclude'`** also takes `suspectSteps` out of every number this
 package shows or sends: `getTodaySteps()`, `stepsChanged`, the notification,
@@ -1215,7 +1240,10 @@ Every app that published steps over the range, with what each contributed.
 ```
 
 An empty `sources` under `healthConnect: 'timed_out'` or `'failed'` is not
-"no other apps": call again. `useHealthConnect` keeps its last list then.
+"no other apps": call again. `useHealthConnect` keeps its last list then. A
+failed read is never cached (2.3.7), so the next call reads afresh. In the background
+without `READ_HEALTH_DATA_IN_BACKGROUND` the answer is `'not_consulted'`, as it
+is for range stats and the full upload.
 
 `lateWrittenSteps` counts steps from records the writing app last modified
 more than a day after they ended — a history pushed into Health Connect after
@@ -1567,7 +1595,7 @@ warns once. Use `removeAllListeners()` when that is really what you mean.
 | `dayChanged` | `{ previousDate, currentDate, previousDaySteps }`. Refetch your stats here. |
 | `suspiciousActivity` | `{ date, flags, deviceSteps, suspectSteps, mode }`. The [integrity checks](#integrity-checks) found something they had not reported for this day before; `flags` holds only the new ones. Only with `fraudDetection.enabled`. |
 | `motionWindow` | `MotionWindow`. One motion signature window was stored — see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Features only. |
-| `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it. Once per affected day, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
+| `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' \| 'late' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it, or - `'late'` (2.3.7) - steps taken on it arrived after it had closed, held by the phone with the screen off across midnight; those are not recovered steps, and the day's integrity verdict is taken again with them. Once per affected day and write, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
 | `syncAuthFailed` | `{ target: 'remote', status, reason: 'unauthorized' \| 'forbidden' \| 'no_key', auth }`. The endpoint refused the credentials, or signature auth had no key. Not retried: refresh with `updateConfig({ remoteSyncHeaders })` or call `attestDevice()`, then `syncNow()`. |
 | `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
 | `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
@@ -1591,7 +1619,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `monthlyGoal` | `dailyGoal × 30` | |
 | `calorieCoefficient` | 0.57 | kcal per kg per km |
 | `historyRetentionDays` | 35 | set 31 for a one-month window |
-| `notificationTitle` / `notificationText` | built-in | tokens: `{steps}` `{distance}` `{calories}` `{percent}` `{goal}` |
+| `notificationTitle` / `notificationText` | built-in | tokens: `{steps}` `{distance}` `{calories}` `{percent}` `{goal}`. The built-in words are string resources (2.3.7) your app can translate or reword by defining them in its own `res/values*/strings.xml`: `stp_notification_title` (plurals, "%s steps"), `stp_notification_goal` ("%s goal"), `stp_notification_text`, `stp_paused_text`, `stp_locked_text`, `stp_channel_name`, `stp_action_pause`, `stp_action_resume`, `stp_action_open`. Counts and distance use the phone's number format |
 | `notificationIcon` | bundled | drawable name in your app. Found by name, so with `shrinkResources` keep it - see [INSTALLATION.md](INSTALLATION.md#5-custom-notification-icon-recommended); a name that is not found logs a warning and uses the default |
 | `notificationChannelName` | "Step tracking" | shown in Android settings |
 | `notificationActions` | `true` | Pause/Resume/Open buttons |
@@ -1661,7 +1689,8 @@ const { stats, loading, error, reload } = useStepStats('week');
 
 `period` is `'week' | 'month' | 'year'`. Only the newest request's answer is
 shown, so overlapping loads cannot put an old window on screen. Reloads on
-`dayChanged` and when the
+`dayChanged`, on `historyBackfilled` (2.3.7) - a past day that grew after the fact,
+whatever the window - and when the
 app comes back to the foreground, and - for a window that includes today -
 at most every 30 seconds (`STATS_LIVE_REFRESH_MS`) while steps come in, so
 today's bar moves while walking (2.3). Those refreshes leave `loading` alone;

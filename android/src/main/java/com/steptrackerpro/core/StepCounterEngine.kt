@@ -88,12 +88,22 @@ class StepCounterEngine(
      */
     var onObserved: ((fromMillis: Long, toMillis: Long, steps: Int, timed: Boolean) -> Unit)? = null
 
+    /**
+     * Invoked when a late sample - one the sensor hub held across midnight
+     * and delivered after the day it was taken on had closed - left steps
+     * owed to that day in [StepStateStore.lateSteps], for the callee to add
+     * with [takeLateSteps]. Runs under this engine's lock; keep it cheap.
+     */
+    var onLate: (() -> Unit)? = null
+
     /** Why a past day is being credited after the fact. Values match the JS event. */
     enum class BackfillReason(val jsValue: String) {
         /** Nothing was listening between the last reading and this one. */
         GAP("gap"),
         /** The counter restarted; the steps are the ones taken since boot. */
-        REBOOT("reboot")
+        REBOOT("reboot"),
+        /** Samples taken on the day arrived after it had closed. */
+        LATE("late")
     }
 
     @Volatile
@@ -202,6 +212,22 @@ class StepCounterEngine(
     }
 
     /**
+     * Steps owed to closed days by late samples, taken and forgotten: the
+     * caller adds them to those days. Committed before it returns, so a
+     * process death after the caller's write cannot hand them out twice.
+     */
+    @Synchronized
+    fun takeLateSteps(): Map<String, Int> = state.takeLateSteps()
+
+    /** Owes [owed] again: taken by [takeLateSteps], but the write of them failed. */
+    @Synchronized
+    fun oweLateSteps(owed: Map<String, Int>) {
+        var merged = state.lateSteps
+        for ((day, steps) in owed) merged = merged + (day to (merged[day] ?: 0) + steps)
+        state.putLateSteps(merged)
+    }
+
+    /**
      * @param rawValue cumulative steps since boot from TYPE_STEP_COUNTER.
      * @param timed false when [eventAtMillis] is only when the sample
      *   arrived, its own timestamp being unusable; see [SensorEventTime].
@@ -210,7 +236,10 @@ class StepCounterEngine(
     @Synchronized
     fun onCounterSample(rawValue: Float, eventAtMillis: Long, timed: Boolean = true): StepSnapshot? {
         if (rawValue < 0f || rawValue.isNaN()) return null
-        rollDateIfNeeded()
+        // The day the steps were taken on, when the sample can say - which,
+        // for a batch the hub held across midnight, is not the day it arrives.
+        val takenOn = if (timed) DateKeys.of(eventAtMillis) else null
+        rollDateIfNeeded(takenOn)
         val previousEventAt = state.lastEventAt
 
         val currentBoot = bootIdProvider()
@@ -249,6 +278,12 @@ class StepCounterEngine(
         // was apportioned. Everything that goes through recover() qualifies,
         // and so does an install's since-boot claim: none of it was watched.
         var recoveredNow = 0
+        // When the steps since an earlier instant ended: this sample's own
+        // time when it can say, so a batch delivered after midnight places
+        // the steps taken before it on the day they were taken on; the
+        // arrival otherwise.
+        fun endOfGapSince(start: Long) =
+            if (timed && eventAtMillis >= start) eventAtMillis else clockProvider()
         if (state.anchorValue < 0f || bootIdMoved(currentBoot)) {
             // Steps accumulated between boot and this first sample are only
             // claimable when the counter really did restart - proven by the
@@ -274,20 +309,21 @@ class StepCounterEngine(
                 }
                 // A proven restart: everything since boot is real, unclaimed,
                 // and happened after the last reading. Spread it from the
-                // boot instant to now.
+                // boot instant to this sample.
                 counterRestarted -> {
                     backfillReason = BackfillReason.REBOOT
-                    recover(rawValue.roundToInt(), currentBoot, clockProvider())
+                    recover(rawValue.roundToInt(), currentBoot, endOfGapSince(currentBoot))
                 }
                 // The counter did not restart, so the delta since the last
                 // reading is exact. It covers whatever happened while the
                 // anchor was blank - a midnight rollover, a reset, a
                 // wall-clock correction, or an OEM kill that spanned any of
-                // those - and is spread from the last reading's time to now.
+                // those - and is spread from the last reading's time to this
+                // sample's.
                 else -> recover(
                     (rawValue - lastRaw).roundToInt().coerceAtLeast(0),
                     state.lastEventAt,
-                    clockProvider()
+                    endOfGapSince(state.lastEventAt)
                 )
             }
             anchorValue = rawValue - recovered.today
@@ -326,29 +362,59 @@ class StepCounterEngine(
             return null
         }
 
+        // What this sample added beyond what recovery credited in one go is
+        // what the sensor was seen counting.
+        var observed = total - previous - recoveredNow
+        var kept = total
+        var owed: Map<String, Int>? = null
+        val closedDay = takenOn?.takeIf { it < state.activeDate && observed > 0 }
+        if (closedDay != null) {
+            // Taken on a day that has closed since: a batch the hub held
+            // across midnight, delivered after the heartbeat or a read ended
+            // that day. They are that day's steps, not this one's.
+            when (lateHandling()) {
+                LateHandling.OWN_DAY -> {
+                    kept = total - observed
+                    owed = owedWith(closedDay, observed)
+                }
+                LateHandling.ACTIVE_DAY -> {
+                    recoveredNow += observed
+                    observed = 0
+                }
+                LateHandling.DROPPED -> {
+                    kept = total - observed
+                    observed = 0
+                }
+            }
+            if (kept != total) {
+                anchorValue = rawValue
+                anchorSteps = kept
+            }
+        }
+
         state.writeCounterState(
             bootId = currentBoot,
             anchorValue = anchorValue,
             anchorSteps = anchorSteps,
             lastRaw = rawValue,
             activeDate = state.activeDate,
-            stepsToday = total,
+            stepsToday = kept,
             lastEventAt = eventAtMillis,
             lastElapsed = currentElapsed,
-            // Never more than the day has: total < previous + recoveredNow
+            // Never more than the day has: kept < previous + recoveredNow
             // only when the arithmetic clamped, and the share cannot exceed it.
-            recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(total)
+            recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(kept),
+            lateSteps = owed
         )
 
         backfill?.let { shares -> onBackfill?.invoke(shares, backfillReason) }
-
-        // What this sample added beyond what recovery credited in one go is
-        // what the sensor was seen counting.
-        val observed = total - previous - recoveredNow
+        // Late steps kept for their own day are judged there, in the minutes
+        // they were taken in.
         if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed, timed)
+        if (owed != null) onLate?.invoke()
 
-        if (total == previous) return null
-        pendingCommit += (total - previous)
+        if (kept == previous) return null
+        pendingCommit += (kept - previous)
         return snapshot()
     }
 
@@ -362,7 +428,8 @@ class StepCounterEngine(
     @Synchronized
     fun onDetectorSample(steps: Int, eventAtMillis: Long, timed: Boolean = true): StepSnapshot? {
         if (steps <= 0) return null
-        rollDateIfNeeded()
+        val takenOn = if (timed) DateKeys.of(eventAtMillis) else null
+        rollDateIfNeeded(takenOn)
         // A first-ever sample on a detector-only or accelerometer device is
         // where this device's coverage of the day begins, exactly as it is on
         // the counter path; without it a phone-side Health Connect source
@@ -373,7 +440,29 @@ class StepCounterEngine(
         if (paused) return null
 
         val previousEventAt = state.lastEventAt
-        val total = state.stepsToday + steps
+        // A step taken on a closed day goes where it does on the counter path.
+        var counted = steps
+        var observed = steps
+        var recoveredNow = 0
+        var owed: Map<String, Int>? = null
+        val closedDay = takenOn?.takeIf { it < state.activeDate }
+        if (closedDay != null) {
+            when (lateHandling()) {
+                LateHandling.OWN_DAY -> {
+                    counted = 0
+                    owed = owedWith(closedDay, steps)
+                }
+                LateHandling.ACTIVE_DAY -> {
+                    recoveredNow = steps
+                    observed = 0
+                }
+                LateHandling.DROPPED -> {
+                    counted = 0
+                    observed = 0
+                }
+            }
+        }
+        val total = state.stepsToday + counted
         // The counter fields are left exactly as they were. Blanking them here
         // would send the first counter sample on a dual-sensor device that fell
         // back to the detector down the claim-everything-since-boot path, on top
@@ -387,14 +476,38 @@ class StepCounterEngine(
             stepsToday = total,
             lastEventAt = eventAtMillis,
             lastElapsed = elapsedProvider(),
-            recoveredToday = state.recoveredToday
+            recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(total),
+            lateSteps = owed
         )
         // The counter total no longer matches the anchor arithmetic, so make the
         // next counter sample re-pin instead of recomputing from a stale anchor.
         reanchorOnNextSample = true
-        pendingCommit += steps
-        onObserved?.invoke(previousEventAt, eventAtMillis, steps, timed)
+        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed, timed)
+        if (owed != null) onLate?.invoke()
+        if (counted == 0) return null
+        pendingCommit += counted
         return snapshot()
+    }
+
+    /**
+     * Where steps taken on a day that has already closed go. The gap policy
+     * decides, as it does for every step that belongs to a closed day:
+     * `split` puts them on their own day; `today` and `today_capped`, which
+     * never change a closed day, give them to the active one in one go; and
+     * `drop` keeps nothing it cannot place on the active day.
+     */
+    private enum class LateHandling { OWN_DAY, ACTIVE_DAY, DROPPED }
+
+    private fun lateHandling(): LateHandling = when (gapRecovery) {
+        GapRecovery.SPLIT -> LateHandling.OWN_DAY
+        GapRecovery.TODAY, GapRecovery.TODAY_CAPPED -> LateHandling.ACTIVE_DAY
+        GapRecovery.DROP -> LateHandling.DROPPED
+    }
+
+    /** What is owed to closed days once [day] is owed [steps] more. */
+    private fun owedWith(day: String, steps: Int): Map<String, Int> {
+        val owed = state.lateSteps
+        return owed + (day to (owed[day] ?: 0) + steps)
     }
 
     @Synchronized
@@ -451,6 +564,10 @@ class StepCounterEngine(
     /** Zeroes today without touching stored history. */
     @Synchronized
     fun resetToday() {
+        // A day that has ended - its midnight not yet acted on, or kept open
+        // for a late batch - is closed first, with everything it counted,
+        // rather than wiped along with today.
+        rollDateIfNeeded()
         pendingCommit = 0
         state.coverageStartAt = 0L
         state.writeCounterState(
@@ -493,11 +610,20 @@ class StepCounterEngine(
         )
     }
 
-    /** Finalises the previous day and starts a fresh one. */
-    private fun rollDateIfNeeded() {
+    /**
+     * Finalises the previous day and starts a fresh one.
+     *
+     * @param takenOn the day a sample was taken on, when its timestamp can
+     *   say. A late sample of the active day - a batch the hub held across
+     *   midnight - does not close it: its steps are the active day's, and the
+     *   first sample taken after midnight closes the day instead, unless the
+     *   heartbeat or a read has closed it already.
+     */
+    private fun rollDateIfNeeded(takenOn: String? = null) {
         val today = DateKeys.today()
         val active = state.activeDate
         if (today == active) return
+        if (takenOn != null && active < today && takenOn <= active) return
 
         // The date can also move *backwards*, when the zone moves west across
         // the date line. The day being left is then still in the future and is

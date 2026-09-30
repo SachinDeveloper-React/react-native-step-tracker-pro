@@ -274,7 +274,9 @@ doubling is almost always outside it:
 - Under `'auto'` the watch only wins when it counted more. Check `deviceSteps`
   vs `externalSteps` on `getCurrentStepSource()`; if the watch is lower and you
   still want it, use `'wearable'` or pin it with `setPreferredStepSource()`.
-- Background syncs return empty without `healthConnectBackgroundRead: true`.
+- Without `healthConnectBackgroundRead: true`, nothing reads Health Connect
+  in the background: background uploads and snapshots carry
+  `sourcesStatus: 'not_consulted'`.
 
 ## A source shows as `kind: 'unknown'`
 

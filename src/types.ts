@@ -1556,24 +1556,29 @@ export interface DayChangedEvent {
 /**
  * A past day's stored total grew after the fact: gap recovery placed steps
  * on it — the part of an overnight kill that fell before midnight under
- * `'split'`, or a reboot's since-boot steps spread from the boot instant.
- * Fired once per affected day, after the write has committed, so an app that
- * has already settled that day knows to look again. `dayChanged` is
- * unrelated and unchanged. Never fires under `'today'`, `'today_capped'` or
- * `'drop'`, which leave closed days alone.
+ * `'split'`, or a reboot's since-boot steps spread from the boot instant —
+ * or steps taken on it arrived after it had closed. Fired once per affected
+ * day and write, after the write has committed, so an app that has already
+ * settled that day knows to look again. `dayChanged` is unrelated and
+ * unchanged. Never fires under `'today'`, `'today_capped'` or `'drop'`, which
+ * leave closed days alone.
  */
 export interface HistoryBackfilledEvent {
   /** yyyy-MM-dd of the day that changed. Never the current day. */
   date: string;
-  /** Steps added to it by this recovery. */
+  /** Steps added to it by this write. */
   addedSteps: number;
   /** Its stored total afterwards. */
   totalSteps: number;
   /**
    * `'gap'` — nothing was listening between the last reading and this one.
    * `'reboot'` — the counter restarted, and these are the steps since boot.
+   * `'late'` (2.3.7) — the phone held these steps with the screen off and
+   * delivered them after midnight; they were taken on this day, in the
+   * minutes `getStepMinutes()` shows, and the day was judged again with
+   * them. Unlike the other two they are not recovered steps.
    */
-  reason: 'gap' | 'reboot';
+  reason: 'gap' | 'reboot' | 'late';
 }
 
 export interface StepTrackerEventMap {

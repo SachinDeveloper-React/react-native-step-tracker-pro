@@ -52,11 +52,14 @@ class NotificationFactory(private val context: Context) {
         val paused = snapshot.state == TrackingState.PAUSED
         val percent = metrics.goalPercent(snapshot.steps, config.dailyGoal)
         val steps = formatCount(snapshot.steps)
-        val km = String.format(Locale.US, "%.2f", snapshot.distance / 1000.0)
+        // In the phone's own number format, like the counts: 2,50 km in Germany.
+        val km = String.format(Locale.getDefault(), "%.2f", snapshot.distance / 1000.0)
         val kcal = formatCount(snapshot.calories.toInt())
 
+        // Every word shown comes from a resource an app can translate or
+        // reword by defining it in its own res/values*/strings.xml.
         val title = config.notificationTitle?.applyTokens(steps, km, kcal, percent, config)
-            ?: "$steps steps"
+            ?: context.resources.getQuantityString(R.plurals.stp_notification_title, snapshot.steps, steps)
         val text = when {
             paused -> context.getString(R.string.stp_paused_text)
             config.notificationText != null ->
@@ -68,7 +71,7 @@ class NotificationFactory(private val context: Context) {
             .setSmallIcon(resolveIcon(config))
             .setContentTitle(title)
             .setContentText(text)
-            .setSubText("${formatCount(config.dailyGoal)} goal")
+            .setSubText(context.getString(R.string.stp_notification_goal, formatCount(config.dailyGoal)))
             .setProgress(100, percent, false)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

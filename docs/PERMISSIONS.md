@@ -341,12 +341,17 @@ resets the counter.
 
 Android 14+ refuses Health Connect reads from an app with no visible activity
 unless it holds `READ_HEALTH_DATA_IN_BACKGROUND`. The foreground service
-counts as background here. Without it:
+counts as background here. Without it the package does not try those reads -
+a refused read is not an answer - and reports Health Connect as not
+consulted:
 
-- the service's throttled refresh of today's sources returns empty, so the
+- the service's throttled refresh of today's sources is skipped, so the
   notification and `stepsChanged` only pick up a watch sync the next time the
   app is opened;
-- the sync worker cannot check whether a wearable owns a day before writing it.
+- the sync worker cannot check whether a wearable owns a day before writing it;
+- a snapshot or `full` upload made in the background carries
+  `sourcesStatus: 'not_consulted'`, and raw records in a snapshot
+  `status: 'not_granted'`.
 
 Set `healthConnectBackgroundRead: true` in Mode C. Play scrutinises this one:
 say in the declaration that it keeps a live step count in sync with a paired

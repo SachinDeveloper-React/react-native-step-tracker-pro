@@ -21,8 +21,9 @@ export const STATS_LIVE_REFRESH_MS = 30_000;
 
 /**
  * Fetches a windowed summary and keeps it current: again when the day rolls
- * over, when the app comes back to the foreground, and - for a window that
- * includes today - every {@link STATS_LIVE_REFRESH_MS} while steps come in.
+ * over, when a past day grows after the fact, when the app comes back to the
+ * foreground, and - for a window that includes today - every
+ * {@link STATS_LIVE_REFRESH_MS} while steps come in.
  * Those refreshes are quiet: `loading` only covers the first load and
  * explicit `reload()` calls, so a chart does not flicker as it updates.
  */
@@ -97,6 +98,9 @@ export function useStepStats(
     const subs = [
       StepTracker.addListener('dayChanged', () => void load(false)),
       StepTracker.addListener('stepsChanged', onSteps),
+      // A past day grew after the fact - recovered, or taken before midnight
+      // and delivered after it. Any window may hold it, so reload quietly.
+      StepTracker.addListener('historyBackfilled', () => void load(true)),
     ];
     const app = AppState.addEventListener('change', (next) => {
       if (next === 'active') void load(true);

@@ -84,7 +84,10 @@ reading — including every step the hardware counted while an OEM task killer
 had the process dead overnight. They are claimed, not dropped.
 
 Where they land depends on whether the gap crossed midnight, which is known
-from `lastEventAt`, the time of the last reading:
+from `lastEventAt`, the time of the last reading, and the time of the sample
+that closes the gap - its own timestamp when it has a usable one, so a batch
+delivered after midnight ends the gap when its sample was taken, not when it
+arrived:
 
 | Gap | `gapRecovery` | Result |
 |---|---|---|
@@ -172,14 +175,26 @@ clears the day's continuity baseline, and blanks the anchor so the next sample
 goes through gap recovery — which is how the handful of steps between the last
 sample before midnight and the first after it end up on the right sides.
 
-The first sample after midnight runs it, and so does
-`StepTrackerCore.rollDayIfDue()` — from the service's once-a-minute heartbeat
-and before every read of a day — which then sends `stepsChanged` for the new
-day. Before 2.3.6, waiting for a sample alone left a phone lying still
-across midnight on yesterday: the notification kept yesterday's total,
-`getStepsForDate(today)` and `getCurrentStepSource()` answered with
-yesterday's date and count, and `dayChanged`, the closing day's final save
-and its verdict all waited for the first step of the morning.
+The first sample *taken* after midnight runs it, and so does
+`StepTrackerCore.rollDayIfDue()` — from the service's once-a-minute heartbeat,
+from the date-change, clock, zone and screen-on broadcasts the service
+listens for while it runs, and before every read of a day — which then sends
+`stepsChanged` for the new day. Before 2.3.6, waiting for a sample alone
+left a phone lying still across midnight on yesterday: the notification kept
+yesterday's total, `getStepsForDate(today)` and `getCurrentStepSource()`
+answered with yesterday's date and count, and `dayChanged`, the closing
+day's final save and its verdict all waited for the first step of the
+morning. The heartbeat alone was not enough either: it does not tick while
+the CPU sleeps, so the screen coming on could show yesterday for up to a
+minute.
+
+Closing a day - its final save, its final verdict, `dayChanged` - runs on the
+write lane, and a read of a past day waits for the latest close to land
+first: `getYesterdaySteps()` or a signed snapshot of yesterday at the first
+open of the morning would otherwise read the stored row before the last few
+uncommitted steps reached it. Retention and the Health Connect pass follow
+the close without holding reads up. The close marks its own coroutine
+context, so the reads it makes itself never wait for it.
 
 Zero report latency does not make samples punctual. It makes the hub hand over
 each change as it happens *while the CPU is awake*. With the screen off and the
@@ -188,9 +203,32 @@ samples in the hub's FIFO and delivers them in one batch when something next
 wakes the CPU, often minutes later. Each keeps its own timestamp, and the
 service reads up to 30 minutes of that lateness back into the time the step was
 taken (`SensorEventTime`), so the minute buckets place the walk where it
-happened. Which *day* a sample counts towards is still decided when it
-arrives: steps taken in the last minutes before midnight on a sleeping phone,
-and delivered after it, count towards the new day.
+happened. The day each sample counts towards is the day it was taken on, too:
+
+- A sample taken before midnight does not close the day it belongs to. Its
+  steps count on that day, and the first sample taken after midnight closes
+  it - with the late steps in it and their minutes judged by its final
+  verdict.
+- If the heartbeat, a broadcast or a read closed the day first, a sample taken
+  on it is kept out of the new day and follows `gapRecovery`, like every
+  step that belongs to a closed day. Under `'split'` it is owed to its own
+  day: the debt is written with the counter state that left it out of the new
+  day, in one atomic edit, and the core adds the batch to the day a moment
+  later - one write, one `historyBackfilled` with `reason: 'late'`, one new
+  verdict, not one per sample. The credit waits for the day's own close and
+  holds a lock while it writes and judges, so two verdicts for one day are
+  never written at once; a read of the day adds whatever is still waiting
+  first, and a write that fails leaves its steps owed for the next credit.
+  Those steps were watched being taken, so they do not grow the day's
+  recovered share. `'today'` and `'today_capped'`,
+  which never change a closed day, give them to the new day in one go as
+  recovered steps, and `'drop'` discards them.
+
+The day used to be chosen by arrival. Once 2.3.6 kept the minutes' real
+times, a late batch's steps counted on the new day while their minutes sat on
+the old one, and neither day's verdict judged them: a shaker run up to
+midnight on a sleeping phone passed half an hour of steps to the next day
+unflagged. Untimed samples still count on the day they arrive.
 
 ### Process death
 
@@ -422,7 +460,11 @@ Health Connect.
 Counter state deliberately lives in SharedPreferences, not Room: it is written
 constantly and must be readable synchronously from `onStartCommand` before any
 coroutine gets a chance to run. It also means a corrupt database costs you
-history, never the live count.
+history, never the live count. Steps owed to a closed day by late samples
+live there too, in the same edit as the counter state that left them out of
+the active day, until the core has added them; the core takes them with a
+synchronous commit before its write, so a process death loses at most that
+write and never adds them twice.
 
 Flush cadence is `persistEveryNSteps` (default 10) plus a forced flush on pause,
 stop, task removal and destroy.
@@ -468,9 +510,10 @@ the React module share the process, so that flag is definitive: a SIGKILL
 takes it with the process and only `onDestroy` clears it otherwise. The
 service also stamps a heartbeat every 60 s from its sensor thread even when
 the user is still, so `heartbeatAgeMs` says how long ago it was last known to
-be alive; the same beat ends the day at midnight when no step does. Every
-non-user start is recorded (`recoveryCount`, `lastRecoveryReason`) so an app
-can decide when to show the OEM guidance.
+be alive; the same beat ends the day at midnight when no step does, as do
+the date-change, clock, zone and screen-on broadcasts. Every non-user start
+is recorded (`recoveryCount`, `lastRecoveryReason`) so an app can decide when
+to show the OEM guidance.
 
 Notification updates are throttled to `notificationThrottleMs` and skipped when
 the step count has not changed, so a walk does not redraw the shade sixty times
@@ -515,11 +558,15 @@ Health Connect sync has no network constraint because Health Connect is entirely
 on-device. Offline sync is still sync. Only the optional `remoteSyncUrl` upload
 waits for connectivity, and nothing else waits on it.
 
-The jobs belong to a tracker that is on. The service schedules them when
-tracking starts, a config change reschedules them while it is on, and
-`stopTracking()` cancels them. `initialize()` and `updateConfig()` leave a
-stopped tracker without them; before 2.3.6 they scheduled them on every
-launch, which brought back what a stop had cancelled.
+The jobs follow config, and `stopTracking()` cancels them. The service
+schedules them when tracking starts, and a config change reschedules them -
+except after that stop: `StepStateStore.stoppedByUser` records it, and until
+`startTracking()` clears it, `initialize()` and `updateConfig()` leave the
+jobs cancelled. Before 2.3.6 they scheduled them on every launch, which
+brought back what a stop had cancelled; 2.3.6 then scheduled them only while
+tracking was on, which left a tracker that never started - an app that only
+reads Health Connect, a user who never allowed activity recognition -
+without its hourly upload.
 
 Today's row is written to Health Connect on every pass but left `synced = 0`,
 because it is still moving. Closed days are marked synced once written — each
@@ -698,9 +745,17 @@ Connect, never the merged one, so other readers never see a blend.
 Every Health Connect read is bounded by `HC_READ_TIMEOUT_MS` (4 s). A
 provider that is migrating or being updated can block far longer; past the
 bound the phone's own count is the answer, nothing is cached, and the read is
-retried next time. Granted permissions are cached for five seconds between
-the explicit status checks, so the sensor path's refresh does not cost an
-IPC per minute.
+retried next time. A read that fails is treated the same way: it is reported
+as `'failed'` and not cached. A raw read that fails falls back to the
+aggregate API, and when that fails too the whole read fails - it used to
+come back empty, which was cached for up to ten minutes and signed into
+snapshots as `'read'`, a day with no other apps. Health Connect also refuses
+reads from an app with no activity on screen unless it holds
+`READ_HEALTH_DATA_IN_BACKGROUND`; without it, a read in the background is
+not tried at all and reports `'not_consulted'` - the sensor path's refresh,
+the sync worker, a background snapshot or `full` upload. Granted permissions
+are cached for five seconds between the explicit status checks, so the
+sensor path's refresh does not cost an IPC per minute.
 
 Goals follow the displayed number. Under `auto` it is monotonic for the day,
 and `GoalTracker` fires each goal at most once per period regardless.

@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
-import androidx.health.connect.client.aggregate.AggregationResultGroupedByPeriod
 import androidx.health.connect.client.changes.DeletionChange
 import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.permission.HealthPermission
@@ -463,7 +462,10 @@ class HealthConnectManager(
     // ---- reads -----------------------------------------------------------
 
     /**
-     * Daily totals aggregated across Health Connect origins.
+     * Daily totals aggregated across Health Connect origins, or none when
+     * they cannot be read - the quiet form behind `readHealthConnectSteps()`.
+     * Everything that has to tell a failed read from an empty one uses
+     * [aggregateDailySteps].
      *
      * @param origins restricts the aggregate to these packages. Empty means
      *   every origin, which is only correct for a display that is not also
@@ -473,8 +475,40 @@ class HealthConnectManager(
         start: Instant,
         end: Instant,
         origins: Set<String> = emptySet()
+    ): List<DayTotals> = try {
+        aggregateDailySteps(start, end, origins)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    /**
+     * Whether Health Connect can be read right now. It refuses a read from an
+     * app with no activity on screen - the foreground service counts as
+     * background - unless the app holds `READ_HEALTH_DATA_IN_BACKGROUND`.
+     * Callers check this instead of trying: a refused read is not one that
+     * found nothing, and is reported as Health Connect not consulted.
+     */
+    suspend fun canReadNow(): Boolean {
+        if (appInForeground()) return true
+        val background = PERMISSION_BACKGROUND_READ ?: return false
+        return grantedPermissions().contains(background)
+    }
+
+    private fun appInForeground(): Boolean {
+        val info = android.app.ActivityManager.RunningAppProcessInfo()
+        android.app.ActivityManager.getMyMemoryState(info)
+        return info.importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
+    /** [readDailySteps], throwing when the read fails. */
+    private suspend fun aggregateDailySteps(
+        start: Instant,
+        end: Instant,
+        origins: Set<String>
     ): List<DayTotals> {
-        val hc = client() ?: return emptyList()
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val zone = ZoneId.systemDefault()
         // Only types the app reads and holds a grant for: an aggregate that
         // names one ungranted metric fails as a whole, and a steps-only app
@@ -494,8 +528,7 @@ class HealthConnectManager(
             timeRangeSlicer = Period.ofDays(1),
             dataOriginFilter = origins.map { DataOrigin(it) }.toSet()
         )
-        return runCatching { hc.aggregateGroupByPeriod(request) }
-            .getOrDefault(emptyList<AggregationResultGroupedByPeriod>())
+        return hc.aggregateGroupByPeriod(request)
             .map { group ->
                 DayTotals(
                     date = DateKeys.format(group.startTime.toLocalDate()),
@@ -516,6 +549,10 @@ class HealthConnectManager(
      * returns totals with the contributing origins attached but no way to split
      * a total between them, and no device metadata at all - which is exactly
      * what tells a watch apart from a phone-side pedometer.
+     *
+     * Throws when the steps cannot be read, even from the aggregates that
+     * stand in for a raw read that failed: an empty answer means no app wrote
+     * steps, never that the read went wrong.
      */
     suspend fun readDailyStepsBySource(
         start: Instant,
@@ -536,7 +573,7 @@ class HealthConnectManager(
          */
         deadline: Long = Long.MAX_VALUE
     ): Map<String, List<StepSource>> {
-        val hc = client() ?: return emptyMap()
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val self = context.packageName
         val coverageDate = if (coverageStartMs > 0L) DateKeys.of(coverageStartMs) else null
 
@@ -752,27 +789,22 @@ class HealthConnectManager(
 
     /**
      * Every origin that wrote steps between two instants, from the aggregate
-     * API's list of contributors. Empty when it cannot be read.
+     * API's list of contributors. Throws when it cannot be read: an empty set
+     * would pass for a window no other app wrote in.
      */
     private suspend fun originsWithSteps(hc: HealthConnectClient, start: Instant, end: Instant): Set<String> =
-        try {
-            hc.aggregate(
-                AggregateRequest(
-                    metrics = setOf(StepsRecord.COUNT_TOTAL),
-                    timeRangeFilter = TimeRangeFilter.between(start, end)
-                )
-            ).dataOrigins.mapTo(HashSet()) { it.packageName }
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            emptySet()
-        }
+        hc.aggregate(
+            AggregateRequest(
+                metrics = setOf(StepsRecord.COUNT_TOTAL),
+                timeRangeFilter = TimeRangeFilter.between(start, end)
+            )
+        ).dataOrigins.mapTo(HashSet()) { it.packageName }
 
     /**
      * Each of [kinds]' origins' daily totals from the aggregate API, as
      * sources without per-record detail: no recording-method split, no hourly
      * profile, no late-write share - the -1 and null every aggregate-answered
-     * day carries.
+     * day carries. Throws when an origin's totals cannot be read.
      */
     private suspend fun aggregateBySource(
         start: Instant,
@@ -785,7 +817,7 @@ class HealthConnectManager(
         val distanceRead = ReadType.DISTANCE in grantedReadTypes()
         val out = HashMap<String, ArrayList<StepSource>>()
         for ((pkg, kind) in kinds) {
-            for (day in readDailySteps(start, end, setOf(pkg))) {
+            for (day in aggregateDailySteps(start, end, setOf(pkg))) {
                 if (day.steps <= 0) continue
                 out.getOrPut(day.date) { ArrayList() }.add(
                     StepSource(

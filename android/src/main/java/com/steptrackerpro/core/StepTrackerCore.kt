@@ -18,7 +18,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -27,6 +29,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Process-wide singleton shared by the React module, the foreground service,
@@ -68,9 +71,27 @@ class StepTrackerCore private constructor(context: Context) {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
         onBackfill = { shares, reason -> handleBackfill(shares, reason) }
         onObserved = { from, to, steps, timed -> integrity.onObserved(from, to, steps, timed) }
+        onLate = { scheduleLateSteps() }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
         gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
     }
+
+    /** A late-steps write is queued; one covers a whole batch. */
+    private val lateStepsQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Held while late steps are added to their day and it is judged again:
+     * two of those at once would race to store the day's verdict, and a
+     * read of the day waits for one in flight.
+     */
+    private val lateStepsLock = Mutex()
+
+    /**
+     * The latest rollover's close of the day it ended: the final save and
+     * verdict. A read of a day waits for it - see [awaitClosedDay].
+     */
+    @Volatile
+    private var closingDay: Job? = null
 
     init {
         // Exclude mode: a verdict that moved today's flagged total moved the
@@ -104,6 +125,9 @@ class StepTrackerCore private constructor(context: Context) {
         // no distance after the user allowed it, say - for up to ten minutes
         // on a past day. Dropped the moment a fresh read sees a change.
         healthConnect.onGrantsChanged = { sourceCache.invalidate() }
+        // Owed by a process that died before it could add them. Last, so
+        // everything the write touches is in place when it runs.
+        if (state.lateSteps.isNotEmpty()) scheduleLateSteps(delayMs = 0L)
     }
 
     fun config(): StepTrackerConfig = configStore.get()
@@ -156,11 +180,11 @@ class StepTrackerCore private constructor(context: Context) {
                 force = previous.fraudDetectionEnabled && !saved.fraudDetectionEnabled
             )
         }
-        // Background work belongs to a tracker that is on: the service
-        // schedules it when tracking starts, and stopTracking() cancels it.
-        // Scheduling it here regardless - initialize() runs this on every
-        // launch - brought back the jobs a stop had cancelled.
-        if (shouldBeRunning()) SyncScheduler.schedule(appContext, saved)
+        // Background work follows config, except after stopTracking(): that
+        // cancels it, and initialize() - which runs this on every launch -
+        // must not bring it back. A tracker that never started keeps it, so
+        // an app that only reads Health Connect still gets its hourly upload.
+        if (!state.stoppedByUser) SyncScheduler.schedule(appContext, saved)
         return saved
     }
 
@@ -367,31 +391,104 @@ class StepTrackerCore private constructor(context: Context) {
         shares: Map<String, Int>,
         reason: StepCounterEngine.BackfillReason
     ) {
-        val retention = config().historyRetentionDays
-        val cutoff = DateKeys.minusDays(DateKeys.today(), retention)
         scope.launch(writeLane) {
-            shares.forEach { (date, steps) ->
-                if (date < cutoff || steps <= 0) return@forEach
-                val stored = repository.addToDay(date, steps, metrics) ?: return@forEach
-                StepEventBus.emit(
-                    StepEventBus.Events.HISTORY_BACKFILLED,
-                    mapOf(
-                        "date" to date,
-                        "addedSteps" to steps,
-                        "totalSteps" to stored.steps,
-                        "reason" to reason.jsValue
-                    )
-                )
-            }
+            shares.forEach { (date, steps) -> addToPastDay(date, steps, reason) }
             sourceCache.invalidate()
         }
     }
 
-    /** Persists the closing day, tells JS, and trims history past retention. */
+    /**
+     * Adds [steps] to a stored past day, unless it is past retention, and
+     * tells JS once the write has committed. Recovered steps grow the day's
+     * recovered share; late ones were watched being taken, and do not. On
+     * the write lane.
+     *
+     * @return whether the day was written.
+     */
+    private suspend fun addToPastDay(
+        date: String,
+        steps: Int,
+        reason: StepCounterEngine.BackfillReason
+    ): Boolean {
+        val cutoff = DateKeys.minusDays(DateKeys.today(), config().historyRetentionDays)
+        if (date < cutoff || steps <= 0) return false
+        val stored = repository.addToDay(
+            date, steps, metrics, recovered = reason != StepCounterEngine.BackfillReason.LATE
+        ) ?: return false
+        StepEventBus.emit(
+            StepEventBus.Events.HISTORY_BACKFILLED,
+            mapOf(
+                "date" to date,
+                "addedSteps" to steps,
+                "totalSteps" to stored.steps,
+                "reason" to reason.jsValue
+            )
+        )
+        return true
+    }
+
+    /**
+     * Queues the write of what late samples owed to closed days. A batch the
+     * hub held arrives in one burst, so the write waits a moment and takes
+     * all of it: one addition, one event and one new verdict per day, not
+     * one per sample. The debt itself is already stored with the counter
+     * state, so the wait costs nothing if the process dies meanwhile.
+     */
+    private fun scheduleLateSteps(delayMs: Long = LATE_STEPS_DELAY_MS) {
+        if (!lateStepsQueued.compareAndSet(false, true)) return
+        scope.launch {
+            delay(delayMs)
+            lateStepsQueued.set(false)
+            runCatching { creditLateSteps() }
+        }
+    }
+
+    /**
+     * Adds what late samples owed to the days they were taken on, and judges
+     * each such day again: its late minutes are in now, and so are the steps
+     * they describe. Never alongside the close of such a day - its own save
+     * and verdict - nor alongside another credit: two verdicts for one day
+     * written at once leave whichever landed last. A write that fails leaves
+     * its steps owed, for the next credit. Runs on the write lane, marked as
+     * closing work so the reads it makes never wait for it.
+     */
+    private suspend fun creditLateSteps() {
+        // Already inside closing work, which this must never wait for.
+        if (currentCoroutineContext()[ClosingDay] != null) return
+        closingDay?.join()
+        if (state.lateSteps.isEmpty() && !lateStepsLock.isLocked) return
+        withContext(writeLane + ClosingDay) {
+            lateStepsLock.withLock {
+                val owed = engine.takeLateSteps()
+                if (owed.isEmpty()) return@withLock
+                val unwritten = HashMap<String, Int>()
+                for ((date, steps) in owed.toSortedMap()) {
+                    val written = try {
+                        addToPastDay(date, steps, StepCounterEngine.BackfillReason.LATE)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        unwritten[date] = steps
+                        false
+                    }
+                    if (written) runCatching { integrity.onLateSteps(date) }
+                }
+                if (unwritten.isNotEmpty()) engine.oweLateSteps(unwritten)
+                sourceCache.invalidate()
+            }
+        }
+    }
+
+    /**
+     * Closes the day that ended - its final save and verdict, then
+     * `dayChanged` - which is what a read of that day waits for (see
+     * [awaitClosedDay]). Retention and the Health Connect pass follow on
+     * their own, without holding those reads up.
+     */
     private fun handleRollover(closing: DayTotals, newDate: String) {
         state.clearContinuity()
         sourceCache.invalidate()
-        scope.launch(writeLane) {
+        val closed = scope.launch(writeLane + ClosingDay) {
             repository.saveDay(closing)
             // The closing day's final verdict, from everything flushed for it.
             runCatching { integrity.onDayClosed(closing.date) }
@@ -403,7 +500,6 @@ class StepTrackerCore private constructor(context: Context) {
                 val stored = repository.getDay(newDate)
                 engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps)
             }
-            prune(config().historyRetentionDays)
             StepEventBus.emit(
                 StepEventBus.Events.DAY_CHANGED,
                 mapOf(
@@ -412,8 +508,35 @@ class StepTrackerCore private constructor(context: Context) {
                     "previousDaySteps" to closing.steps
                 )
             )
-            if (config().healthConnectEnabled) syncHealthConnect()
         }
+        closingDay = closed
+        scope.launch(writeLane) { runCatching { prune(config().historyRetentionDays) } }
+        scope.launch {
+            closed.join()
+            if (config().healthConnectEnabled) runCatching { syncHealthConnect() }
+        }
+    }
+
+    /**
+     * Ends the day if it is due, and waits for the latest close to finish.
+     * Without it `getYesterdaySteps()` or a signed snapshot of yesterday, at
+     * the first open of the morning, could read the stored day before the
+     * rollover's save of its last steps had landed. The close reads days
+     * too, and must not wait for itself.
+     */
+    private suspend fun awaitClosedDay() {
+        rollDayIfDue()
+        if (currentCoroutineContext()[ClosingDay] != null) return
+        closingDay?.join()
+        // Steps a late batch owes a closed day are part of it too: added now
+        // if they are still waiting out their delay, or waited for if they
+        // are being added.
+        creditLateSteps()
+    }
+
+    /** Marks a rollover's close of its day - see [awaitClosedDay]. */
+    private object ClosingDay : CoroutineContext.Element, CoroutineContext.Key<ClosingDay> {
+        override val key: CoroutineContext.Key<*> get() = this
     }
 
     /**
@@ -434,7 +557,12 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     suspend fun clearHistory() = withContext(writeLane) {
-        repository.clear()
+        // Nothing is owed to days that are gone - nor added back to them by
+        // a credit in flight.
+        lateStepsLock.withLock {
+            repository.clear()
+            engine.takeLateSteps()
+        }
         integrity.onHistoryCleared()
     }
 
@@ -473,6 +601,9 @@ class StepTrackerCore private constructor(context: Context) {
         scope.launch(writeLane) {
             repository.saveDay(totals)
             runCatching { integrity.flush() }
+            // Late steps still waiting out their delay go now, while the
+            // process is sure to be here.
+            runCatching { creditLateSteps() }
         }
         return totals
     }
@@ -522,22 +653,39 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     suspend fun stats(start: String, end: String, goal: Int?): RangeStats {
+        awaitClosedDay()
         val today = DateKeys.today()
         val live = if (today in start..end) liveToday() else null
         return repository.stats(start, end, goal, live)
     }
 
+    /** Today live; a past day as stored, once any close of it has landed. */
     suspend fun dayTotals(date: String): DayTotals {
-        rollDayIfDue()
-        return if (date == DateKeys.today()) liveToday() else repository.getDay(date)
+        if (date == DateKeys.today()) return liveToday()
+        awaitClosedDay()
+        return repository.getDay(date)
     }
 
     /** Stored rows for a range, as they are, with each day's suspect steps stamped on. */
     suspend fun history(start: String, end: String): List<DayTotals> {
+        awaitClosedDay()
         val days = repository.getRange(start, end)
         val suspects = integrity.suspects(days)
         if (suspects.isEmpty()) return days
         return days.map { it.copy(suspectSteps = suspects[it.date] ?: 0) }
+    }
+
+    /** [IntegrityMonitor.report], once any close of the day - its final verdict - has landed. */
+    suspend fun integrityReport(date: String): Map<String, Any?> {
+        awaitClosedDay()
+        return integrity.report(date)
+    }
+
+    /** Minutes with steps between the two days, inclusive, those still in memory included. */
+    suspend fun stepMinutes(start: String, end: String): List<MinuteSample> {
+        awaitClosedDay()
+        withContext(writeLane) { integrity.flush() }
+        return repository.minutes(start, end)
     }
 
     // ---- integrity ---------------------------------------------------------
@@ -620,8 +768,11 @@ class StepTrackerCore private constructor(context: Context) {
         if (sourcePolicy() == StepSourcePolicy.DEVICE) return false
         if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return false
         // Steps alone: a user who unticked distance or calories on the sheet
-        // still gets their watch's steps, with those derived instead.
-        return healthConnect.canReadSteps()
+        // still gets their watch's steps, with those derived instead. And
+        // only when a read is allowed now: in the background without the
+        // background grant it would be refused, and a refusal is not an
+        // answer.
+        return healthConnect.canReadSteps() && healthConnect.canReadNow()
     }
 
     /**
@@ -834,7 +985,9 @@ class StepTrackerCore private constructor(context: Context) {
 
         if (!config().healthConnectEnabled) return result("disabled")
         if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return result("unavailable")
-        if (!healthConnect.canReadRecords(types)) return result("not_granted")
+        // In the background that includes the background grant, without
+        // which the read would be refused.
+        if (!healthConnect.canReadRecords(types) || !healthConnect.canReadNow()) return result("not_granted")
         val start = DateKeys.startOfDayInstant(date)
         val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
         if (!end.isAfter(start)) return result("read")
@@ -1095,7 +1248,7 @@ class StepTrackerCore private constructor(context: Context) {
         val config = config()
         if (!(config.healthConnectEnabled && config.healthConnectReadEnabled &&
                 healthConnect.availability() == HealthConnectManager.Availability.AVAILABLE &&
-                healthConnect.canReadSteps())
+                healthConnect.canReadSteps() && healthConnect.canReadNow())
         ) {
             return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         }
@@ -1412,6 +1565,13 @@ class StepTrackerCore private constructor(context: Context) {
 
         /** Floor between sensor-triggered Health Connect refreshes of today. */
         private const val SOURCE_REFRESH_MIN_INTERVAL_MS = 60_000L
+
+        /**
+         * How long a late batch's steps wait before they are added to their
+         * day: enough for the rest of the burst to arrive, so a batch is one
+         * write and one verdict rather than one per sample.
+         */
+        private const val LATE_STEPS_DELAY_MS = 2_000L
 
         /**
          * Health Connect reads are cross-process; a provider that is busy

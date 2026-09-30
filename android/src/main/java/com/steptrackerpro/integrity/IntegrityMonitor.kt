@@ -195,6 +195,16 @@ class IntegrityMonitor(
         if (enabled) evaluate(date) else timeline.clear()
     }
 
+    /**
+     * A closed day grew by steps that arrived late, and its minutes by the
+     * minutes they were taken in: judged again, so a shaker run up to
+     * midnight with the phone asleep is caught on the day it counts for.
+     * On the lane.
+     */
+    suspend fun onLateSteps(date: String) {
+        if (enabled) evaluate(date)
+    }
+
     /** `resetToday()` zeroed the count; the minutes and verdict describing it go too. On the lane. */
     suspend fun onReset(date: String) {
         timeline.clear()

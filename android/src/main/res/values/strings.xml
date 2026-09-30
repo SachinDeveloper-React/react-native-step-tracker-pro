@@ -1,6 +1,13 @@
 <resources>
     <string name="stp_channel_name">Step tracking</string>
     <string name="stp_channel_description">Keeps counting your steps while the app is closed.</string>
+    <!-- The notification's title when notificationTitle is not set. %s is the count, already formatted. -->
+    <plurals name="stp_notification_title">
+        <item quantity="one">%s step</item>
+        <item quantity="other">%s steps</item>
+    </plurals>
+    <!-- The line under the title. %s is the daily goal, already formatted. -->
+    <string name="stp_notification_goal">%s goal</string>
     <string name="stp_notification_text">%1$s km · %2$s kcal · %3$d%% of goal</string>
     <string name="stp_action_open">Open</string>
     <string name="stp_action_pause">Pause</string>

@@ -3,7 +3,10 @@ package com.steptrackerpro.service
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -16,6 +19,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.steptrackerpro.core.AccelerometerStepDetector
 import com.steptrackerpro.core.IntegrityEvent
 import com.steptrackerpro.core.MotionWindowSampler
@@ -131,6 +135,20 @@ class StepTrackerService : Service(), SensorEventListener {
         }
     }
 
+    /**
+     * Ends the day as soon as there is a sign it has: midnight's date change,
+     * a clock or zone change, or the screen coming on. The heartbeat does the
+     * same, but it does not tick while the CPU sleeps, so on its own the
+     * notification could show yesterday for up to a minute after the screen
+     * comes on - just when the user looks at it. Delivered on the sensor
+     * thread, where the heartbeat and the samples run.
+     */
+    private val dayBoundary = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (core.rollDayIfDue()) pushNotification(force = true)
+        }
+    }
+
     /** Short retries after a failed registration, before the heartbeat takes over. */
     private var registerRetries = 0
 
@@ -198,6 +216,19 @@ class StepTrackerService : Service(), SensorEventListener {
             it.start()
             sensorHandler = Handler(it.looper)
         }
+        ContextCompat.registerReceiver(
+            this,
+            dayBoundary,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_DATE_CHANGED)
+                addAction(Intent.ACTION_TIME_CHANGED)
+                addAction(Intent.ACTION_TIMEZONE_CHANGED)
+                addAction(Intent.ACTION_SCREEN_ON)
+            },
+            null,
+            sensorHandler,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         notifications.ensureChannel(core.config())
         // The heartbeat is what lets the watchdog and the React module tell
         // "killed by the OEM" from "the user has not moved": a still user
@@ -324,6 +355,8 @@ class StepTrackerService : Service(), SensorEventListener {
         }
 
         core.state.shouldAutoStart = true
+        // Tracking is on, whoever started it: nothing is stopped any more.
+        core.state.stoppedByUser = false
         registerRetries = 0
 
         // `paused` lives in memory only, so a restart has to read it back off
@@ -840,6 +873,7 @@ class StepTrackerService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         isAlive = false
+        runCatching { unregisterReceiver(dayBoundary) }
         sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()
         integritySignals.stop()

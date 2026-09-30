@@ -5,6 +5,82 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.7] - 2026-09-30
+
+Fixes from a review of 2.3.6.
+
+### Fixed
+
+- **A failed Health Connect read passed for a day with no other apps.** A raw
+  read that failed fell back to the aggregate API, whose errors were
+  swallowed too, so the read came back empty - and that empty answer was
+  cached, for 30 seconds for today and 10 minutes for a past day, as a read
+  that found nothing. It was signed into snapshots as `sourcesStatus: 'read'`,
+  sent with every day of a `full` upload made in the background without
+  background read, and shown by `getStepSources()` and range stats. A failed
+  read now reports `'failed'` and is not cached. In the background without
+  `READ_HEALTH_DATA_IN_BACKGROUND`, where Health Connect refuses the read, it
+  is not tried and reports `'not_consulted'` (raw records in a snapshot:
+  `'not_granted'`).
+- **A late batch across midnight counted on the wrong day, and escaped both
+  days' checks.** New in 2.3.6, which kept a late sample's own time: its
+  minutes landed on the day it was taken, but the day it counted towards was
+  still chosen when it arrived. The steps counted on the new day, their
+  minutes sat on the old one, and neither day's verdict judged them - a
+  shaker run from 23:30 on a sleeping phone, woken after midnight, put up to
+  half an hour of steps on the new day unflagged. A sample now counts on the
+  day it was taken on. That day stays open for samples taken on it until one
+  taken after midnight arrives; if the heartbeat, the screen coming on or a
+  read closed it first, the steps are added to it afterwards
+  (`historyBackfilled`, `reason: 'late'`) and it is judged again with them.
+  `gapRecovery: 'today'` and `'today_capped'`, which never change a closed
+  day, give them to the new day as recovered steps, and `'drop'` discards
+  them. A read of that day adds any still waiting first, so a snapshot of
+  yesterday taken the moment the phone wakes has them; the addition waits
+  for the day's own close and never runs alongside another, so two verdicts
+  for one day are not written at once; and a write that fails leaves them
+  owed. An instrumented test runs that shaker: flagged `cadence` on the day
+  before, nothing on the new day.
+- **A read of yesterday just after midnight could miss its last steps.** The
+  day's final save runs in the background, and `getYesterdaySteps()`, a
+  signed snapshot of yesterday or its integrity report, read at the first
+  open of the morning, could get there first - up to 9 steps short with the
+  default `persistEveryNSteps`. Reads of a past day wait for the latest close
+  to land now.
+- **The notification could show yesterday for up to a minute after the
+  screen came on.** The heartbeat that ends the day does not tick while the
+  CPU sleeps. The service also ends it on the date-change, clock, zone and
+  screen-on broadcasts now.
+- **An app that never started tracking got no background sync.** New in
+  2.3.6, which scheduled the sync and retention jobs only while tracking was
+  on, so that `stopTracking()` would stay done - leaving an app that only
+  reads Health Connect, or a user who never allowed activity recognition,
+  with nothing but `syncNow()`. Only `stopTracking()` keeps the jobs
+  cancelled now, until `startTracking()`.
+- **The notification's own words were English only.** The title and the goal
+  line were written in code. They are string resources now,
+  `stp_notification_title` (a plural) and `stp_notification_goal`, which an
+  app translates or rewords in its own resources like the others. The
+  distance uses the phone's number format.
+- **`resetToday()` just after midnight wiped the day before.** With that day
+  not yet ended - no step, heartbeat or read since midnight - it lost the
+  steps not yet saved, its final verdict and its `dayChanged`. The day is
+  closed first now. Present since 1.0; late batches, which keep a day open
+  past midnight, made it likelier.
+- **`useStepStats` did not reload when a past day grew.** A
+  `historyBackfilled` - a recovery, or now a late batch - left the chart on
+  the old number until the next refresh. It reloads quietly.
+- **`useStepTracker` kept its error after a later call succeeded.** It clears
+  on the next success.
+- **Two error codes were listed but never sent.** `E_DATABASE` is sent for a
+  database failure - a full disk, a corrupt file - which arrived as
+  `E_UNKNOWN`. `E_NOT_INITIALIZED` cannot happen, since every method works
+  before `initialize()`; it is deprecated, and stays in the type until 3.0.
+
+### Added
+
+- `historyBackfilled` `reason: 'late'`.
+
 ## [2.3.6] - 2026-09-29
 
 Fixes from a review of 2.3.5.
@@ -1327,6 +1403,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.3.7]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.7
 [2.3.6]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.6
 [2.3.5]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.5
 [2.3.4]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.4

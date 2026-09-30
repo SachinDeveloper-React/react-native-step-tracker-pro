@@ -47,6 +47,7 @@ class StepCounterEngineTest {
     private val backfillReasons = mutableListOf<StepCounterEngine.BackfillReason>()
     private val observed = mutableListOf<Triple<Long, Long, Int>>()
     private val observedTimed = mutableListOf<Boolean>()
+    private var lateCalls = 0
 
     private fun now() = fakeNow
 
@@ -76,6 +77,7 @@ class StepCounterEngineTest {
         backfillReasons.clear()
         observed.clear()
         observedTimed.clear()
+        lateCalls = 0
         engine = StepCounterEngine(
             state,
             MetricsCalculator(StepTrackerConfig()),
@@ -92,7 +94,23 @@ class StepCounterEngineTest {
             observed += Triple(from, to, steps)
             observedTimed += timed
         }
+        engine.onLate = { lateCalls++ }
     }
+
+    /** Late yesterday: 900 steps, last reading 5000 at 23:40. It is 00:10 now. */
+    private fun lateEvening() {
+        state.activeDate = DateKeys.yesterday()
+        state.anchorValue = 4100f
+        state.anchorSteps = 0
+        state.lastRawValue = 5000f
+        state.stepsToday = 900
+        state.lastEventAt = yesterdayAt(23, 40)
+        fakeBoot = bootAt(DateKeys.yesterday(), 8)
+        state.bootId = fakeBoot
+        fakeNow = bootAt(DateKeys.today(), 0) + 10 * 60_000L
+    }
+
+    private fun yesterdayAt(hour: Int, minute: Int) = bootAt(DateKeys.yesterday(), hour) + minute * 60_000L
 
     @Test
     fun observedDeltasCarryTheSpanTheyWereTakenIn() {
@@ -436,6 +454,101 @@ class StepCounterEngineTest {
         assertEquals(5, engine.onCounterSample(5010f, now())!!.steps)
         assertEquals(listOf(mapOf(DateKeys.yesterday() to 5)), backfills)
         assertEquals(1, rollovers.size)
+    }
+
+    @Test
+    fun aLateBatchCountsOnTheDayItWasTakenAndClosesItAfter() {
+        lateEvening()
+        // A batch the hub held with the screen off, delivered at 00:10: two
+        // samples taken before midnight, one after.
+        assertEquals(DateKeys.yesterday(), engine.onCounterSample(5010f, yesterdayAt(23, 50))!!.date)
+        engine.onCounterSample(5060f, yesterdayAt(23, 55))
+        // Still yesterday's, and yesterday is still open.
+        assertEquals(DateKeys.yesterday(), state.activeDate)
+        assertEquals(960, engine.snapshot().steps)
+        assertTrue(rollovers.isEmpty())
+
+        val first = engine.onCounterSample(5080f, bootAt(DateKeys.today(), 0) + 2 * 60_000L)!!
+        // The first sample taken after midnight closes it, with the late steps in.
+        assertEquals(1, rollovers.size)
+        assertEquals(960, rollovers[0].first.steps)
+        // The 20 steps between 23:55 and 00:02 are placed by those two times:
+        // five minutes' worth before midnight, two after.
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 14)), backfills)
+        assertEquals(DateKeys.today(), first.date)
+        assertEquals(6, first.steps)
+        assertEquals(0, lateCalls)
+    }
+
+    @Test
+    fun aLateSampleAfterTheDayClosedIsOwedToTheDayItWasTaken() {
+        lateEvening()
+        // The heartbeat, a read or the screen coming on closed the day first.
+        assertTrue(engine.rollIfNeeded())
+        assertEquals(900, rollovers.single().first.steps)
+
+        // The batch arrives. Its first sample closes the gap since 23:40,
+        // which ended at 23:50 - all of it yesterday's.
+        assertNull(engine.onCounterSample(5010f, yesterdayAt(23, 50)))
+        assertEquals(listOf(mapOf(DateKeys.yesterday() to 10)), backfills)
+        // The next one was watched being taken at 23:55: owed to yesterday,
+        // judged in its own minutes, and kept out of today.
+        assertNull(engine.onCounterSample(5060f, yesterdayAt(23, 55)))
+        assertEquals(0, engine.snapshot().steps)
+        assertEquals(1, lateCalls)
+        assertEquals(Triple(yesterdayAt(23, 50), yesterdayAt(23, 55), 50), observed.last())
+        // A step after midnight is today's again.
+        assertEquals(20, engine.onCounterSample(5080f, bootAt(DateKeys.today(), 0) + 3 * 60_000L)!!.steps)
+
+        assertEquals(mapOf(DateKeys.yesterday() to 50), engine.takeLateSteps())
+        assertTrue(engine.takeLateSteps().isEmpty())
+    }
+
+    @Test
+    fun lateStepsForAClosedDayFollowTheGapPolicy() {
+        for (policy in listOf(StepCounterEngine.GapRecovery.TODAY, StepCounterEngine.GapRecovery.DROP)) {
+            context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+            rollovers.clear()
+            backfills.clear()
+            engine.gapRecovery = policy
+            lateEvening()
+            engine.rollIfNeeded()
+            engine.onCounterSample(5010f, yesterdayAt(23, 50))
+            engine.onCounterSample(5060f, yesterdayAt(23, 55))
+            // Neither changes a closed day: today takes them in one go, as
+            // recovered steps, or nobody does.
+            assertTrue(engine.takeLateSteps().isEmpty())
+            assertTrue(backfills.isEmpty())
+            val today = engine.snapshot()
+            if (policy == StepCounterEngine.GapRecovery.TODAY) {
+                assertEquals(60, today.steps)
+                assertEquals(60, today.recoveredSteps)
+            } else {
+                assertEquals(0, today.steps)
+            }
+        }
+    }
+
+    @Test
+    fun aResetAfterMidnightClosesYesterdayBeforeZeroingToday() {
+        lateEvening()
+        // Yesterday is still the active day: nothing has ended it yet.
+        engine.resetToday()
+        assertEquals(DateKeys.yesterday(), rollovers.single().first.date)
+        assertEquals(900, rollovers.single().first.steps)
+        assertEquals(DateKeys.today(), engine.snapshot().date)
+        assertEquals(0, engine.snapshot().steps)
+    }
+
+    @Test
+    fun aLateDetectorStepIsOwedToTheDayItWasTaken() {
+        lateEvening()
+        engine.rollIfNeeded()
+        assertNull(engine.onDetectorSample(3, yesterdayAt(23, 58)))
+        assertEquals(0, engine.snapshot().steps)
+        assertEquals(mapOf(DateKeys.yesterday() to 3), engine.takeLateSteps())
+        // An untimed one cannot say when it was taken, so it counts where it arrived.
+        assertEquals(2, engine.onDetectorSample(2, fakeNow, timed = false)!!.steps)
     }
 
     @Test

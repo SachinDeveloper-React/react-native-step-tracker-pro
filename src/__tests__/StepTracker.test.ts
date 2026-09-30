@@ -15,6 +15,7 @@ import { useStepTracker } from '../hooks/useStepTracker';
 import { useHealthConnect } from '../hooks/useHealthConnect';
 import { STATS_LIVE_REFRESH_MS, useStepStats } from '../hooks/useStepStats';
 import type { UseHealthConnectResult } from '../hooks/useHealthConnect';
+import type { UseStepTrackerResult } from '../hooks/useStepTracker';
 import { DEFAULT_CONFIG } from '../constants';
 import { StepTrackerError } from '../errors';
 import type { HealthConnectStatus, StepTrackerConfig } from '../types';
@@ -1121,6 +1122,40 @@ describe('useStepTracker()', () => {
     expect(native.calledWith('initialize')).toHaveLength(1);
     await TestRenderer.act(async () => renderer!.unmount());
   });
+
+  it('clears error once a later call succeeds', async () => {
+    const snapshot = { date: '2026-09-14', steps: 1, state: 'idle' };
+    native.when('initialize', snapshot);
+    native.when(
+      'startTracking',
+      Object.assign(new Error('ACTIVITY_RECOGNITION must be granted'), {
+        code: 'E_PERMISSION_DENIED',
+      })
+    );
+    let result: UseStepTrackerResult | undefined;
+    function Owner() {
+      result = useStepTracker({});
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Owner));
+    });
+
+    await TestRenderer.act(async () => {
+      await result!.start();
+    });
+    expect(result!.error).toMatchObject({ code: 'E_PERMISSION_DENIED' });
+
+    // Granted, and started on the retry: the old failure is not still shown.
+    native.when('startTracking', { ...snapshot, state: 'running' });
+    await TestRenderer.act(async () => {
+      await result!.start();
+    });
+    expect(result!.error).toBeNull();
+    expect(result!.state).toBe('running');
+    await TestRenderer.act(async () => renderer!.unmount());
+  });
 });
 
 describe('useHealthConnect()', () => {
@@ -1233,6 +1268,22 @@ describe('useStepStats()', () => {
     const renderer = await mount();
     expect(native.calledWith('getWeeklyStats')).toHaveLength(1);
     await TestRenderer.act(async () => __setAppState('active'));
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
+    await TestRenderer.act(async () => renderer.unmount());
+  });
+
+  it('reloads when a past day grows after the fact, in any window', async () => {
+    // Last week: steps do not move it, but a late batch or a recovery can.
+    const renderer = await mount(1);
+    expect(native.calledWith('getWeeklyStats')).toHaveLength(1);
+    await TestRenderer.act(async () =>
+      __emit('StepTrackerPro:historyBackfilled', {
+        date: '2026-09-13',
+        addedSteps: 312,
+        totalSteps: 9312,
+        reason: 'late',
+      })
+    );
     expect(native.calledWith('getWeeklyStats')).toHaveLength(2);
     await TestRenderer.act(async () => renderer.unmount());
   });

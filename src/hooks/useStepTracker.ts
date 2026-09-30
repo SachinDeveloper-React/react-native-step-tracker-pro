@@ -74,11 +74,14 @@ export function useStepTracker(
   const suspiciousRef = useRef(onSuspiciousActivity);
   suspiciousRef.current = onSuspiciousActivity;
 
+  // `error` is the last call's failure, so any later success clears it:
+  // a start that failed once and worked on retry is not still an error.
   const refresh = useCallback(async () => {
     if (!isSupported()) return;
     try {
       setSnapshot(await StepTracker.getTodaySteps());
       setState(await StepTracker.getTrackingState());
+      setError(null);
     } catch (e) {
       setError(e as Error);
     }
@@ -99,6 +102,7 @@ export function useStepTracker(
         appliedKey.current = JSON.stringify(configRef.current);
         setSnapshot(initial);
         setState(initial.state);
+        setError(null);
         if (autoStart) {
           const perms = await StepTracker.checkPermissions();
           if (perms.allGranted) {
@@ -178,6 +182,7 @@ export function useStepTracker(
       const result = await fn();
       setSnapshot(result);
       setState(result.state);
+      setError(null);
     } catch (e) {
       setError(e as Error);
     }
@@ -191,6 +196,7 @@ export function useStepTracker(
   const requestPermissions = useCallback(async () => {
     try {
       const result = await StepTracker.requestPermissions();
+      setError(null);
       return result.allGranted;
     } catch (e) {
       setError(e as Error);

@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (168 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, integrity config (203 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (170 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config (206 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,13 +59,13 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Sixty cases: thirty-five drive the engine, three build the Room
+sensor. Sixty-nine cases: forty drive the engine, three build the Room
 database as an older version from the exported schema, migrate real rows to
-the current version and check every one survived, fifteen run the integrity
-layer, sync bookkeeping and background work end to end through the real core,
-database and Keystore, four check that remote-sync headers are sealed, read
-back and migrated from 1.x, and three pin when `goalReached` fires. Among
-them:
+the current version and check every one survived, nineteen run the
+integrity layer, sync bookkeeping and background work end to end through the
+real core, database and Keystore, four check that remote-sync headers are
+sealed, read back and migrated from 1.x, and three pin when `goalReached`
+fires. Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -81,6 +81,9 @@ them:
 | `smallBackwardsJitterIsIgnoredNotReanchored` | a HAL that wobbles a step backwards creeps the total upward |
 | `midnightRolloverFinalisesPreviousDay` | day totals never close, or leak forward |
 | `theDayEndsAtMidnightWithoutWaitingForAStep` | a phone lying still across midnight keeps yesterday's total until the first step of the morning |
+| `aResetAfterMidnightClosesYesterdayBeforeZeroingToday` | `resetToday()` after midnight wipes yesterday's unsaved steps along with today |
+| `aLateBatchCountsOnTheDayItWasTakenAndClosesItAfter` | steps the phone held across midnight count on the new day |
+| `aLateSampleAfterTheDayClosedIsOwedToTheDayItWasTaken` / `lateStepsForAClosedDayFollowTheGapPolicy` | a late sample after the day closed lands on the wrong day, or changes a closed day under a policy that promises it never will |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |
 | `commitThresholdControlsDatabaseWrites` | a write per step, or no writes at all |
@@ -100,6 +103,10 @@ them:
 | `aReadAfterMidnightIsOfTheNewDayWithoutAStep` | `getStepsForDate(today)` answers with yesterday's date and count until a step |
 | `onlyTargetsInUseHaveAnythingPending` | `getPendingSyncCount()` never reaches 0 without a remote URL or Health Connect writes |
 | `aStoppedTrackerGetsNoBackgroundWorkBackFromTheNextLaunch` | the next `initialize()` undoes the job cancelling `stopTracking()` did |
+| `aTrackerThatNeverStartedKeepsItsBackgroundWork` | an app that only reads Health Connect gets no hourly upload |
+| `aReadOfYesterdayWaitsForTheCloseToLand` | `getYesterdaySteps()` at the first open of the morning misses the last steps of yesterday |
+| `aShakerRunUpToMidnightIsJudgedOnTheDayItCountsFor` | a shaker left running up to midnight on a sleeping phone passes its steps to the next day unflagged |
+| `aReadOfYesterdayRightAfterALateBatchIncludesIt` | a snapshot of yesterday taken as the phone wakes misses the steps it delivered late |
 
 ### Compatibility builds
 
@@ -250,6 +257,8 @@ few steps.
 
 - [ ] before any step, within a minute: the notification reads today's count
       and `dayChanged` fires with yesterday's total
+- [ ] with the screen off across midnight, turning it on shows today's count
+      at once
 - [ ] `getStepsForDate(today)` and `getCurrentStepSource()` answer for today,
       not with yesterday's date and count
 - [ ] today starts at 0, not at yesterday's number
@@ -372,6 +381,10 @@ adb shell dumpsys battery reset
       spreads those steps over the minutes they were walked in, about 110
       each, with no `cadence` flag - not all of them in the minute the screen
       came on
+- [ ] shake the phone with the screen off from 23:50 until after midnight,
+      then turn it on: the steps before midnight are on yesterday - in
+      `getHistory()`, with `historyBackfilled` (`reason: 'late'`) if the day
+      had already closed - and yesterday's report carries the `cadence` flag
 - [ ] shake the phone hard in your hand for 2 minutes: a `cadence` flag, and with a motion window open a `shake` flag
 - [ ] walk 3 minutes with `dumpsys battery set ac 1`: a `charging` flag covering those steps, `charging_started` in `events`
 - [ ] with a swing gadget, or the phone on a pendulum, for 40 minutes: a `steady_cadence` flag

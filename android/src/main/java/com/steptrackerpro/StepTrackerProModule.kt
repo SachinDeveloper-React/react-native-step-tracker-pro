@@ -220,6 +220,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 promise.reject("E_NO_SENSOR", "No step sensor on this device")
                 return@runSafely
             }
+            // The user wants tracking, and the background work that comes
+            // with it, back; the service schedules it as it starts.
+            core.state.stoppedByUser = false
             ServiceCommands.start(reactContext)
             promise.resolve(cachedSnapshot())
         }
@@ -261,6 +264,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             val wasAlive = StepTrackerService.isAlive
             core.state.shouldAutoStart = false
             core.state.trackingState = TrackingState.STOPPED
+            // What keeps the next launch's initialize() from scheduling the
+            // background work cancelled below all over again.
+            core.state.stoppedByUser = true
             core.flush()
             ServiceCommands.send(reactContext, ServiceCommands.ACTION_STOP)
             SyncScheduler.cancelAll(reactContext)
@@ -431,7 +437,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     override fun getIntegrityReport(date: String, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(Bridge.map(core.integrity.report(date)))
+            promise.resolve(Bridge.map(core.integrityReport(date)))
         }
     }
 
@@ -451,8 +457,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     override fun getStepMinutes(startDate: String, endDate: String, promise: Promise) {
         launchSafely(promise) {
             // Whatever is still in memory goes to storage first, so the read is current.
-            core.integrity.flush()
-            val minutes = core.repository.minutes(startDate, endDate)
+            val minutes = core.stepMinutes(startDate, endDate)
             promise.resolve(Bridge.map(mapOf("minutes" to minutes.map { it.toMap() })))
         }
     }
@@ -1136,14 +1141,18 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     }
 
     private inline fun runSafely(promise: Promise, block: () -> Unit) {
-        runCatching { block() }.onFailure { promise.reject("E_UNKNOWN", it.message, it) }
+        runCatching { block() }.onFailure { promise.reject(codeOf(it), it.message, it) }
     }
 
     private fun launchSafely(promise: Promise, block: suspend () -> Unit) {
         scope.launch {
-            runCatching { block() }.onFailure { promise.reject("E_UNKNOWN", it.message, it) }
+            runCatching { block() }.onFailure { promise.reject(codeOf(it), it.message, it) }
         }
     }
+
+    /** `E_DATABASE` for storage that failed - a full disk, a corrupt file - and `E_UNKNOWN` otherwise. */
+    private fun codeOf(error: Throwable): String =
+        if (error is android.database.SQLException) "E_DATABASE" else "E_UNKNOWN"
 
     private fun window(
         options: ReadableMap?,

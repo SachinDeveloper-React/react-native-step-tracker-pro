@@ -21,6 +21,7 @@ import com.steptrackerpro.health.HealthConnectManager
 import com.steptrackerpro.integrity.ActivityRecognitionBridge
 import com.steptrackerpro.service.BootReceiver
 import com.steptrackerpro.integrity.DeviceAttestation
+import androidx.work.await
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -55,9 +56,26 @@ class IntegrityPipelineTest {
         context.getSharedPreferences(ConfigStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
         core = StepTrackerCore.get(context)
         core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true))
+        // A tracker that never started keeps its background jobs, and a
+        // retention pass running under a test would delete its old rows.
+        androidx.work.WorkManager.getInstance(context).cancelAllWork().await()
         core.clearHistory()
         core.integrity.flush()
         core.state.activeDate = DateKeys.today()
+    }
+
+    private fun scheduled(name: String) = runBlocking {
+        androidx.work.WorkManager.getInstance(context)
+            .getWorkInfosForUniqueWorkFlow(name).first().any { !it.state.isFinished }
+    }
+
+    /** Waits for [condition], which the write lane is about to make true. */
+    private fun eventually(condition: suspend () -> Boolean) = runBlocking {
+        val until = System.currentTimeMillis() + 10_000L
+        while (!condition()) {
+            assertTrue("timed out waiting", System.currentTimeMillis() < until)
+            kotlinx.coroutines.delay(50)
+        }
     }
 
     @Test
@@ -389,10 +407,6 @@ class IntegrityPipelineTest {
 
     @Test
     fun aStoppedTrackerGetsNoBackgroundWorkBackFromTheNextLaunch() {
-        fun scheduled(name: String) = runBlocking {
-            androidx.work.WorkManager.getInstance(context)
-                .getWorkInfosForUniqueWorkFlow(name).first().any { !it.state.isFinished }
-        }
         // No remote URL: a scheduled upload would really go out from here.
         val mirror = com.steptrackerpro.sync.HealthConnectSyncWorker.NAME
         val retention = com.steptrackerpro.sync.RetentionWorker.NAME
@@ -405,11 +419,25 @@ class IntegrityPipelineTest {
 
         // stopTracking() records the stop and cancels it...
         core.state.shouldAutoStart = false
+        core.state.stoppedByUser = true
         com.steptrackerpro.sync.SyncScheduler.cancelAll(context)
         // ...and the next launch's initialize() runs the config through again.
         core.updateConfig(core.config())
         assertFalse(scheduled(mirror))
         assertFalse(scheduled(retention))
+    }
+
+    @Test
+    fun aTrackerThatNeverStartedKeepsItsBackgroundWork() = runBlocking {
+        // An app that only reads Health Connect, or a user who never allowed
+        // activity recognition: tracking never started, and never stopped.
+        try {
+            core.updateConfig(core.config().copy(healthConnectEnabled = true, healthConnectWriteEnabled = true))
+            assertTrue(scheduled(com.steptrackerpro.sync.HealthConnectSyncWorker.NAME))
+            assertTrue(scheduled(com.steptrackerpro.sync.RetentionWorker.NAME))
+        } finally {
+            androidx.work.WorkManager.getInstance(context).cancelAllWork().await()
+        }
     }
 
     @Test
@@ -430,10 +458,8 @@ class IntegrityPipelineTest {
             assertEquals(0, resolved.totals.steps)
             assertEquals(today, core.engine.snapshot().date)
 
-            // The closing day is saved and announced; queued behind that on
-            // the write lane, this returns once it has happened.
-            core.pruneHistory(core.config().historyRetentionDays)
-            assertEquals(900, core.repository.getDay(yesterday).steps)
+            // A read of yesterday waits for its close: saved and announced.
+            assertEquals(900, core.dayTotals(yesterday).steps)
             val dayChanged = events.single { it.first == com.steptrackerpro.util.StepEventBus.Events.DAY_CHANGED }.second
             assertEquals(yesterday, dayChanged["previousDate"])
             assertEquals(900, dayChanged["previousDaySteps"])
@@ -444,6 +470,87 @@ class IntegrityPipelineTest {
         } finally {
             com.steptrackerpro.util.StepEventBus.unsubscribe(subscriber)
         }
+    }
+
+    @Test
+    fun aReadOfYesterdayWaitsForTheCloseToLand() = runBlocking {
+        val yesterday = DateKeys.yesterday()
+        // Yesterday as committed - 900 - and the five steps since, still in
+        // memory when midnight came.
+        core.repository.saveDay(DayTotals(yesterday, 900, 630.0, 27.0))
+        core.state.activeDate = yesterday
+        core.state.stepsToday = 905
+        // getYesterdaySteps() at the first open of the morning.
+        assertEquals(905, core.resolveDay(yesterday).totals.steps)
+        assertEquals(905, core.history(yesterday, yesterday).single().steps)
+    }
+
+    @Test
+    fun aReadOfYesterdayRightAfterALateBatchIncludesIt() = runBlocking {
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        val midnight = DateKeys.startOfDayMillis(today)
+        core.state.activeDate = yesterday
+        core.state.anchorValue = 10_000f
+        core.state.anchorSteps = 0
+        core.state.lastRawValue = 10_000f
+        core.state.stepsToday = 900
+        core.state.lastEventAt = midnight - 11 * 60_000L
+        core.state.bootId = com.steptrackerpro.core.StepCounterEngine.currentBootId()
+        core.state.lastElapsedRealtime = android.os.SystemClock.elapsedRealtime()
+        // The screen came on and closed the day; then the batch was read.
+        assertTrue(core.rollDayIfDue())
+        // Its first sample closes the gap since 23:49, recovered; the next
+        // was watched being taken at 23:55, and is owed to yesterday.
+        core.engine.onCounterSample(10_010f, midnight - 10 * 60_000L, timed = true)
+        core.engine.onCounterSample(10_110f, midnight - 5 * 60_000L, timed = true)
+
+        // getYesterdaySteps() at once, before the owed steps' delay is up.
+        assertEquals(1_010, core.resolveDay(yesterday).totals.steps)
+        assertEquals(10, core.dayTotals(yesterday).recoveredSteps)
+        assertEquals(0, core.dayTotals(today).steps)
+    }
+
+    @Test
+    fun aShakerRunUpToMidnightIsJudgedOnTheDayItCountsFor() = runBlocking {
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        val midnight = DateKeys.startOfDayMillis(today)
+        // Yesterday at 23:29, nothing yet; the phone goes to sleep with a
+        // shaker on it until midnight, and wakes at 00:05.
+        core.state.activeDate = yesterday
+        core.state.anchorValue = 10_000f
+        core.state.anchorSteps = 0
+        core.state.lastRawValue = 10_000f
+        core.state.stepsToday = 0
+        core.state.lastEventAt = midnight - 31 * 60_000L
+        core.state.bootId = com.steptrackerpro.core.StepCounterEngine.currentBootId()
+        core.state.lastElapsedRealtime = android.os.SystemClock.elapsedRealtime()
+        // The screen came on and ended the day before the batch was read.
+        assertTrue(core.rollDayIfDue())
+        assertEquals(0, core.dayTotals(yesterday).steps)
+
+        // Thirty minutes at 260 a minute, one sample every half minute,
+        // delivered late in one go.
+        var raw = 10_000f
+        for (i in 0 until 60) {
+            raw += 130f
+            core.engine.onCounterSample(raw, midnight - 30 * 60_000L + i * 30_000L, timed = true)
+        }
+
+        // Counted on yesterday, where they were taken - none of it today...
+        eventually { core.repository.getDay(yesterday).steps == 7_800 }
+        assertEquals(0, core.dayTotals(today).steps)
+        assertTrue(core.stepMinutes(today, today).isEmpty())
+        // ...and judged there, in the minutes they were taken in.
+        eventually { (core.integrityReport(yesterday)["suspectSteps"] as Int) > 7_000 }
+        @Suppress("UNCHECKED_CAST")
+        val flags = core.integrityReport(yesterday)["flags"] as List<Map<String, Any?>>
+        assertTrue(flags.any { it["type"] == IntegrityFlag.CADENCE && it["severity"] == "strong" })
+        // The first sample closed the gap since 23:29 and was recovered, not
+        // watched; every step after it is in the minute it was taken in.
+        assertEquals(130, core.dayTotals(yesterday).recoveredSteps)
+        assertEquals(7_670, core.stepMinutes(yesterday, yesterday).sumOf { it.totalSteps })
     }
 
     @Test

@@ -3,6 +3,11 @@ export type StepTrackerErrorCode =
   | 'E_NO_SENSOR'
   /** Emitted on the `error` event: the sensor exists but registration failed; the service is retrying. */
   | 'E_SENSOR_UNAVAILABLE'
+  /**
+   * @deprecated Never sent: every method works before `initialize()`, on
+   *   the config stored last or the defaults. Kept so code that checks for
+   *   it still compiles; it will be removed in 3.0.
+   */
   | 'E_NOT_INITIALIZED'
   | 'E_PERMISSION_DENIED'
   | 'E_SERVICE_START_FAILED'
@@ -25,6 +30,7 @@ export type StepTrackerErrorCode =
    * succeed - see `IntegrityErrorDetails`.
    */
   | 'E_INTEGRITY_FAILED'
+  /** The on-device database failed - a full disk, a corrupt file. */
   | 'E_DATABASE'
   | 'E_INVALID_CONFIG'
   | 'E_NO_ACTIVITY'

@@ -57,21 +57,30 @@ class StepRepository(context: Context) {
     /**
      * Adds steps on top of a stored day - the backfill path for steps the
      * hardware counted while the process was dead and the gap crossed
-     * midnight. Distance and calories are re-derived from the new total so
-     * the three stay consistent, the row is re-queued for both syncs by
-     * [StepHistoryDao.update], and the day's recovered share grows by the
-     * same amount so the row says how much of it was apportioned rather
-     * than observed.
+     * midnight, and for late samples taken on a day that had closed.
+     * Distance and calories are re-derived from the new total so the three
+     * stay consistent, and the row is re-queued for both syncs by
+     * [StepHistoryDao.update].
      *
+     * @param recovered whether the steps were apportioned rather than
+     *   observed: the day's recovered share grows by them, so the row says
+     *   so. A late sample's steps were watched being taken, and are not.
      * @return the day as stored afterwards, or null when nothing was added.
      */
-    suspend fun addToDay(date: String, steps: Int, metrics: MetricsCalculator): DayTotals? {
+    suspend fun addToDay(
+        date: String,
+        steps: Int,
+        metrics: MetricsCalculator,
+        recovered: Boolean = true
+    ): DayTotals? {
         if (steps <= 0) return null
         return db.withTransaction {
             val existing = history.findByDate(date)
-            val recovered = (summaries.findByDate(date)?.recoveredSteps ?: 0) + steps
+            val share = summaries.findByDate(date)?.recoveredSteps ?: 0
             val total = (existing?.steps ?: 0) + steps
-            val totals = metrics.totals(date, total, recoveredSteps = recovered)
+            val totals = metrics.totals(
+                date, total, recoveredSteps = if (recovered) share + steps else share
+            )
             history.replace(totals.toEntity())
             summaries.upsert(totals.toSummary())
             totals

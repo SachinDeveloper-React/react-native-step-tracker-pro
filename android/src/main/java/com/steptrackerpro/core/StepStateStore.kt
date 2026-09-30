@@ -1,5 +1,6 @@
 package com.steptrackerpro.core
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 
@@ -260,6 +261,12 @@ class StepStateStore(context: Context) {
         val stored = prefs.getInt(KEY_STATE_VERSION, 0)
         if (stored >= STATE_VERSION) return
         if (stored < 2) clearContinuity()
+        // Version 3 tells a stop the user asked for from a tracker that never
+        // started. Before it only the tracking state said so; a stopped
+        // tracker read then is taken as stopped by the user.
+        if (stored < 3 && !prefs.contains(KEY_STOPPED_BY_USER)) {
+            stoppedByUser = trackingState == TrackingState.STOPPED && !shouldAutoStart
+        }
         prefs.edit().putInt(KEY_STATE_VERSION, STATE_VERSION).apply()
     }
 
@@ -357,6 +364,44 @@ class StepStateStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Steps late samples carried for days that had already closed, owed to
+     * those days until the core adds them: `yyyy-MM-dd` to steps. Written in
+     * the same edit as the counter state that left them out of the active
+     * day, so a process death between the two can lose neither.
+     */
+    val lateSteps: Map<String, Int>
+        get() = decodeLateSteps(prefs.getString(KEY_LATE_STEPS, null))
+
+    /**
+     * [lateSteps], cleared. The clear is committed to disk before this
+     * returns: the caller then writes them to their days, and a death after
+     * that write must not find them owed again.
+     */
+    @Synchronized
+    @SuppressLint("ApplySharedPref") // The disk write before returning is the point.
+    fun takeLateSteps(): Map<String, Int> {
+        val owed = lateSteps
+        if (owed.isNotEmpty()) prefs.edit().remove(KEY_LATE_STEPS).commit()
+        return owed
+    }
+
+    /** Replaces [lateSteps] outright. */
+    fun putLateSteps(owed: Map<String, Int>) {
+        prefs.edit().putString(KEY_LATE_STEPS, encodeLateSteps(owed)).apply()
+    }
+
+    /**
+     * The user stopped tracking with `stopTracking()` and has not started it
+     * since, so the background jobs that stop cancelled stay cancelled. A
+     * tracker that never started - an app that only reads Health Connect, a
+     * user who never allowed activity recognition - is not stopped, and
+     * keeps them.
+     */
+    var stoppedByUser: Boolean
+        get() = prefs.getBoolean(KEY_STOPPED_BY_USER, false)
+        set(value) = prefs.edit().putBoolean(KEY_STOPPED_BY_USER, value).apply()
+
     /** One atomic write for the hot path, instead of nine separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -367,9 +412,11 @@ class StepStateStore(context: Context) {
         stepsToday: Int,
         lastEventAt: Long,
         lastElapsed: Long,
-        recoveredToday: Int
+        recoveredToday: Int,
+        /** Replaces [lateSteps] when given; left as it is otherwise. */
+        lateSteps: Map<String, Int>? = null
     ) {
-        prefs.edit()
+        val edit = prefs.edit()
             .putLong(KEY_BOOT_ID, bootId)
             .putFloat(KEY_ANCHOR_VALUE, anchorValue)
             .putInt(KEY_ANCHOR_STEPS, anchorSteps)
@@ -379,14 +426,32 @@ class StepStateStore(context: Context) {
             .putLong(KEY_LAST_EVENT_AT, lastEventAt)
             .putLong(KEY_LAST_ELAPSED, lastElapsed)
             .putInt(KEY_RECOVERED_TODAY, recoveredToday.coerceAtLeast(0))
-            .apply()
+        if (lateSteps != null) edit.putString(KEY_LATE_STEPS, encodeLateSteps(lateSteps))
+        edit.apply()
     }
 
     companion object {
         const val PREFS_NAME = "StepTrackerProState"
         const val BOOT_DRIFT_TOLERANCE_MS = 60_000L
-        const val STATE_VERSION = 2
+        const val STATE_VERSION = 3
         private const val KEY_STATE_VERSION = "state_version"
+        private const val KEY_LATE_STEPS = "late_steps"
+        private const val KEY_STOPPED_BY_USER = "stopped_by_user"
+
+        /** `2026-09-29=312;2026-09-28=5`. Anything unreadable is dropped rather than guessed at. */
+        fun encodeLateSteps(owed: Map<String, Int>): String =
+            owed.filterValues { it > 0 }.entries.joinToString(";") { (day, steps) -> "$day=$steps" }
+
+        fun decodeLateSteps(text: String?): Map<String, Int> {
+            if (text.isNullOrEmpty()) return emptyMap()
+            val out = LinkedHashMap<String, Int>()
+            for (entry in text.split(';')) {
+                val day = entry.substringBefore('=', "")
+                val steps = entry.substringAfter('=', "").toIntOrNull() ?: continue
+                if (day.length == 10 && steps > 0) out[day] = (out[day] ?: 0) + steps
+            }
+            return out
+        }
 
         private const val KEY_BOOT_ID = "boot_id"
         private const val KEY_ANCHOR_VALUE = "anchor_value"

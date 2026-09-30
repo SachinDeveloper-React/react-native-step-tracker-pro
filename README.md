@@ -337,9 +337,9 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-A hundred and sixty-eight Jest tests cover config validation, the flows in
+A hundred and seventy Jest tests cover config validation, the flows in
 the JS layer, the typed and legacy event paths, the hook's config handling,
-the shipped Jest mock and the Expo plugin. Two hundred and three JVM tests
+the shipped Jest mock and the Expo plugin. Two hundred and six JVM tests
 cover step-source resolution, the `auto` merge and its coverage rule,
 manual-entry exclusion and wearable trust, gap splitting under all four
 policies, the accelerometer pedometer against synthetic gait, motion
@@ -349,25 +349,29 @@ payload — chiefly that a phone and a watch are never added together, that a
 phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
-with the screen off is not a shake. Sixty instrumented tests cover the
-reboot, midnight, overnight-kill, capped-recovery, sensor-jitter, pause and
-counter-reset paths by feeding samples to the engine directly, the Room
-migrations against real rows, and the integrity layer and sync bookkeeping
-end to end through the real core, database and Keystore, the sealed
-remote-sync headers and the reboot log, so they run on an emulator with no
-step hardware. CI runs all of it on every push, plus the compatibility builds
-above.
+with the screen off is not a shake. Sixty-nine instrumented tests cover the
+reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
+pause and counter-reset paths by feeding samples to the engine directly, the
+Room migrations against real rows, and the integrity layer and sync
+bookkeeping end to end through the real core, database and Keystore, the
+sealed remote-sync headers and the reboot log, so they run on an emulator
+with no step hardware. CI runs all of it on every push, plus the
+compatibility builds above.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.6** — a walk the phone
-delivers late with the screen off is no longer flagged as fraud, a day that
-grows while it uploads goes again instead of being lost, the day ends at
-midnight without waiting for a step, and a stopped tracker's background work
-stays cancelled across launches. **2.3.5** kept `useStepStats` refreshing
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.7** — steps the phone
+delivers late across midnight count on the day they were taken and are
+checked there, a failed Health Connect read is reported as failed instead of
+as a day with no other apps, a read of yesterday waits for its last steps,
+and an app that never tracks keeps its background upload. **2.3.6** stopped
+flagging a walk the phone delivers late with the screen off as fraud, sent a
+day that grows while it uploads again instead of losing it, ended the day at
+midnight without waiting for a step, and kept a stopped tracker's background
+work cancelled across launches. **2.3.5** kept `useStepStats` refreshing
 live after the phone's clock is set back. **2.3.4** measured every
 in-memory interval on the uptime clock, so that setting the phone's clock
 back stopped freezing live step events, cached Health Connect sources, grants
