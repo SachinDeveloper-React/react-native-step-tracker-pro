@@ -9,6 +9,11 @@
     <!-- The line under the title. %s is the daily goal, already formatted. -->
     <string name="stp_notification_goal">%s goal</string>
     <string name="stp_notification_text">%1$s km · %2$s kcal · %3$d%% of goal</string>
+    <!-- The same line when notificationDistanceUnit shows miles. -->
+    <string name="stp_notification_text_miles">%1$s mi · %2$s kcal · %3$d%% of goal</string>
+    <!-- What {unit} in notificationTitle and notificationText becomes. -->
+    <string name="stp_unit_km">km</string>
+    <string name="stp_unit_mi">mi</string>
     <string name="stp_action_open">Open</string>
     <string name="stp_action_pause">Pause</string>
     <string name="stp_action_resume">Resume</string>

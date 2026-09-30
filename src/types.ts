@@ -35,7 +35,11 @@ export interface StepTrackerConfig {
   calorieCoefficient?: number;
   /** How many days of history to keep on device. Default 35. */
   historyRetentionDays?: number;
-  /** Notification title. Supports {steps}, {goal}, {percent}, {distance}, {calories}. */
+  /**
+   * Notification title. Supports {steps}, {goal}, {percent}, {distance},
+   * {unit} and {calories}; {distance} is in `notificationDistanceUnit`, and
+   * {unit} is its label.
+   */
   notificationTitle?: string;
   notificationText?: string;
   /** Drawable name in the host app, e.g. 'ic_stat_steps'. Falls back to a bundled icon. */
@@ -51,6 +55,13 @@ export interface StepTrackerConfig {
    * `'public'` shows the count always, as every release before 2.3 did.
    */
   notificationLockScreen?: 'private' | 'public';
+  /**
+   * The unit the notification shows distance in. `'km'` (default), `'mi'`,
+   * or `'auto'`: miles on a phone set up for the United States, the United
+   * Kingdom, Liberia or Myanmar, kilometres elsewhere. Only the
+   * notification: every distance this package returns is in metres.
+   */
+  notificationDistanceUnit?: 'km' | 'mi' | 'auto';
   /** Minimum ms between notification redraws. Default 1000. */
   notificationThrottleMs?: number;
   /** Minimum ms between JS `stepsChanged` events. Default 500. */
@@ -80,8 +91,13 @@ export interface StepTrackerConfig {
   /**
    * Also request `READ_HEALTH_DATA_IN_BACKGROUND`. Default false.
    *
-   * Needed for the background sync worker to see a watch's steps while the app
-   * is closed; without it every background read comes back empty.
+   * Health Connect refuses reads from an app in the background - no activity
+   * on screen and no foreground service - without it. While tracking is on,
+   * the tracking service is a foreground service, so reads work with the app
+   * closed; this covers the rest: a Health Connect only app, tracking stopped,
+   * or the service killed by the phone's maker. Without it those reads are not
+   * made: sources report `'not_consulted'`, and the raw reads reject with
+   * `E_HEALTH_CONNECT_DENIED`.
    */
   healthConnectBackgroundRead?: boolean;
   /**
@@ -202,7 +218,8 @@ export interface StepTrackerConfig {
   gapRecovery?: GapRecovery;
   /**
    * Under `gapRecovery: 'today_capped'`, the most one recovery may credit to
-   * the active day; whatever is over it is dropped, not moved. Default
+   * the active day - a late batch from a closed day counting as one;
+   * whatever is over it is dropped, not moved. Default
    * 20000 — twice a very active day. A genuine overnight gap on a phone that
    * kills services is a few thousand steps; tens of thousands after a long
    * dead period is a counter glitch or a week of walking that cannot
@@ -551,7 +568,9 @@ export interface SnapshotHealthConnectRecords {
    * `'read'` when the records were read - an empty list then means there
    * were none. Otherwise why not: `'disabled'` (`healthConnectEnabled`
    * false), `'unavailable'` (no provider), `'not_granted'` (a read
-   * permission for `recordTypes` is missing), `'timeout'` or `'failed'`.
+   * permission for `recordTypes` is missing, or the app is in the
+   * background - no activity on screen and tracking off - without
+   * `READ_HEALTH_DATA_IN_BACKGROUND`), `'timeout'` or `'failed'`.
    * The step-source policy does not matter here: an explicit ask reads
    * whenever it can.
    */
@@ -854,12 +873,22 @@ export interface MotionWindow {
  *   glitch after a week-long kill cannot mint 100,000 steps on one day.
  * - `'drop'` discards whatever cannot be placed on the current day.
  *
- * For an app where a day must never change once it has been settled — paid
- * for, uploaded, shown on a leaderboard — use `'today_capped'` or `'drop'`.
- * Both leave closed days alone; `'drop'` also refuses the current day
- * anything from a gap that started on another one. Under either, the share
- * a day did receive is reported as `recoveredSteps`, so a server can weigh
- * it differently from steps observed live.
+ * The same policy decides where steps go that the phone held with the
+ * screen off across midnight and delivered after the day they were taken on
+ * had closed: `'split'` adds them to that day and judges them there; `'today'`
+ * and `'today_capped'` give them to the current day as recovered steps -
+ * under `'today_capped'` within `gapRecoveryMaxSteps`, the batch counting as
+ * one recovery; `'drop'` discards them.
+ *
+ * For an app that pays per step, `'split'` is the one policy under which
+ * every step the tracker saw is judged on the day it was taken; a settled
+ * day that grows says so with `historyBackfilled`. Where a settled day — paid
+ * for, uploaded, shown on a leaderboard — must never change, use `'drop'`:
+ * it leaves closed days alone and credits nothing it cannot place on the
+ * current day. `'today'` and `'today_capped'` leave closed days alone too, but
+ * hand the current day, unjudged, what belonged to one. Whatever a day
+ * received that way is reported as `recoveredSteps`, so a server can weigh it
+ * differently from steps observed live.
  */
 export type GapRecovery = 'split' | 'today' | 'today_capped' | 'drop';
 
@@ -1395,8 +1424,10 @@ export interface StepSourceList {
  * How a multi-day read of Health Connect went:
  *
  * - `'read'`: other apps' steps are in the result.
- * - `'not_consulted'`: not asked - no provider, no grant for steps, or the
- *   `'device'` policy.
+ * - `'not_consulted'`: not asked - no provider, no grant for steps, the
+ *   `'device'` policy, or the app in the background - no activity on screen
+ *   and no foreground service, so tracking off - without
+ *   `READ_HEALTH_DATA_IN_BACKGROUND`, where Health Connect would refuse.
  * - `'timed_out'` / `'failed'`: the read did not finish; the result is this
  *   device's own count. Call again.
  */

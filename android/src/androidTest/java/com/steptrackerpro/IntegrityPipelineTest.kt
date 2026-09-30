@@ -23,6 +23,7 @@ import com.steptrackerpro.service.BootReceiver
 import com.steptrackerpro.integrity.DeviceAttestation
 import androidx.work.await
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -569,6 +570,99 @@ class IntegrityPipelineTest {
         )
         assertEquals(android.app.Notification.VISIBILITY_PUBLIC, public.visibility)
         assertTrue(public.publicVersion == null)
+    }
+
+    @Test
+    fun theNotificationShowsDistanceInTheUnitConfigPicks() {
+        val factory = com.steptrackerpro.service.NotificationFactory(context)
+        val snapshot = core.displaySnapshot().copy(
+            steps = 2_000, distance = 1_609.344, state = com.steptrackerpro.core.TrackingState.RUNNING
+        )
+        fun text(config: StepTrackerConfig) = factory.build(snapshot, config.sanitised(), core.metrics)
+            .extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString()
+        val oneMile = String.format(java.util.Locale.getDefault(), "%.2f", 1.0)
+        val inKm = String.format(java.util.Locale.getDefault(), "%.2f", 1.609344)
+
+        assertTrue(text(StepTrackerConfig()).startsWith("$inKm km"))
+        assertTrue(text(StepTrackerConfig(notificationDistanceUnit = "mi")).startsWith("$oneMile mi"))
+        // A template of the app's own gets the value and its label.
+        assertEquals(
+            "$oneMile mi",
+            text(StepTrackerConfig(notificationDistanceUnit = "mi", notificationText = "{distance} {unit}"))
+        )
+    }
+
+    @Test
+    fun theNotificationFollowsAChangeOfLanguage() {
+        val factory = com.steptrackerpro.service.NotificationFactory(context)
+        val snapshot = core.displaySnapshot().copy(
+            steps = 2_000, distance = 1_500.0, state = com.steptrackerpro.core.TrackingState.RUNNING
+        )
+        val config = StepTrackerConfig(notificationText = "{steps}|{distance}").sanitised()
+        fun text() = factory.build(snapshot, config, core.metrics)
+            .extras.getCharSequence(android.app.Notification.EXTRA_TEXT).toString()
+        val before = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.GERMANY)
+            assertEquals("2.000|1,50", text())
+            // The user switches the phone to English with the service running:
+            // the count follows, as the distance always did.
+            java.util.Locale.setDefault(java.util.Locale.US)
+            assertEquals("2,000|1.50", text())
+        } finally {
+            java.util.Locale.setDefault(before)
+        }
+    }
+
+    @Test
+    fun aDayEndedByASyncJobOrAReadTellsTheService() = runBlocking {
+        // 900 steps yesterday and the phone still since: the service's
+        // heartbeat has not ticked, and the first read of the night - a
+        // sync job's - ends the day.
+        core.state.activeDate = DateKeys.yesterday()
+        core.state.stepsToday = 900
+        var ended = 0
+        core.onDayEnded = { ended++ }
+        try {
+            assertEquals(DateKeys.today(), core.liveToday().date)
+            // The service hears of it, and redraws the shade on the new day.
+            assertEquals(1, ended)
+            core.liveToday()
+            assertEquals(1, ended)
+        } finally {
+            core.onDayEnded = null
+        }
+    }
+
+    @Test
+    fun aBackgroundWriteThatFailsIsLoggedNotACrash() = runBlocking {
+        // What a save throws on a full disk. Uncaught in the core's own
+        // scope, it took the whole app down - this test process with it.
+        core.scope.launch {
+            throw android.database.sqlite.SQLiteFullException("database or disk is full")
+        }.join()
+        // Logged, and the rest of the core carries on.
+        val now = System.currentTimeMillis()
+        core.engine.onCounterSample(10_000f, now - 2_000L)
+        core.engine.onCounterSample(10_050f, now - 1_000L)
+        core.flush()
+        assertTrue(core.engine.snapshot().steps >= 50)
+        eventually { core.repository.getDay(DateKeys.today()).steps == core.engine.snapshot().steps }
+    }
+
+    @Test
+    fun aHealthConnectReadThatCannotHappenThrowsRatherThanReturningNothing() = runBlocking {
+        // No grants in this test app: before, this came back as an empty
+        // list - a window nobody walked in - and readHealthConnectSteps()
+        // resolved with no records.
+        val end = java.time.Instant.now()
+        val failed = try {
+            core.healthConnect.readDailySteps(end.minusSeconds(86_400), end)
+            false
+        } catch (_: Exception) {
+            true
+        }
+        assertTrue(failed)
     }
 
     @Test

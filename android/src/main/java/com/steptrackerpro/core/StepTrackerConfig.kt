@@ -35,6 +35,12 @@ data class StepTrackerConfig(
      * `public` shows it always, as before 2.3.
      */
     val notificationLockScreen: String = LOCK_SCREEN_PRIVATE,
+    /**
+     * The unit the notification shows distance in: `km` (default), `mi`,
+     * or `auto` - miles where the phone's locale walks in them. See
+     * [DistanceUnit].
+     */
+    val notificationDistanceUnit: String = DistanceUnit.KM,
     val notificationThrottleMs: Long = 1_000L,
     val eventThrottleMs: Long = 500L,
     val persistEveryNSteps: Int = 10,
@@ -144,8 +150,9 @@ data class StepTrackerConfig(
     val gapRecovery: String = "split",
     /**
      * Under `today_capped`, the most one recovery may credit to the active
-     * day; the rest is dropped. A closed day never changes and one day can
-     * never be handed a week of counter.
+     * day - a late batch from a closed day counting as one; the rest is
+     * dropped. A closed day never changes and one day can never be handed a
+     * week of counter.
      */
     val gapRecoveryMaxSteps: Int = StepCounterEngine.DEFAULT_GAP_RECOVERY_MAX_STEPS,
     /**
@@ -257,6 +264,7 @@ data class StepTrackerConfig(
         wearableTrust = com.steptrackerpro.health.WearableTrust.from(wearableTrust).jsValue,
         wearableAllowlist = wearableAllowlist.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
         notificationLockScreen = if (notificationLockScreen == LOCK_SCREEN_PUBLIC) LOCK_SCREEN_PUBLIC else LOCK_SCREEN_PRIVATE,
+        notificationDistanceUnit = DistanceUnit.from(notificationDistanceUnit),
         healthConnectReadTypes = com.steptrackerpro.health.HealthConnectManager.ReadType
             .parse(healthConnectReadTypes)
             .sortedBy { it.ordinal }
@@ -308,6 +316,7 @@ data class StepTrackerConfig(
         put("notificationChannelName", notificationChannelName ?: JSONObject.NULL)
         put("notificationActions", notificationActions)
         put("notificationLockScreen", notificationLockScreen)
+        put("notificationDistanceUnit", notificationDistanceUnit)
         put("notificationThrottleMs", notificationThrottleMs)
         put("eventThrottleMs", eventThrottleMs)
         put("persistEveryNSteps", persistEveryNSteps)
@@ -396,6 +405,9 @@ data class StepTrackerConfig(
                     "notificationActions", fallback.notificationActions
                 ),
                 notificationLockScreen = json.optString("notificationLockScreen", fallback.notificationLockScreen),
+                notificationDistanceUnit = json.optString(
+                    "notificationDistanceUnit", fallback.notificationDistanceUnit
+                ),
                 notificationThrottleMs = json.optLong(
                     "notificationThrottleMs", fallback.notificationThrottleMs
                 ),

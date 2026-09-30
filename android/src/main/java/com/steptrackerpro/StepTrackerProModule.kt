@@ -877,14 +877,22 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * Every app's steps per day. Like the raw reads, and unlike the resolved
+     * ones, a read that cannot happen rejects and says why - it used to
+     * resolve with no records, which passed for a window nobody walked in.
+     */
     @ReactMethod
     override fun readHealthConnectSteps(startIso: String, endIso: String, promise: Promise) {
         launchSafely(promise) {
-            val days = core.healthConnect.readDailySteps(
-                Instant.parse(startIso),
-                Instant.parse(endIso)
-            )
-            promise.resolve(
+            if (!requireHealthConnectRead(promise, setOf(HealthConnectManager.RecordType.STEPS))) {
+                return@launchSafely
+            }
+            healthConnectRead(promise) {
+                val days = core.healthConnect.readDailySteps(
+                    Instant.parse(startIso),
+                    Instant.parse(endIso)
+                )
                 Bridge.map(
                     mapOf(
                         "totalSteps" to days.sumOf { it.steps },
@@ -905,7 +913,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                         }
                     )
                 )
-            )
+            }
         }
     }
 
@@ -952,9 +960,9 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
     /**
      * Rejects, and returns false, when raw Health Connect reads of [types]
-     * cannot work: no provider, or a read grant missing. The aggregated
-     * reads fall back to this device quietly; a raw read asked for
-     * specifically says why it cannot.
+     * cannot work: no provider, or a read grant missing. The resolved reads
+     * fall back to this device quietly; a read asked for specifically says
+     * why it cannot.
      */
     private suspend fun requireHealthConnectRead(
         promise: Promise,
@@ -975,12 +983,29 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         return true
     }
 
-    /** A grant revoked between the check and the read rejects as denied, not as unknown. */
+    /**
+     * A refusal rejects as denied, not as unknown: a grant revoked between
+     * the check and the read, or the app in the background - no activity on
+     * screen and no foreground service - without
+     * `READ_HEALTH_DATA_IN_BACKGROUND`. That rule is Health Connect's to
+     * apply, so it is not guessed at beforehand: a read it would allow is
+     * never refused here.
+     */
     private suspend fun healthConnectRead(promise: Promise, read: suspend () -> Any?) {
         try {
             promise.resolve(read())
         } catch (denied: SecurityException) {
-            promise.reject("E_HEALTH_CONNECT_DENIED", denied.message ?: "Health Connect read permission is not granted", denied)
+            val message = denied.message ?: "Health Connect read permission is not granted"
+            promise.reject(
+                "E_HEALTH_CONNECT_DENIED",
+                if (core.healthConnect.canReadNow()) {
+                    message
+                } else {
+                    "$message (with no activity on screen and no foreground service - tracking off - " +
+                        "Health Connect needs READ_HEALTH_DATA_IN_BACKGROUND: healthConnectBackgroundRead)"
+                },
+                denied
+            )
         }
     }
 
@@ -1190,6 +1215,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             ),
             notificationLockScreen = patch.optString("notificationLockScreen", current.notificationLockScreen)
                 ?: current.notificationLockScreen,
+            notificationDistanceUnit = patch.optString("notificationDistanceUnit", current.notificationDistanceUnit)
+                ?: current.notificationDistanceUnit,
             notificationThrottleMs = patch.optLong(
                 "notificationThrottleMs", current.notificationThrottleMs
             ),
@@ -1322,6 +1349,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "historyRetentionDays" to config.historyRetentionDays,
         "notificationActions" to config.notificationActions,
         "notificationLockScreen" to config.notificationLockScreen,
+        "notificationDistanceUnit" to config.notificationDistanceUnit,
         "healthConnectEnabled" to config.healthConnectEnabled,
         "healthConnectSyncIntervalMinutes" to config.healthConnectSyncIntervalMinutes,
         "healthConnectReadEnabled" to config.healthConnectReadEnabled,

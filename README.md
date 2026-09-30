@@ -108,11 +108,18 @@ await StepTracker.initialize({
 ```
 
 An app that converts steps into anything of value adds
-`healthConnectIgnoreManualEntries: true`, `wearableTrust: "catalog"`,
-`gapRecovery: "today_capped"` and `remoteSyncPayload: "full"`, and posts
-`getVerificationSnapshot(date)` to its server rather than the number on
-screen — see [Watches and Health Connect](#watches-and-health-connect) and
+`healthConnectIgnoreManualEntries: true`, `wearableTrust: "catalog"` and
+`remoteSyncPayload: "full"`, and posts `getVerificationSnapshot(date)` to its
+server rather than the number on screen — see
+[Watches and Health Connect](#watches-and-health-connect) and
 [docs/API.md](docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot).
+It keeps `gapRecovery: "split"`, the one policy under which every step the
+tracker saw is judged on the day it was taken - steps the phone held with
+the screen off across midnight included - and a paid day that grows after
+the fact says so with `historyBackfilled`. If a paid day must never change,
+it uses `"drop"`, which credits nothing it cannot place on the current day.
+`"today"` and `"today_capped"` never change a closed day either, but hand
+the current day, as recovered steps nobody judged, what belonged to one.
 
 It also turns on the integrity checks, which flag the usual ways a count is
 faked — a phone shaken by hand, swung by a gadget, left on a charger,
@@ -337,19 +344,20 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-A hundred and seventy Jest tests cover config validation, the flows in
+A hundred and seventy-two Jest tests cover config validation, the flows in
 the JS layer, the typed and legacy event paths, the hook's config handling,
-the shipped Jest mock and the Expo plugin. Two hundred and six JVM tests
+the shipped Jest mock and the Expo plugin. Two hundred and eleven JVM tests
 cover step-source resolution, the `auto` merge and its coverage rule,
 manual-entry exclusion and wearable trust, gap splitting under all four
 policies, the accelerometer pedometer against synthetic gait, motion
 signatures against a synthetic walk and shake, the fraud detector against
-synthetic days, minute attribution and sensor timestamps, and the remote
-payload — chiefly that a phone and a watch are never added together, that a
+synthetic days, minute attribution and sensor timestamps, the
+notification's distance unit, when Health Connect allows a background read,
+and the remote payload — chiefly that a phone and a watch are never added together, that a
 phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
-with the screen off is not a shake. Sixty-nine instrumented tests cover the
+with the screen off is not a shake. Seventy-five instrumented tests cover the
 reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
 pause and counter-reset paths by feeding samples to the engine directly, the
 Room migrations against real rows, and the integrity layer and sync
@@ -363,11 +371,16 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.3.7** — steps the phone
-delivers late across midnight count on the day they were taken and are
-checked there, a failed Health Connect read is reported as failed instead of
-as a day with no other apps, a read of yesterday waits for its last steps,
-and an app that never tracks keeps its background upload. **2.3.6** stopped
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.4.0** — the notification
+can show miles (`notificationDistanceUnit`), Health Connect is read with the
+app closed while tracking is on, `readHealthConnectSteps()` rejects when it
+cannot read instead of answering "no steps", the notification moves to the
+new day whatever ended the old one, and a failed database write in the
+background no longer crashes the app. **2.3.7** counted steps the phone
+delivers late across midnight on the day they were taken and checked them
+there, reported a failed Health Connect read as failed instead of as a day
+with no other apps, made a read of yesterday wait for its last steps, and
+kept an app that never tracks on its background upload. **2.3.6** stopped
 flagging a walk the phone delivers late with the screen off as fraud, sent a
 day that grows while it uploads again instead of losing it, ended the day at
 midnight without waiting for a step, and kept a stopped tracker's background

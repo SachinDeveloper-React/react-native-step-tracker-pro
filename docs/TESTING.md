@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (170 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config (206 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (172 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads (211 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,11 +59,11 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Sixty-nine cases: forty drive the engine, three build the Room
+sensor. Seventy-five cases: forty-one drive the engine, three build the Room
 database as an older version from the exported schema, migrate real rows to
-the current version and check every one survived, nineteen run the
-integrity layer, sync bookkeeping and background work end to end through the
-real core, database and Keystore, four check that remote-sync headers are
+the current version and check every one survived, twenty-four run the
+integrity layer, sync bookkeeping, Health Connect reads, the notification
+and background work end to end through the real core, database and Keystore, four check that remote-sync headers are
 sealed, read back and migrated from 1.x, and three pin when `goalReached`
 fires. Among them:
 
@@ -84,6 +84,7 @@ fires. Among them:
 | `aResetAfterMidnightClosesYesterdayBeforeZeroingToday` | `resetToday()` after midnight wipes yesterday's unsaved steps along with today |
 | `aLateBatchCountsOnTheDayItWasTakenAndClosesItAfter` | steps the phone held across midnight count on the new day |
 | `aLateSampleAfterTheDayClosedIsOwedToTheDayItWasTaken` / `lateStepsForAClosedDayFollowTheGapPolicy` | a late sample after the day closed lands on the wrong day, or changes a closed day under a policy that promises it never will |
+| `lateStepsUnderTodayCappedShareOneCap` | `today_capped` hands the new day an uncapped batch of steps from the day before |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |
 | `commitThresholdControlsDatabaseWrites` | a write per step, or no writes at all |
@@ -107,6 +108,11 @@ fires. Among them:
 | `aReadOfYesterdayWaitsForTheCloseToLand` | `getYesterdaySteps()` at the first open of the morning misses the last steps of yesterday |
 | `aShakerRunUpToMidnightIsJudgedOnTheDayItCountsFor` | a shaker left running up to midnight on a sleeping phone passes its steps to the next day unflagged |
 | `aReadOfYesterdayRightAfterALateBatchIncludesIt` | a snapshot of yesterday taken as the phone wakes misses the steps it delivered late |
+| `aHealthConnectReadThatCannotHappenThrowsRatherThanReturningNothing` | `readHealthConnectSteps()` answers "no steps" when Health Connect could not be read |
+| `theNotificationShowsDistanceInTheUnitConfigPicks` | a user who walks in miles sees kilometres whatever the app sets, or `{unit}` is left in the text |
+| `theNotificationFollowsAChangeOfLanguage` | after the phone's language changes, the notification's counts keep the old format |
+| `aDayEndedByASyncJobOrAReadTellsTheService` | a day a sync job ended in the night leaves the notification on the day before's count until the first step |
+| `aBackgroundWriteThatFailsIsLoggedNotACrash` | a save that fails on a full disk takes the app down |
 
 ### Compatibility builds
 
@@ -190,6 +196,8 @@ walk properly rather than shaking the phone.
 
 - [ ] `stepsChanged` fires in JS
 - [ ] notification shows steps, km, kcal and the progress bar
+- [ ] with `notificationDistanceUnit: 'mi'`, or `'auto'` on a phone set to
+      the US or UK, it shows miles
 - [ ] numbers in the notification and the UI agree
 
 ### Background and screen locked
@@ -257,6 +265,9 @@ few steps.
 
 - [ ] before any step, within a minute: the notification reads today's count
       and `dayChanged` fires with yesterday's total
+- [ ] set the date forward again with the app open and the phone still, and
+      call `getTodaySteps()` at once: the notification moves to today's count
+      with it, not at the next step
 - [ ] with the screen off across midnight, turning it on shows today's count
       at once
 - [ ] `getStepsForDate(today)` and `getCurrentStepSource()` answer for today,
@@ -328,7 +339,11 @@ adb shell am start -a android.health.connect.action.HEALTH_HOME_SETTINGS
       intent filter in your app manifest, or it silently does nothing)
 - [ ] after `syncNow()`, today's steps appear in the Health Connect app
 - [ ] syncing twice does **not** create two entries for the same day
-- [ ] `readHealthConnectSteps()` returns data written by other apps too
+- [ ] `readHealthConnectSteps()` returns data written by other apps too, and
+      rejects with `E_HEALTH_CONNECT_DENIED` before `READ_STEPS` is granted
+- [ ] without `healthConnectBackgroundRead`, tracking on and the app swiped
+      away: a watch sync mid-walk reaches the notification within a minute of
+      the next step
 
 ### Offline
 

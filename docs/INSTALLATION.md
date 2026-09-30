@@ -176,7 +176,7 @@ grants you do. Declare each one you turn on:
 
 | Permission | Config flag | Needed for |
 |---|---|---|
-| `READ_HEALTH_DATA_IN_BACKGROUND` | `healthConnectBackgroundRead` | the background sync worker seeing a watch's steps while the app is closed — without it every background read returns empty |
+| `READ_HEALTH_DATA_IN_BACKGROUND` | `healthConnectBackgroundRead` | reading a watch's steps with the app closed and tracking off — while tracking is on, the tracking service is a foreground service, which Health Connect lets read. Without it those reads are not made, and report Health Connect as not consulted |
 | `READ_HEALTH_DATA_HISTORY` | `healthConnectHistoryRead` | reading further back than 30 days, which yearly stats need |
 | `READ_ACTIVE_CALORIES_BURNED` | `healthConnectReadActiveCalories` | `StepSource.activeCalories` |
 
@@ -298,7 +298,9 @@ Connect is how the watch's number reaches you.
 await StepTracker.initialize({
   privacyPolicyUrl: 'https://example.com/privacy',
   stepSource: 'auto',                 // the default: take the higher of the two
-  healthConnectBackgroundRead: true,  // so background syncs see the watch too
+  // With tracking on, the tracking service lets Health Connect be read with
+  // the app closed. healthConnectBackgroundRead: true covers the rest -
+  // tracking off, or the service killed - and is one more grant Play reviews.
 });
 
 // One button: installs the provider, or asks, or opens settings — whichever

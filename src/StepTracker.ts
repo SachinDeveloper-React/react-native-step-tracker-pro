@@ -458,6 +458,11 @@ function normaliseConfig(
     'private',
     'public',
   ]);
+  assertOneOf('notificationDistanceUnit', config.notificationDistanceUnit, [
+    'km',
+    'mi',
+    'auto',
+  ]);
   assertList('healthConnectReadTypes', config.healthConnectReadTypes, READ_TYPES, {
     nonEmpty: true,
   });
@@ -1086,7 +1091,12 @@ export const StepTracker = {
    * Steps per day across every app Health Connect knows about, between two
    * ISO-8601 instants with a zone - '2026-09-01T00:00:00Z' or
    * '2026-09-01T00:00:00+05:30'. Rejects with `E_INVALID_CONFIG` for a time
-   * with no zone, or a start not before the end.
+   * with no zone, or a start not before the end; and, like
+   * `getHealthConnectRecords()`, with `E_HEALTH_CONNECT_UNAVAILABLE` or
+   * `E_HEALTH_CONNECT_DENIED` when Health Connect cannot be read - no
+   * provider, no `READ_STEPS`, or Health Connect refusing a read from the
+   * background (no activity on screen and tracking off) without
+   * `READ_HEALTH_DATA_IN_BACKGROUND` - rather than resolving with no records.
    */
   async readHealthConnectSteps(
     startIso: string,

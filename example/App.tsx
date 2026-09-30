@@ -116,9 +116,10 @@ export default function App() {
     // trusted for its whole margin; anything else stamping TYPE_WATCH is
     // bound by the coverage rule like a phone-side app.
     wearableTrust: 'catalog',
-    // A closed day never changes after the fact, and one day can never be
-    // handed a week's worth of counter.
-    gapRecovery: 'today_capped',
+    // Every step the tracker saw is judged on the day it was taken, steps
+    // the phone held across midnight included; a closed day that grows says
+    // so with historyBackfilled. 'drop' where a paid day must never change.
+    gapRecovery: 'split',
     // Minute buckets, the event log and the detector for shaken phones,
     // swing gadgets, chargers and implausible totals. 'flag' reports and
     // changes no number; a server decides. 'exclude' would also take the

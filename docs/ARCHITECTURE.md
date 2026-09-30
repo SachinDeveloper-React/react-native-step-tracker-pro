@@ -111,8 +111,12 @@ Shares for days other than the active one go out through
 counter provably restarted), and `StepTrackerCore` adds them to the stored
 rows (re-queuing them for sync) and then emits `historyBackfilled` once per
 day, after the write has committed. Only `'split'` ever produces one: the
-other three leave closed days alone, which is why `'today_capped'` and
-`'drop'` are the recommendation for an app that has already paid for a day.
+other three leave closed days alone. That suits an app that has already
+paid for a day, but `'today'` and `'today_capped'` pay for it by handing the
+active day, unjudged, steps that belong to a closed one - an overnight gap's
+earlier share, a late batch - so an app that pays per step is better served
+by `'split'`, which judges every step the tracker saw on its own day, or by
+`'drop'`, which credits nothing it cannot place on the active day.
 The rollover deliberately preserves `lastEventAt`: stamping "now" there
 erased the evidence of when the gap started and put every overnight step
 into the new day.
@@ -222,7 +226,8 @@ happened. The day each sample counts towards is the day it was taken on, too:
   Those steps were watched being taken, so they do not grow the day's
   recovered share. `'today'` and `'today_capped'`,
   which never change a closed day, give them to the new day in one go as
-  recovered steps, and `'drop'` discards them.
+  recovered steps - under `'today_capped'` within `gapRecoveryMaxSteps`, the
+  batch counting as one recovery - and `'drop'` discards them.
 
 The day used to be chosen by arrival. Once 2.3.6 kept the minutes' real
 times, a late batch's steps counted on the new day while their minutes sat on
@@ -750,10 +755,17 @@ as `'failed'` and not cached. A raw read that fails falls back to the
 aggregate API, and when that fails too the whole read fails - it used to
 come back empty, which was cached for up to ten minutes and signed into
 snapshots as `'read'`, a day with no other apps. Health Connect also refuses
-reads from an app with no activity on screen unless it holds
-`READ_HEALTH_DATA_IN_BACKGROUND`; without it, a read in the background is
-not tried at all and reports `'not_consulted'` - the sensor path's refresh,
-the sync worker, a background snapshot or `full` upload. Granted permissions
+reads from an app in the background unless it holds
+`READ_HEALTH_DATA_IN_BACKGROUND`. It asks AppOps whether the app is in the
+foreground, and AppOps' foreground reaches as far as a foreground service: an
+activity on screen, or the tracking service running. So while tracking is on
+every read is allowed with the app closed; with tracking off and without the
+grant, a read in the background is not tried at all and reports
+`'not_consulted'` - the sync worker, a background snapshot or `full` upload.
+The raw reads leave the rule to Health Connect and pass its refusal on as
+`E_HEALTH_CONNECT_DENIED`, so they are never refused a read it would allow.
+2.3.7 took the tracking service for the background, and skipped reads Health
+Connect would have answered. Granted permissions
 are cached for five seconds between the explicit status checks, so the
 sensor path's refresh does not cost an IPC per minute.
 

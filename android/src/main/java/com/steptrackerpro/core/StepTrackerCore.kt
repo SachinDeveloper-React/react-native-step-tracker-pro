@@ -15,6 +15,7 @@ import com.steptrackerpro.integrity.IntegrityMonitor
 import com.steptrackerpro.sync.SyncScheduler
 import com.steptrackerpro.util.StepEventBus
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -40,7 +41,18 @@ class StepTrackerCore private constructor(context: Context) {
 
     private val appContext: Context = context.applicationContext
 
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * Background work - the saves, the closing of a day, a backfill - runs
+     * here with no caller to hand a failure to. One that throws is logged:
+     * uncaught, a database write on a full disk took the whole app down with
+     * it, again at every save. A save writes the day's whole total, so the
+     * next one makes up for one that failed.
+     */
+    val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error ->
+            android.util.Log.w(TAG, "Background work failed", error)
+        }
+    )
 
     /**
      * Every write to the day tables goes through one lane, in submission
@@ -92,6 +104,16 @@ class StepTrackerCore private constructor(context: Context) {
      */
     @Volatile
     private var closingDay: Job? = null
+
+    /**
+     * Told when a day ends, whatever ended it: a sample, the service's
+     * heartbeat, or a read - a sync job's, an app's. The service redraws its
+     * notification from it; a day a sync job ended overnight otherwise left
+     * the shade on the day before's count until the first step. Called under
+     * the engine's lock, so it only posts.
+     */
+    @Volatile
+    var onDayEnded: (() -> Unit)? = null
 
     init {
         // Exclude mode: a verdict that moved today's flagged total moved the
@@ -510,6 +532,7 @@ class StepTrackerCore private constructor(context: Context) {
             )
         }
         closingDay = closed
+        onDayEnded?.invoke()
         scope.launch(writeLane) { runCatching { prune(config().historyRetentionDays) } }
         scope.launch {
             closed.join()
@@ -1540,6 +1563,8 @@ class StepTrackerCore private constructor(context: Context) {
     )
 
     companion object {
+        private const val TAG = "StepTrackerPro"
+
         /**
          * The verification snapshot's shape. Bumped whenever a field is
          * removed, renamed or changes meaning; adding a field does not bump

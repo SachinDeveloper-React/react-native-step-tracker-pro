@@ -110,8 +110,9 @@ class StepTrackerService : Service(), SensorEventListener {
             // Midnight ends the day whether or not a step comes along to end
             // it. A phone lying still would otherwise keep yesterday's total
             // in the shade, and hold back dayChanged and the closing day's
-            // save and verdict, until the first step of the morning.
-            if (core.rollDayIfDue()) pushNotification(force = true)
+            // save and verdict, until the first step of the morning. The
+            // shade follows through dayEnded.
+            core.rollDayIfDue()
             // The last minutes of a walk are judged even when no step follows
             // them, and under exclude mode the shade follows the verdict.
             // Both are no-ops with detection off; the redraw dedupes on the
@@ -145,8 +146,19 @@ class StepTrackerService : Service(), SensorEventListener {
      */
     private val dayBoundary = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (core.rollDayIfDue()) pushNotification(force = true)
+            core.rollDayIfDue()
         }
+    }
+
+    /**
+     * Redraws the shade on the new day, whoever ended the old one: a sample,
+     * the heartbeat, a broadcast above, or a read - a sync job's in the
+     * night, which left the shade on the day before's count until the first
+     * step, since nothing here saw the day end. Posted to the sensor thread,
+     * where every redraw happens, and dropped once tracking is stopping.
+     */
+    private val dayEnded: () -> Unit = {
+        sensorHandler?.post { if (isAlive && core.shouldBeRunning()) pushNotification(force = true) }
     }
 
     /** Short retries after a failed registration, before the heartbeat takes over. */
@@ -216,6 +228,7 @@ class StepTrackerService : Service(), SensorEventListener {
             it.start()
             sensorHandler = Handler(it.looper)
         }
+        core.onDayEnded = dayEnded
         ContextCompat.registerReceiver(
             this,
             dayBoundary,
@@ -873,6 +886,7 @@ class StepTrackerService : Service(), SensorEventListener {
 
     override fun onDestroy() {
         isAlive = false
+        if (core.onDayEnded === dayEnded) core.onDayEnded = null
         runCatching { unregisterReceiver(dayBoundary) }
         sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()

@@ -5,6 +5,80 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-10-01
+
+Fixes from a review of 2.3.7 and from checking the code around them, and one
+addition - see Added.
+
+### Fixed
+
+- **`readHealthConnectSteps()` answered "no steps" when it could not read.**
+  Without a Health Connect provider, without `READ_STEPS`, in the background
+  without `READ_HEALTH_DATA_IN_BACKGROUND`, or when the read failed, it
+  resolved `{ totalSteps: 0, records: [] }` - the same answer as a window
+  nobody walked in. It rejects now, like `getHealthConnectRecords()`:
+  `E_HEALTH_CONNECT_UNAVAILABLE` without a provider, `E_HEALTH_CONNECT_DENIED`
+  without the grant or when Health Connect refuses the read (see below), and
+  a failed read with its error.
+- **With tracking on and the app closed, Health Connect was not read.** New
+  in 2.3.7, which took the tracking service for the background, where Health
+  Connect refuses reads without `READ_HEALTH_DATA_IN_BACKGROUND`. Health
+  Connect does not: it asks AppOps whether the app is in the foreground, and
+  a foreground service is. So without the background grant, a tracking app
+  with its screen closed stopped following a watch that synced mid-walk in
+  the notification, signed snapshots and `full` uploads with
+  `sourcesStatus: 'not_consulted'`, and - in the sync job, which mostly runs
+  with the app closed - wrote this phone's count of days a watch owned into
+  Health Connect, where every other app reading it found the walk twice.
+  The rule matches Health Connect's now, and the raw reads leave it to Health
+  Connect: they pass its refusal on as `E_HEALTH_CONNECT_DENIED` rather than
+  refusing first. The grant is only needed with tracking off, or while the
+  phone's maker has the service killed.
+- **The notification could stay on the day before until the first step.**
+  The service redrew it when it ended the day itself - a sample, its
+  heartbeat, the screen coming on. When something else ended it first - the
+  Health Connect sync job in the night, or any read - the shade kept
+  yesterday's count all morning, until a step came. It follows every end of
+  a day now.
+- **A database failure in the background crashed the app.** A save that
+  failed - on a full disk, every ten steps, at midnight, when a recovery or
+  a late batch was added, when a motion window was stored - threw on a
+  background thread with nothing to catch it, taking the app down with it,
+  and again at the next save. It is logged now, and the next save writes the
+  day's whole total.
+- **After the phone's language changed, the notification's counts kept the
+  old format** until the service restarted, beside a distance in the new
+  one.
+- **Under `gapRecovery: 'today_capped'`, late steps from a closed day were
+  not capped.** New in 2.3.7: steps the phone held across midnight and
+  delivered after the day they were taken on had closed went to the new day
+  as recovered steps, in full, however many there were. They count as one
+  recovery now, within `gapRecoveryMaxSteps`; the rest is dropped.
+
+### Added
+
+- `notificationDistanceUnit`: `'km'` (the default, as before), `'mi'`, or
+  `'auto'` - miles on a phone set up for the United States, the United
+  Kingdom, Liberia or Myanmar. The notification always showed kilometres,
+  and rewording `stp_notification_text` could not convert them. A
+  `{unit}` token joins `notificationTitle`/`notificationText`, and the
+  string resources `stp_notification_text_miles`, `stp_unit_km` and
+  `stp_unit_mi`. Only the notification: every distance the API returns is
+  still in metres.
+
+### Docs
+
+- `healthConnectBackgroundRead` was documented as needed for any read with
+  the app closed, whose reads otherwise "return empty". With tracking on, the
+  tracking service makes it unnecessary - see Fixed; it covers a Health
+  Connect only app, tracking stopped, and a service the phone's maker killed.
+- The README recommended `gapRecovery: 'today_capped'` for an app that pays
+  per step. It hands the new day, as recovered steps nobody judged, whatever
+  belonged to a closed day - an overnight gap's earlier share, and since
+  2.3.7 a late batch, which no fraud check sees there. It recommends
+  `'split'` now, the one policy that judges every step the tracker saw on
+  the day it was taken, and `'drop'` where a paid day must never change.
+
 ## [2.3.7] - 2026-09-30
 
 Fixes from a review of 2.3.6.
@@ -1403,6 +1477,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.4.0
 [2.3.7]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.7
 [2.3.6]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.6
 [2.3.5]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.5

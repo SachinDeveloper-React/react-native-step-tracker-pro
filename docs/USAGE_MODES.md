@@ -209,7 +209,9 @@ await StepTracker.initialize({
   healthConnectEnabled: true,          // default
   healthConnectReadEnabled: true,      // default
   healthConnectWriteEnabled: true,     // default; false to read without mirroring
-  healthConnectBackgroundRead: true,   // so the service sees a watch sync with the app closed
+  // The tracking service already lets Health Connect be read with the app
+  // closed; add healthConnectBackgroundRead: true only for reads while it is
+  // down - on phones whose maker kills it often.
   privacyPolicyUrl: 'https://example.com/privacy',   // required
 });
 

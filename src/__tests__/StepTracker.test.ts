@@ -125,6 +125,7 @@ const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
   [{ sex: 'other' as 'unspecified' }, /sex/],
   [{ dailyGoal: Number.NaN }, /dailyGoal/],
   [{ notificationLockScreen: 'hidden' as 'private' }, /notificationLockScreen/],
+  [{ notificationDistanceUnit: 'miles' as 'mi' }, /notificationDistanceUnit/],
   [{ healthConnectReadTypes: [] }, /healthConnectReadTypes/],
   [
     { healthConnectReadTypes: ['steps', 'heartRate' as 'steps'] },

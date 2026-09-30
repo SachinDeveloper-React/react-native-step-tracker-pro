@@ -11,7 +11,7 @@ do when they say no. Which of these apply depends on your
 | 3 | `FOREGROUND_SERVICE_HEALTH` | install-time (Android 14+) | automatic | — | automatic | nothing to do |
 | 4 | Health Connect read set | Health Connect sheet | — | required | required for merge | `enableHealthConnect()` |
 | 5 | Health Connect write set | Health Connect sheet | — | — | optional | `enableHealthConnect()` |
-| 6 | `READ_HEALTH_DATA_IN_BACKGROUND` | same sheet | — | optional | recommended | config flag |
+| 6 | `READ_HEALTH_DATA_IN_BACKGROUND` | same sheet | — | optional | optional | config flag |
 | 7 | `READ_HEALTH_DATA_HISTORY` | same sheet | — | optional | optional | config flag |
 | 7a | `READ_ACTIVE_CALORIES_BURNED` | same sheet | — | optional | optional | config flag |
 | 8 | Battery optimisation exemption | system dialog / settings | recommended on OEM phones | — | recommended on OEM phones | `requestBackgroundPermissions()` |
@@ -339,23 +339,30 @@ resets the counter.
 
 ### Background reads (6)
 
-Android 14+ refuses Health Connect reads from an app with no visible activity
-unless it holds `READ_HEALTH_DATA_IN_BACKGROUND`. The foreground service
-counts as background here. Without it the package does not try those reads -
-a refused read is not an answer - and reports Health Connect as not
-consulted:
+Health Connect refuses reads from an app in the background - no activity on
+screen and no foreground service running - unless it holds
+`READ_HEALTH_DATA_IN_BACKGROUND`. While tracking is on, the tracking service
+is a foreground service, so none of this applies: with the app closed, the
+notification follows a watch that syncs mid-walk, the sync worker checks
+whether a wearable owns a day before writing it, and snapshots and `full`
+uploads read Health Connect. (2.3.7 took the service for the background and
+skipped all of that.) It does apply with tracking off - a Health Connect only
+app, or after `stopTracking()` - and while the phone's maker has the service
+killed. Then, without the grant, the package does not try those reads - a
+refused read is not an answer - and reports Health Connect as not consulted:
 
-- the service's throttled refresh of today's sources is skipped, so the
-  notification and `stepsChanged` only pick up a watch sync the next time the
-  app is opened;
 - the sync worker cannot check whether a wearable owns a day before writing it;
-- a snapshot or `full` upload made in the background carries
-  `sourcesStatus: 'not_consulted'`, and raw records in a snapshot
-  `status: 'not_granted'`.
+- a snapshot or `full` upload carries `sourcesStatus: 'not_consulted'`, and
+  raw records in a snapshot `status: 'not_granted'`;
+- `readHealthConnectSteps()`, `getHealthConnectRecords()` and
+  `getHealthConnectChanges()` reject with `E_HEALTH_CONNECT_DENIED` - Health
+  Connect's refusal, passed on.
 
-Set `healthConnectBackgroundRead: true` in Mode C. Play scrutinises this one:
-say in the declaration that it keeps a live step count in sync with a paired
-watch while the app is closed.
+Set `healthConnectBackgroundRead: true` in Mode B for reads with the app
+closed - a widget, a background sync - and in Mode C on phones whose maker
+kills the service often. Play scrutinises this one: say in the declaration
+that it keeps a step count in sync with a paired watch while the app is
+closed.
 
 ### History (7)
 

@@ -13,6 +13,7 @@ export const DEFAULT_CONFIG: Required<
     | 'historyRetentionDays'
     | 'notificationActions'
     | 'notificationLockScreen'
+    | 'notificationDistanceUnit'
     | 'notificationThrottleMs'
     | 'eventThrottleMs'
     | 'persistEveryNSteps'
@@ -49,6 +50,7 @@ export const DEFAULT_CONFIG: Required<
   historyRetentionDays: 35,
   notificationActions: true,
   notificationLockScreen: 'private',
+  notificationDistanceUnit: 'km',
   notificationThrottleMs: 1000,
   eventThrottleMs: 500,
   persistEveryNSteps: 10,

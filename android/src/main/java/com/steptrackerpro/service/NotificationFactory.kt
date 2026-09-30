@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import com.steptrackerpro.R
+import com.steptrackerpro.core.DistanceUnit
 import com.steptrackerpro.core.MetricsCalculator
 import com.steptrackerpro.core.StepSnapshot
 import com.steptrackerpro.core.StepTrackerConfig
@@ -52,19 +53,25 @@ class NotificationFactory(private val context: Context) {
         val paused = snapshot.state == TrackingState.PAUSED
         val percent = metrics.goalPercent(snapshot.steps, config.dailyGoal)
         val steps = formatCount(snapshot.steps)
-        // In the phone's own number format, like the counts: 2,50 km in Germany.
-        val km = String.format(Locale.getDefault(), "%.2f", snapshot.distance / 1000.0)
+        // In the unit config picks, and the phone's own number format like
+        // the counts: 2,50 km in Germany, 1.55 mi in the US under `auto`.
+        val miles = DistanceUnit.miles(config.notificationDistanceUnit, Locale.getDefault().country)
+        val distance = String.format(Locale.getDefault(), "%.2f", DistanceUnit.convert(snapshot.distance, miles))
+        val unit = context.getString(if (miles) R.string.stp_unit_mi else R.string.stp_unit_km)
         val kcal = formatCount(snapshot.calories.toInt())
 
         // Every word shown comes from a resource an app can translate or
         // reword by defining it in its own res/values*/strings.xml.
-        val title = config.notificationTitle?.applyTokens(steps, km, kcal, percent, config)
+        val title = config.notificationTitle?.applyTokens(steps, distance, unit, kcal, percent, config)
             ?: context.resources.getQuantityString(R.plurals.stp_notification_title, snapshot.steps, steps)
         val text = when {
             paused -> context.getString(R.string.stp_paused_text)
             config.notificationText != null ->
-                config.notificationText.applyTokens(steps, km, kcal, percent, config)
-            else -> context.getString(R.string.stp_notification_text, km, kcal, percent)
+                config.notificationText.applyTokens(steps, distance, unit, kcal, percent, config)
+            else -> context.getString(
+                if (miles) R.string.stp_notification_text_miles else R.string.stp_notification_text,
+                distance, kcal, percent
+            )
         }
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
@@ -185,13 +192,15 @@ class NotificationFactory(private val context: Context) {
 
     private fun String.applyTokens(
         steps: String,
-        km: String,
+        distance: String,
+        unit: String,
         kcal: String,
         percent: Int,
         config: StepTrackerConfig
     ): String = this
         .replace("{steps}", steps)
-        .replace("{distance}", km)
+        .replace("{distance}", distance)
+        .replace("{unit}", unit)
         .replace("{calories}", kcal)
         .replace("{percent}", percent.toString())
         .replace("{goal}", formatCount(config.dailyGoal))
@@ -209,12 +218,18 @@ class NotificationFactory(private val context: Context) {
         /**
          * NumberFormat is not thread safe, and notifications are now built from
          * both the sensor thread and the main thread. One instance per thread
-         * is cheaper than locking on a path that runs once a second.
+         * is cheaper than locking on a path that runs once a second. Kept with
+         * the locale it formats for: the service's thread outlives a change
+         * of the phone's language, and the counts would otherwise keep the
+         * old format beside a distance in the new one.
          */
-        private val numberFormat: ThreadLocal<NumberFormat> =
-            ThreadLocal.withInitial { NumberFormat.getIntegerInstance(Locale.getDefault()) }
+        private val numberFormat = ThreadLocal<Pair<Locale, NumberFormat>>()
 
-        private fun formatCount(value: Int): String =
-            numberFormat.get()?.format(value) ?: value.toString()
+        private fun formatCount(value: Int): String {
+            val locale = Locale.getDefault()
+            val format = numberFormat.get()?.takeIf { it.first == locale }?.second
+                ?: NumberFormat.getIntegerInstance(locale).also { numberFormat.set(locale to it) }
+            return format.format(value)
+        }
     }
 }

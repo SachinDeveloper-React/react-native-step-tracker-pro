@@ -94,8 +94,12 @@ numbers came unmodified from a genuine device. See
   a proof of walking.
 - `resetToday()` and `clearHistory()` are part of the public API.
 - Steps recovered after a dead period across midnight are **apportioned by
-  time** (`gapRecovery: 'split'`), which is an estimate. Use `'drop'` where an
-  over-credit costs money.
+  time** (`gapRecovery: 'split'`), which is an estimate, reported as
+  `recoveredSteps`, and can grow a day already settled. Use `'drop'` where a
+  settled day must never change: it credits nothing it cannot place on the
+  current day. `'today'` and `'today_capped'`
+  hand the current day, unjudged, whatever belonged to a closed day - a
+  gap's earlier share, or steps the phone delivered late across midnight.
 - Under `'auto'`, a source the user pins is trusted outright.
 - Steps typed into Health Connect by hand are read like any other record.
   Set `healthConnectIgnoreManualEntries` to keep them out of the resolved

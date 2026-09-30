@@ -347,8 +347,10 @@ follows the same rules as every other Health Connect read — no provider, no
 grant or `stepSource: 'device'` leaves it empty, never an error — and
 `sourcesStatus` says which: `'read'`, `'not_consulted'`, or `'timed_out'` /
 `'failed'` when the read did not finish (2.3). A snapshot taken in the
-background without `READ_HEALTH_DATA_IN_BACKGROUND` is `'not_consulted'`
-(2.3.7): Health Connect refuses that read, so it is not made. The snapshot reads
+background - no activity on screen and no foreground service, so with
+tracking off - without `READ_HEALTH_DATA_IN_BACKGROUND` is `'not_consulted'`
+(2.3.7): Health Connect refuses that read, so it is not made. With tracking
+on, the tracking service is a foreground service, and the read is made (2.4). The snapshot reads
 sources fresh, with 15 seconds to do it, and signs the status with them, so a
 server never mistakes a read that failed for a day with no watch; and each
 source carries `manualSteps`, `recordingMethods` and `trustedWearable`.
@@ -386,8 +388,10 @@ A server-side rule set that fits this shape:
 - never re-bucket a day already paid: a later snapshot for the same `date`
   with a higher `deviceSteps` is a `historyBackfilled` recovery, or steps
   taken before midnight that the phone delivered after it, and whether to
-  honour it is policy, not arithmetic — `gapRecovery: 'today_capped'` or
-  `'drop'` stops it happening at all. Settling yesterday a few minutes after
+  honour it is policy, not arithmetic — `gapRecovery: 'drop'` stops it
+  happening at all, crediting nothing it cannot place on the current day
+  (`'today_capped'` stops it too, but hands the current day those steps
+  unjudged). Settling yesterday a few minutes after
   midnight on a phone that slept through it is when late steps are likeliest;
   a snapshot taken then already waits for them;
 - use `health.recoveryCount` and `aggressiveOem` to explain a low day, not
@@ -508,7 +512,9 @@ read - the steps are added to it afterwards and announced with
 `historyBackfilled` (`reason: 'late'`), under the default `gapRecovery:
 'split'`. The policies that never change a closed day decide differently:
 `'today'` and `'today_capped'` give them to the new day as recovered steps,
-and `'drop'` discards them.
+unjudged - under `'today_capped'` within `gapRecoveryMaxSteps`, the batch
+counting as one recovery (2.4) - and `'drop'` discards them. `'split'` is
+the one policy that judges them.
 
 **`mode: 'exclude'`** also takes `suspectSteps` out of every number this
 package shows or sends: `getTodaySteps()`, `stepsChanged`, the notification,
@@ -1029,7 +1035,13 @@ request starts from a clean sheet rather than being sent to settings.
 ISO-8601 instants with a zone, start before end, as for
 [`getHealthConnectRecords()`](#gethealthconnectrecordsstartiso-endiso-options-promisehealthconnectrecordlist).
 Aggregated per day across every source Health Connect knows about, so it
-includes a paired watch, not just your app.
+includes a paired watch, not just your app. When Health Connect cannot be
+read it rejects, like `getHealthConnectRecords()`: `E_HEALTH_CONNECT_UNAVAILABLE`
+without a provider, `E_HEALTH_CONNECT_DENIED` without `READ_STEPS` or when
+Health Connect refuses the read - from the background, with no activity on
+screen and no foreground service (tracking off), without
+`READ_HEALTH_DATA_IN_BACKGROUND` (2.4). It used to resolve with no records,
+which passed for a window nobody walked in.
 
 ```ts
 { totalSteps: 82310, records: [ { date, steps, distance, calories, synced } ] }
@@ -1073,9 +1085,12 @@ as stored - for a server that wants the evidence rather than a total.
 ISO-8601 instants with a zone, start before end: `Z` or an offset such as
 `+05:30`. Both go to native as UTC (2.3.6), the only form Android 8–13
 parses; before, an offset failed there with `E_UNKNOWN`. A time with no zone names no
-instant and rejects with `E_INVALID_CONFIG`. Unlike the aggregated reads
+instant and rejects with `E_INVALID_CONFIG`. Unlike the resolved reads
 it does not fall back quietly: it rejects with
-`E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED`.
+`E_HEALTH_CONNECT_UNAVAILABLE` or `E_HEALTH_CONNECT_DENIED` - a read grant
+missing, or Health Connect refusing a read from the background: no activity on
+screen and no foreground service (tracking off), without
+`READ_HEALTH_DATA_IN_BACKGROUND`.
 
 **Distance records** (2.1). A server checking distance against steps per
 interval needs both. `{ recordTypes: ['steps', 'distance'] }` returns them in
@@ -1241,9 +1256,10 @@ Every app that published steps over the range, with what each contributed.
 
 An empty `sources` under `healthConnect: 'timed_out'` or `'failed'` is not
 "no other apps": call again. `useHealthConnect` keeps its last list then. A
-failed read is never cached (2.3.7), so the next call reads afresh. In the background
-without `READ_HEALTH_DATA_IN_BACKGROUND` the answer is `'not_consulted'`, as it
-is for range stats and the full upload.
+failed read is never cached (2.3.7), so the next call reads afresh. In the background -
+no activity on screen and tracking off, the tracking service being a foreground
+service, which Health Connect lets read - without `READ_HEALTH_DATA_IN_BACKGROUND`
+the answer is `'not_consulted'`, as it is for range stats and the full upload.
 
 `lateWrittenSteps` counts steps from records the writing app last modified
 more than a day after they ended — a history pushed into Health Connect after
@@ -1619,7 +1635,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `monthlyGoal` | `dailyGoal × 30` | |
 | `calorieCoefficient` | 0.57 | kcal per kg per km |
 | `historyRetentionDays` | 35 | set 31 for a one-month window |
-| `notificationTitle` / `notificationText` | built-in | tokens: `{steps}` `{distance}` `{calories}` `{percent}` `{goal}`. The built-in words are string resources (2.3.7) your app can translate or reword by defining them in its own `res/values*/strings.xml`: `stp_notification_title` (plurals, "%s steps"), `stp_notification_goal` ("%s goal"), `stp_notification_text`, `stp_paused_text`, `stp_locked_text`, `stp_channel_name`, `stp_action_pause`, `stp_action_resume`, `stp_action_open`. Counts and distance use the phone's number format |
+| `notificationTitle` / `notificationText` | built-in | tokens: `{steps}` `{distance}` `{unit}` `{calories}` `{percent}` `{goal}`; `{distance}` is in `notificationDistanceUnit` and `{unit}` is its label (2.4). The built-in words are string resources (2.3.7) your app can translate or reword by defining them in its own `res/values*/strings.xml`: `stp_notification_title` (plurals, "%s steps"), `stp_notification_goal` ("%s goal"), `stp_notification_text` and `stp_notification_text_miles`, `stp_unit_km`, `stp_unit_mi`, `stp_paused_text`, `stp_locked_text`, `stp_channel_name`, `stp_action_pause`, `stp_action_resume`, `stp_action_open`. Counts and distance use the phone's number format |
+| `notificationDistanceUnit` | `'km'` | `'km'` \| `'mi'` \| `'auto'` - the notification's distance unit (2.4). `'auto'` shows miles on a phone set up for the United States, the United Kingdom, Liberia or Myanmar, kilometres elsewhere. Only the notification: every distance this package returns is in metres |
 | `notificationIcon` | bundled | drawable name in your app. Found by name, so with `shrinkResources` keep it - see [INSTALLATION.md](INSTALLATION.md#5-custom-notification-icon-recommended); a name that is not found logs a warning and uses the default |
 | `notificationChannelName` | "Step tracking" | shown in Android settings |
 | `notificationActions` | `true` | Pause/Resume/Open buttons |
@@ -1631,7 +1648,7 @@ than replaying missed events. `useStepTracker` already does this.
 | `healthConnectSyncIntervalMinutes` | 30 | clamped to WorkManager's 15-minute floor; 0 disables |
 | `healthConnectReadEnabled` | `true` | set `false` to mirror your own count without ever reading; `READ_*` is then never requested |
 | `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own; `WRITE_*` is then never requested |
-| `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`; without it background reads return empty |
+| `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`, for reads with no activity on screen and tracking off - the tracking service is a foreground service, which Health Connect lets read. Without it those reads are not made; see [PERMISSIONS.md](PERMISSIONS.md#background-reads-6) |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
 | `healthConnectReadActiveCalories` | `false` | also read active calories per source (`StepSource.activeCalories`); one more permission to declare |
 | `healthConnectReadTypes` | `['steps', 'distance', 'totalCalories']` | which record types reads cover, each one read permission to declare; `'steps'` is required. `['steps']` asks for `READ_STEPS` alone, and a day answered from Health Connect then derives distance and calories from the step count. Left at the default, a type the manifest does not declare is simply not read; a type you list yourself must be declared, or requests reject with `E_HEALTH_CONNECT_NOT_DECLARED`. See [PERMISSIONS.md](PERMISSIONS.md) |
@@ -1647,8 +1664,8 @@ than replaying missed events. `useStepTracker` already does this.
 | `remoteSyncAllowHttp` | `false` | permit a plain `http://` endpoint, for a development server |
 | `remoteSyncPayload` | `'totals'` | `'totals'` \| `'full'` — what each uploaded record carries; see [Remote sync](#remote-sync) |
 | `autoStartOnBoot` | `true` | |
-| `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, `'today_capped'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery). For an app where a closed day must never change, `'today_capped'` or `'drop'` |
-| `gapRecoveryMaxSteps` | 20000 | under `'today_capped'`, the most one recovery may credit to the active day; the rest is dropped |
+| `gapRecovery` | `'split'` | what to do with steps counted while the service was dead across midnight: `'split'` by time, `'today'`, `'today_capped'`, or `'drop'` — see [ARCHITECTURE.md](ARCHITECTURE.md#gap-recovery). An app that pays per step keeps `'split'`, the one policy that judges every step the tracker saw on the day it was taken; where a paid day must never change, `'drop'`. `'today'` and `'today_capped'` hand the current day, unjudged, what belonged to a closed day |
+| `gapRecoveryMaxSteps` | 20000 | under `'today_capped'`, the most one recovery may credit to the active day - a late batch from a closed day counting as one (2.4); the rest is dropped |
 | `watchdogEnabled` | `true` | 15-minute WorkManager job that restarts a killed service (needs the battery exemption on Android 12+) |
 | `accelerometerFallback` | `true` | count over the accelerometer on phones with neither step sensor — see [ARCHITECTURE.md](ARCHITECTURE.md#the-accelerometer-fallback) |
 | `accelerometerWakeLock` | `true` | hold a partial wake lock while sampling a non-wake-up accelerometer, so counting survives the screen going off |

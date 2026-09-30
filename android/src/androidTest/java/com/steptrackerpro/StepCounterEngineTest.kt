@@ -541,6 +541,27 @@ class StepCounterEngineTest {
     }
 
     @Test
+    fun lateStepsUnderTodayCappedShareOneCap() {
+        engine.gapRecovery = StepCounterEngine.GapRecovery.TODAY_CAPPED
+        engine.gapRecoveryMaxSteps = 30
+        lateEvening()
+        engine.rollIfNeeded()
+        // The gap since 23:40, closed at 23:50: a recovery of its own, within the cap.
+        engine.onCounterSample(5010f, yesterdayAt(23, 50))
+        assertEquals(10, engine.snapshot().steps)
+        // The late samples after it are one batch: 30 between them, the rest dropped.
+        engine.onCounterSample(5030f, yesterdayAt(23, 53))
+        engine.onCounterSample(5060f, yesterdayAt(23, 56))
+        engine.onCounterSample(5080f, yesterdayAt(23, 59))
+        val today = engine.snapshot()
+        assertEquals(40, today.steps)
+        assertEquals(40, today.recoveredSteps)
+        assertTrue(engine.takeLateSteps().isEmpty())
+        // A step taken after midnight is today's, as ever.
+        assertEquals(45, engine.onCounterSample(5085f, bootAt(DateKeys.today(), 0) + 60_000L)!!.steps)
+    }
+
+    @Test
     fun aLateDetectorStepIsOwedToTheDayItWasTaken() {
         lateEvening()
         engine.rollIfNeeded()

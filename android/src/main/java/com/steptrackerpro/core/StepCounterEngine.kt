@@ -133,6 +133,14 @@ class StepCounterEngine(
     @Volatile
     var gapRecoveryMaxSteps: Int = DEFAULT_GAP_RECOVERY_MAX_STEPS
 
+    /**
+     * What late steps - taken on a day that had closed - have handed the
+     * active day so far. Under [GapRecovery.TODAY_CAPPED] a late batch is
+     * one recovery however many samples it arrives in, so together they
+     * take no more than [gapRecoveryMaxSteps]. Zeroed when a day closes.
+     */
+    private var lateCredited: Int = 0
+
     enum class GapRecovery(val jsValue: String) {
         /** Spread across the days in the gap in proportion to time. Default. */
         SPLIT("split"),
@@ -378,7 +386,9 @@ class StepCounterEngine(
                     owed = owedWith(closedDay, observed)
                 }
                 LateHandling.ACTIVE_DAY -> {
-                    recoveredNow += observed
+                    val credited = activeDayShare(observed)
+                    kept = total - (observed - credited)
+                    recoveredNow += credited
                     observed = 0
                 }
                 LateHandling.DROPPED -> {
@@ -453,7 +463,8 @@ class StepCounterEngine(
                     owed = owedWith(closedDay, steps)
                 }
                 LateHandling.ACTIVE_DAY -> {
-                    recoveredNow = steps
+                    counted = activeDayShare(steps)
+                    recoveredNow = counted
                     observed = 0
                 }
                 LateHandling.DROPPED -> {
@@ -502,6 +513,18 @@ class StepCounterEngine(
         GapRecovery.SPLIT -> LateHandling.OWN_DAY
         GapRecovery.TODAY, GapRecovery.TODAY_CAPPED -> LateHandling.ACTIVE_DAY
         GapRecovery.DROP -> LateHandling.DROPPED
+    }
+
+    /**
+     * How many of [steps] from a closed day the active day takes: all of them
+     * under `today`, and under `today_capped` what is left of the cap the
+     * whole batch shares. The rest is dropped, not moved.
+     */
+    private fun activeDayShare(steps: Int): Int {
+        if (gapRecovery != GapRecovery.TODAY_CAPPED) return steps
+        val share = steps.coerceIn(0, (gapRecoveryMaxSteps - lateCredited).coerceAtLeast(0))
+        lateCredited += share
+        return share
     }
 
     /** What is owed to closed days once [day] is owed [steps] more. */
@@ -569,6 +592,7 @@ class StepCounterEngine(
         // rather than wiped along with today.
         rollDateIfNeeded()
         pendingCommit = 0
+        lateCredited = 0
         state.coverageStartAt = 0L
         state.writeCounterState(
             bootId = bootIdProvider(),
@@ -635,6 +659,7 @@ class StepCounterEngine(
             active, state.stepsToday, recoveredSteps = state.recoveredToday
         )
         pendingCommit = 0
+        lateCredited = 0
         // A new day is covered from its start: with a hardware counter, gap
         // recovery reaches back through any dead time to midnight.
         state.coverageStartAt = 0L

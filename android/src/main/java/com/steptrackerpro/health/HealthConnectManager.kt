@@ -462,10 +462,26 @@ class HealthConnectManager(
     // ---- reads -----------------------------------------------------------
 
     /**
-     * Daily totals aggregated across Health Connect origins, or none when
-     * they cannot be read - the quiet form behind `readHealthConnectSteps()`.
-     * Everything that has to tell a failed read from an empty one uses
-     * [aggregateDailySteps].
+     * Whether Health Connect can be read right now. It refuses a read from an
+     * app in the background - no activity on screen and no foreground service
+     * running - unless the app holds `READ_HEALTH_DATA_IN_BACKGROUND`. While
+     * the tracking service runs, it is a foreground service, so that is not
+     * the case. The resolved reads check this instead of
+     * trying: a refused read is not one that found nothing, and is reported
+     * as Health Connect not consulted.
+     */
+    suspend fun canReadNow(): Boolean {
+        val info = android.app.ActivityManager.RunningAppProcessInfo()
+        android.app.ActivityManager.getMyMemoryState(info)
+        if (inForegroundForReads(info.importance)) return true
+        val background = PERMISSION_BACKGROUND_READ ?: return false
+        return grantedPermissions().contains(background)
+    }
+
+    /**
+     * Daily totals aggregated across Health Connect origins. Throws when
+     * they cannot be read: an empty list means nobody wrote steps, never
+     * that the read went wrong.
      *
      * @param origins restricts the aggregate to these packages. Empty means
      *   every origin, which is only correct for a display that is not also
@@ -475,38 +491,6 @@ class HealthConnectManager(
         start: Instant,
         end: Instant,
         origins: Set<String> = emptySet()
-    ): List<DayTotals> = try {
-        aggregateDailySteps(start, end, origins)
-    } catch (cancelled: kotlinx.coroutines.CancellationException) {
-        throw cancelled
-    } catch (_: Exception) {
-        emptyList()
-    }
-
-    /**
-     * Whether Health Connect can be read right now. It refuses a read from an
-     * app with no activity on screen - the foreground service counts as
-     * background - unless the app holds `READ_HEALTH_DATA_IN_BACKGROUND`.
-     * Callers check this instead of trying: a refused read is not one that
-     * found nothing, and is reported as Health Connect not consulted.
-     */
-    suspend fun canReadNow(): Boolean {
-        if (appInForeground()) return true
-        val background = PERMISSION_BACKGROUND_READ ?: return false
-        return grantedPermissions().contains(background)
-    }
-
-    private fun appInForeground(): Boolean {
-        val info = android.app.ActivityManager.RunningAppProcessInfo()
-        android.app.ActivityManager.getMyMemoryState(info)
-        return info.importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
-    }
-
-    /** [readDailySteps], throwing when the read fails. */
-    private suspend fun aggregateDailySteps(
-        start: Instant,
-        end: Instant,
-        origins: Set<String>
     ): List<DayTotals> {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val zone = ZoneId.systemDefault()
@@ -817,7 +801,7 @@ class HealthConnectManager(
         val distanceRead = ReadType.DISTANCE in grantedReadTypes()
         val out = HashMap<String, ArrayList<StepSource>>()
         for ((pkg, kind) in kinds) {
-            for (day in aggregateDailySteps(start, end, setOf(pkg))) {
+            for (day in readDailySteps(start, end, setOf(pkg))) {
                 if (day.steps <= 0) continue
                 out.getOrPut(day.date) { ArrayList() }.add(
                     StepSource(
@@ -1412,6 +1396,19 @@ class HealthConnectManager(
                 ReadOutcome.COMPLETE -> null
                 else -> oldestReadDay ?: lastDay
             }
+
+        /**
+         * Whether Health Connect takes a process of this importance to be in
+         * the foreground, where reads need no background grant. It asks
+         * AppOps whether the app's uid is in the foreground, which holds up to
+         * a foreground service: an activity on screen, or a foreground
+         * service running - the tracking service is one. A process that is
+         * only visible, perceptible or cached is in the background. Treating
+         * the service as background, as 2.3.7 did, skipped reads Health
+         * Connect would have answered.
+         */
+        fun inForegroundForReads(importance: Int): Boolean =
+            importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND_SERVICE
 
         /**
          * What a set of grants lets this package do. Pure, so the partial
