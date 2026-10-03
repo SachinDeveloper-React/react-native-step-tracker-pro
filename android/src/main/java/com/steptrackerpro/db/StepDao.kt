@@ -256,6 +256,68 @@ interface StepMinuteDao {
 }
 
 @Dao
+interface MirrorMinuteDao {
+
+    @Query("SELECT * FROM mirror_minute WHERE minuteStart = :minuteStart LIMIT 1")
+    suspend fun find(minuteStart: Long): MirrorMinuteEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun put(entity: MirrorMinuteEntity)
+
+    /**
+     * Adds steps on top of whatever each minute already holds, keeping what
+     * was written for it. Read-then-write in one transaction, like
+     * [StepMinuteDao.addAll].
+     */
+    @Transaction
+    suspend fun addAll(rows: List<MirrorMinuteEntity>) {
+        for (row in rows) {
+            val existing = find(row.minuteStart)
+            put(if (existing == null) row else existing.copy(steps = existing.steps + row.steps))
+        }
+    }
+
+    @Query("SELECT * FROM mirror_minute WHERE date = :date ORDER BY minuteStart ASC")
+    suspend fun findDate(date: String): List<MirrorMinuteEntity>
+
+    @Query("SELECT * FROM mirror_minute WHERE date BETWEEN :start AND :end AND written > 0 ORDER BY minuteStart ASC")
+    suspend fun findWritten(start: String, end: String): List<MirrorMinuteEntity>
+
+    @Query("UPDATE mirror_minute SET written = :written WHERE minuteStart = :minuteStart")
+    suspend fun setWritten(minuteStart: Long, written: Int)
+
+    /** What Health Connect holds for these minutes now, after a sync's writes and deletes landed. */
+    @Transaction
+    suspend fun setWrittenAll(written: Map<Long, Int>) {
+        for ((minute, steps) in written) setWritten(minute, steps)
+    }
+
+    /** `resetToday()`: the counted steps go, what Health Connect holds is kept until it is deleted. */
+    @Query("UPDATE mirror_minute SET steps = 0 WHERE date = :date")
+    suspend fun clearSteps(date: String)
+
+    /** Health Connect no longer holds a record for any minute of these days. */
+    @Query("UPDATE mirror_minute SET written = 0 WHERE date IN (:dates)")
+    suspend fun forgetWritten(dates: List<String>)
+
+    /** Days between the two keys this table holds any minute of. */
+    @Query("SELECT DISTINCT date FROM mirror_minute WHERE date BETWEEN :start AND :end")
+    suspend fun datesBetween(start: String, end: String): List<String>
+
+    /** A row with nothing counted and nothing written says nothing. */
+    @Query("DELETE FROM mirror_minute WHERE steps = 0 AND written = 0")
+    suspend fun deleteEmpty(): Int
+
+    /** Older than [cutoff] and with no history row left - a day kept for its sync keeps its minutes. */
+    @Query("DELETE FROM mirror_minute WHERE date < :cutoff AND date NOT IN (SELECT date FROM step_history)")
+    suspend fun deleteOrphansOlderThan(cutoff: String): Int
+
+    /** `clearHistory()`: what was counted goes, what Health Connect holds stays known until it is deleted. */
+    @Query("UPDATE mirror_minute SET steps = 0 WHERE date < :date")
+    suspend fun clearStepsBefore(date: String)
+}
+
+@Dao
 interface IntegrityDao {
 
     @Query("SELECT * FROM integrity_day WHERE date = :date LIMIT 1")

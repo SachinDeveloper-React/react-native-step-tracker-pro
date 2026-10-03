@@ -136,6 +136,18 @@ const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
     { healthConnectReadTypes: 'steps' as unknown as Array<'steps'> },
     /healthConnectReadTypes/,
   ],
+  [
+    { healthConnectReadVitals: ['heartRate', 'steps' as 'heartRate'] },
+    /healthConnectReadVitals/,
+  ],
+  [
+    { healthConnectReadVitals: 'heartRate' as unknown as Array<'heartRate'> },
+    /healthConnectReadVitals/,
+  ],
+  [
+    { healthConnectWriteGranularity: 'hour' as 'minute' },
+    /healthConnectWriteGranularity/,
+  ],
 ];
 
 describe('initialize()', () => {
@@ -481,6 +493,30 @@ describe('date validation', () => {
     ]);
   });
 
+  it('passes healthConnectReadVitals through, none by default, empty allowed', async () => {
+    await StepTracker.initialize({ healthConnectReadVitals: ['heartRate'] });
+    await StepTracker.updateConfig({ healthConnectReadVitals: [] });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      healthConnectReadVitals: ['heartRate'],
+    });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      healthConnectReadVitals: [],
+    });
+    expect(DEFAULT_CONFIG.healthConnectReadVitals).toEqual([]);
+  });
+
+  it('passes healthConnectWriteGranularity through, per day by default', async () => {
+    await StepTracker.initialize({ healthConnectWriteGranularity: 'minute' });
+    await StepTracker.updateConfig({ healthConnectWriteGranularity: 'day' });
+    expect(native.calledWith('initialize')[0]![0]).toEqual({
+      healthConnectWriteGranularity: 'minute',
+    });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      healthConnectWriteGranularity: 'day',
+    });
+    expect(DEFAULT_CONFIG.healthConnectWriteGranularity).toBe('day');
+  });
+
   it('passes motionSampling through as one object', async () => {
     await StepTracker.initialize({
       motionSampling: { enabled: true, windowSeconds: 15 },
@@ -737,6 +773,109 @@ describe('date validation', () => {
       [{ recordTypes: ['steps'] }],
       [{ recordTypes: ['steps', 'distance'] }],
     ]);
+  });
+
+  it('vitals reads validate their inputs and send UTC', async () => {
+    await expect(
+      StepTracker.readHealthConnectVitals('2026-09-01', '2026-09-02')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG', message: /with a zone/ });
+    for (const bad of [[], ['steps'], 'heartRate']) {
+      await expect(
+        StepTracker.readHealthConnectVitals(
+          '2026-09-01T00:00:00Z',
+          '2026-09-02T00:00:00Z',
+          {
+            types: bad as never,
+          }
+        )
+      ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG', message: /types/ });
+    }
+    expect(native.calls).toHaveLength(0);
+
+    const heart = {
+      type: 'heartRate',
+      unit: 'bpm',
+      count: 3600,
+      min: 52,
+      max: 148,
+      avg: 88,
+      latest: { time: 1, value: 90, packageName: 'com.fitbit.FitbitMobile' },
+      truncated: false,
+    };
+    native.when('readHealthConnectVitals', {
+      vitals: [heart],
+      notGranted: ['bloodPressure'],
+    });
+    await expect(
+      StepTracker.readHealthConnectVitals(
+        '2026-09-01T00:00:00+05:30',
+        '2026-09-02T00:00:00+05:30',
+        { types: ['heartRate', 'bloodPressure'] }
+      )
+    ).resolves.toEqual({ vitals: [heart], notGranted: ['bloodPressure'] });
+    // Without types the native side reads healthConnectReadVitals.
+    await StepTracker.readHealthConnectVitals(
+      '2026-09-01T00:00:00Z',
+      '2026-09-02T00:00:00Z'
+    );
+    expect(native.calledWith('readHealthConnectVitals')).toEqual([
+      [
+        '2026-08-31T18:30:00.000Z',
+        '2026-09-01T18:30:00.000Z',
+        { types: ['heartRate', 'bloodPressure'] },
+      ],
+      ['2026-09-01T00:00:00.000Z', '2026-09-02T00:00:00.000Z', {}],
+    ]);
+  });
+
+  it('deleting mirrored days validates the range and passes it through', async () => {
+    await expect(
+      StepTracker.deleteHealthConnectData('2026-09-02', '2026-09-01')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    await expect(
+      StepTracker.deleteHealthConnectData('2026-9-1', '2026-09-02')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG' });
+    // Ten years at most: past that it is thousands of deletes.
+    await expect(
+      StepTracker.deleteHealthConnectData('2010-01-01', '2026-09-02')
+    ).rejects.toMatchObject({ code: 'E_INVALID_CONFIG', message: /3660 days/ });
+    expect(native.calls).toHaveLength(0);
+
+    native.when('deleteHealthConnectData', {
+      startDate: '2026-09-01',
+      endDate: '2026-09-02',
+      recordTypes: ['steps', 'distance'],
+    });
+    await expect(
+      StepTracker.deleteHealthConnectData('2026-09-01', '2026-09-02')
+    ).resolves.toMatchObject({ recordTypes: ['steps', 'distance'] });
+    expect(native.calledWith('deleteHealthConnectData')).toEqual([
+      ['2026-09-01', '2026-09-02'],
+    ]);
+  });
+
+  it('a read Health Connect refused for quota rejects with when to try again', async () => {
+    native.when(
+      'getHealthConnectRecords',
+      Object.assign(
+        new Error(
+          "Health Connect's read quota is used up; the next call is tried in 30s"
+        ),
+        {
+          code: 'E_HEALTH_CONNECT_RATE_LIMITED',
+          userInfo: { retryAfterMs: 30000, quota: 'read' },
+        }
+      )
+    );
+    const error = await StepTracker.getHealthConnectRecords(
+      '2026-09-01T00:00:00Z',
+      '2026-09-02T00:00:00Z'
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(StepTrackerError);
+    expect(error).toMatchObject({
+      code: 'E_HEALTH_CONNECT_RATE_LIMITED',
+      details: { retryAfterMs: 30000, quota: 'read' },
+    });
   });
 
   it('syncNow() unwraps its results, the queued upload flagged rather than erroring', async () => {
@@ -1236,6 +1375,30 @@ describe('useHealthConnect()', () => {
     expect(native.calledWith('getStepSources')).toHaveLength(2);
     expect(result!.sources).toEqual([watch]);
     expect(result!.hasWearable).toBe(true);
+    await TestRenderer.act(async () => renderer!.unmount());
+  });
+
+  it('keeps the last sources when Health Connect refuses the read for quota', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, canReadSteps: true });
+    let result: UseHealthConnectResult | undefined;
+    function Probe() {
+      result = useHealthConnect({ refreshOnForeground: false });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe));
+    });
+    // Only the days still cached: a partial list, not the week's sources.
+    native.when('getStepSources', {
+      sources: [{ ...watch, steps: 1200 }],
+      hasWearable: true,
+      healthConnect: 'rate_limited',
+    });
+    await TestRenderer.act(async () => {
+      await result!.refresh();
+    });
+    expect(result!.sources).toEqual([watch]);
     await TestRenderer.act(async () => renderer!.unmount());
   });
 

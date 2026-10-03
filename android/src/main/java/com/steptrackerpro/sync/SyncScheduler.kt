@@ -30,7 +30,7 @@ object SyncScheduler {
 
         // The sync worker only ever writes, so an app that reads without
         // mirroring (healthConnectWriteEnabled = false) has nothing for it to
-        // do and does not get a job that wakes up every half hour to say so.
+        // do and does not get a job that wakes up every 15 minutes to say so.
         if (config.healthConnectEnabled && config.healthConnectWriteEnabled &&
             config.healthConnectSyncIntervalMinutes > 0
         ) {
@@ -40,6 +40,11 @@ object SyncScheduler {
                 HealthConnectSyncWorker.NAME,
                 ExistingPeriodicWorkPolicy.UPDATE,
                 PeriodicWorkRequestBuilder<HealthConnectSyncWorker>(interval, TimeUnit.MINUTES)
+                    // Health Connect's guidance for a periodic write: not on a
+                    // battery that is running low. The day's own close and
+                    // syncNow() still write at once; only this waits, and the
+                    // next run writes everything it skipped.
+                    .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
                     .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 5, TimeUnit.MINUTES)
                     .build()
             )

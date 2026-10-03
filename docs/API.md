@@ -16,10 +16,15 @@ try {
 Codes: `E_UNSUPPORTED_PLATFORM`, `E_NO_SENSOR`, `E_NOT_INITIALIZED`,
 `E_PERMISSION_DENIED`, `E_SERVICE_START_FAILED`, `E_HEALTH_CONNECT_UNAVAILABLE`,
 `E_HEALTH_CONNECT_NOT_INSTALLED`, `E_HEALTH_CONNECT_UPDATE_REQUIRED`,
-`E_HEALTH_CONNECT_DENIED`, `E_HEALTH_CONNECT_NOT_DECLARED`, `E_INTEGRITY_UNAVAILABLE`,
+`E_HEALTH_CONNECT_DENIED`, `E_HEALTH_CONNECT_NOT_DECLARED`,
+`E_HEALTH_CONNECT_RATE_LIMITED`, `E_INTEGRITY_UNAVAILABLE`,
 `E_INTEGRITY_FAILED`, `E_DATABASE`, `E_INVALID_CONFIG`, `E_NO_ACTIVITY`,
 `E_NOT_TRACKING`, `E_UNKNOWN`. `E_SENSOR_UNAVAILABLE` arrives on the `error`
 event rather than as a rejection.
+
+`E_HEALTH_CONNECT_RATE_LIMITED` (2.5) means Health Connect refused the call
+for quota - see [Rate limits](#rate-limits); `details.retryAfterMs` says when
+the next call is tried.
 
 `E_DATABASE` means the on-device database failed - a full disk, a corrupt
 file (2.3.7); before, those arrived as `E_UNKNOWN`. `E_NOT_INITIALIZED` is never sent:
@@ -206,6 +211,7 @@ calendar year. `rolling` uses the last 7 / 30 / 365 days ending today.
   goal: 70000,
   goalProgress: 0.774,
   healthConnect: 'read',    // | 'not_consulted' | 'timed_out' | 'failed' (2.2.1)
+                            // | 'rate_limited' (2.5)
 }
 ```
 
@@ -214,10 +220,18 @@ by days that have not happened yet.
 
 `healthConnect` says whether other apps' steps went into the days. Under
 `'timed_out'` or `'failed'` the days are this device's own count - not a range
-without a watch - so call again rather than showing them as final. A range
+without a watch - so call again rather than showing them as final. Under
+`'rate_limited'` (2.5) Health Connect refused to be read for quota: the days
+it answered recently keep that answer, the rest are this device's own. A range
 reads up to 35 days of raw records, newest first; a month of a busy watch can
 run past the read's cap, and the days it did not reach are answered with each
 app's daily totals from Health Connect's aggregate API instead (2.2.1).
+
+Each day's answer is kept (2.5): a range reads only the days nothing vouches
+for, so a stats screen refreshing while its user walks re-reads today and not
+the month. A day stays good while Health Connect's changes feed shows nothing
+moved on it - a watch syncing last Tuesday late drops last Tuesday alone - and
+for at most six hours (today: one) in any case.
 
 ### `getStatsForRange(startDate, endDate): Promise<RangeStats>`
 ### `getHistory(startDate, endDate): Promise<DayRecord[]>`
@@ -252,6 +266,7 @@ split out.
       manualSteps: 20000, isWearable: false, trustedWearable: false, ... },
   ],
   sourcesStatus: 'read',      // | 'not_consulted' | 'timed_out' | 'failed' (2.3)
+                              // | 'rate_limited' (2.5)
   resolved: { steps: 8240, kind: 'watch', packageName: 'com.fitbit.FitbitMobile',
               usedExternal: true, merged: false, manualStepsExcluded: 0, ... },
   capabilities: { hasStepCounter: true, hasStepDetector: true,
@@ -304,7 +319,8 @@ const snapshot = await StepTracker.getVerificationSnapshot(date, {
 - `healthConnectRecords` has the `getHealthConnectRecords()` shape plus a
   `status`: `'read'`, or why the records are missing - `'disabled'`,
   `'unavailable'`, `'not_granted'` (a read permission for `recordTypes`),
-  `'timeout'` or `'failed'`. The snapshot is still returned and signed. Unlike
+  `'timeout'`, `'failed'` or `'rate_limited'` (2.5). The snapshot is still
+  returned and signed. Unlike
   `sources`, it does not follow the step-source policy: an explicit ask reads
   whenever the provider and the grant allow.
 - `include` is echoed in a fixed order, so a server can tell "asked for and
@@ -346,7 +362,9 @@ what it should trust in either shape.
 follows the same rules as every other Health Connect read — no provider, no
 grant or `stepSource: 'device'` leaves it empty, never an error — and
 `sourcesStatus` says which: `'read'`, `'not_consulted'`, or `'timed_out'` /
-`'failed'` when the read did not finish (2.3). A snapshot taken in the
+`'failed'` when the read did not finish (2.3), `'rate_limited'` when Health
+Connect refused it for quota (2.5) - `sources` is then empty, never an older
+answer. A snapshot taken in the
 background - no activity on screen and no foreground service, so with
 tracking off - without `READ_HEALTH_DATA_IN_BACKGROUND` is `'not_consulted'`
 (2.3.7): Health Connect refuses that read, so it is not made. With tracking
@@ -800,12 +818,21 @@ fits:
 
 Zeroes today's counter and re-arms goal events. History is untouched. Meant for
 QA builds. With the integrity checks on, today's minute buckets and verdict go
-with the count, and a `reset_today` event is logged.
+with the count, and a `reset_today` event is logged. While mirroring into
+Health Connect, today's mirrored records are deleted too (2.5) - a day with
+no steps has nothing to write over them, so other apps kept reading the old
+count until the next step's sync.
 
 ### `clearHistory(): Promise<boolean>`
 
 Deletes every stored day, motion window, minute bucket and verdict. The
-integrity event log is kept, and records the clear.
+integrity event log is kept, and records the clear. What was mirrored into
+Health Connect stays there - it is the user's record now; remove it with
+[`deleteHealthConnectData()`](#deletehealthconnectdatastartdate-enddate-promisehealthconnectdeleteresult).
+Under per-minute records, the note of which minutes Health Connect holds a
+record for, and what each holds, stays until retention ages it out - it
+describes Health Connect's copy, not the device's history - so that delete
+still finds exactly those records.
 
 ### `pruneHistory(retentionDays?): Promise<number>`
 
@@ -948,6 +975,18 @@ the next foreground until nothing is left. Guidance text per manufacturer:
   undeclaredPermissions: [],   // used by config, absent from your manifest
   denialCount: 0,              // requests after which steps were still refused
   shouldOpenSettings: false,   // steps refused past the sheet's limit
+  // From 2.5:
+  backgroundReadAvailable: true, // the provider can grant READ_HEALTH_DATA_IN_BACKGROUND
+  historyReadAvailable: true,    // ... and READ_HEALTH_DATA_HISTORY
+  grantedVitals: [],             // of healthConnectReadVitals, what the user allowed
+  workProfile: false,            // a work profile: availability is 'not_supported'
+  deviceStepTracking: {          // Health Connect counting this phone's steps itself
+    available: true,             // Android 14 with SDK extension 20+
+    dataOrigin: 'com.android.healthconnect.phone.jd5b…', // its package name here, or null
+  },
+  rateLimit: { readsLimited: false, readsRetryAfterMs: 0, writesLimited: false,
+               writesRetryAfterMs: 0, readsLast15Minutes: 12, readsLast24Hours: 340,
+               writesLast15Minutes: 1, writesLast24Hours: 40 },
 }
 ```
 
@@ -970,6 +1009,28 @@ asks for, so `enableHealthConnect()` asks again for what is missing, and a
 UI can compare `grantedReadTypes` with `healthConnectReadTypes` to offer
 "also allow distance". Before 2.1.1 a single unticked type turned Health
 Connect off - no watch steps and no mirror - without an error.
+
+**Features** (2.5). Background and history reads are Health Connect
+features, and a provider too old for one cannot grant its permission:
+`backgroundReadAvailable` / `historyReadAvailable` say whether it can. When it
+cannot, the permission is left off the sheet - asking for one the provider
+does not know can cost the whole sheet - and `backgroundReadGranted` stays
+false. The check is local (the provider's version), not a Health Connect call.
+
+**Work profiles** (2.5). Health Connect does not work in a work profile: the
+sheet can grant there, but no call succeeds and nothing is written. An app in
+one gets `availability: 'not_supported'` and `workProfile: true`.
+
+**This phone's own steps** (2.5). From Android 14 with SDK extension 20,
+Health Connect counts the phone's steps itself once any app holds
+`READ_STEPS` - which this package asks for. Its records come from the package
+`android` until June 2026 and from a synthetic name of the form
+`com.android.healthconnect.phone.<hash>` - per device, and per reading app -
+since; `deviceStepTracking.dataOrigin` is this phone's, from the platform's
+`getCurrentDeviceDataSource()` where it has it. Either way
+`getStepSources()` lists them as this phone (`isPlatform: true`), never as a
+wearable, and under `'auto'` they can only fill the part of a day before this
+device started counting.
 
 ### `enableHealthConnect(options?): Promise<HealthConnectStatus>`
 
@@ -1001,7 +1062,9 @@ type RequestHealthConnectOptions = {
 };
 ```
 
-Both default to the matching config flag. The read and write sets follow
+Both default to the matching config flag, and are left off where the provider
+cannot grant them (`backgroundReadAvailable`, `historyReadAvailable`). The vitals in
+`healthConnectReadVitals` join the sheet as optional extras (2.5). The read and write sets follow
 `healthConnectReadEnabled` / `healthConnectWriteEnabled`, so a read-only app
 never puts `WRITE_*` on the sheet. Health Connect shows one sheet for the
 whole set, so asking for an optional permission the app does not need risks the
@@ -1023,7 +1086,10 @@ onboarding referrer set so setup runs straight after the install. The right
 answer to `availability: 'not_installed'` or `'update_required'`.
 
 On Android 14+ Health Connect is part of the OS, so `installable` is never true
-there — an unavailable provider means `not_supported`.
+there — an unavailable provider means `not_supported`. Below Android 9 the
+Health Connect app does not install at all, so it is `not_supported` there
+too (2.5); it used to say `not_installed` and send the user to a Play listing
+that could not install.
 
 ### `revokeHealthConnectPermissions(): Promise<boolean>`
 
@@ -1052,11 +1118,167 @@ which passed for a window nobody walked in.
 
 Writes are idempotent: each record carries a stable `clientRecordId`
 (`stp-steps-2026-09-06`), so re-syncing a day replaces the previous record
-rather than stacking duplicates.
+rather than stacking duplicates. Each carries its zone offset, the
+automatically-recorded method and the device that counted it - a phone, with
+its maker and model from 2.5 - as Health Connect's metadata guidance asks.
+
+A sync writes every pending day in one insert (2.5) - up to Health Connect's
+1,000 records per call - where it used to make one per day; a batch that
+fails costs only its own days, which stay pending. Which days a wearable
+owns is decided from one read per run of consecutive days the cache cannot
+answer, where it used to be one read per day.
+
+**Per-minute records** (2.5, opt-in). By default each day is one record per
+type, midnight to now. With `healthConnectWriteGranularity: 'minute'` it is
+a record for every minute with steps instead, as Health Connect's guidance
+for steps asks - other apps' charts then show when the steps were taken, and
+Health Connect can weigh them against a watch's minute by minute. Distance
+and calories go with each minute's share of the day's.
+
+- Steps whose minute is not known - credited by gap recovery or after a
+  reboot, or taken before the switch - go into one record over the longest
+  stretch of the day no minute covers. It keeps the day's id,
+  `stp-steps-2026-09-06`; the minutes are `stp-steps-2026-09-06-<epoch
+  minute>` (minutes since 1970-01-01T00:00Z), so a minute keeps its id
+  whatever the zone does afterwards.
+- The records always add up to the day's total, and never overlap - Health
+  Connect counts only one of two overlapping records from the same app.
+  Under `fraudDetection.mode: 'exclude'` the minutes are scaled down to the
+  day's total.
+- Each sync writes only the minutes that changed since the last one, still
+  in as few inserts as Health Connect allows, so a sync with no new steps
+  writes at most the one record of unplaced steps. A profile change (height,
+  stride, weight) writes today's minutes again with the new distance and
+  calories.
+- Switching either way cleans up: the next sync deletes the records of the
+  other kind for each day it writes. Days already mirrored keep the records
+  they have, which add up the same.
+- `writeHealthConnectSteps(date)` writes the way the sync does - one day,
+  per minute in minute mode - and resolves `true` once all of it landed.
+
+Minutes are only kept for this while the setting is on - in a table of
+their own, pruned with history - so turning it on mid-day writes the morning
+as that one record, over the longest stretch the minutes leave free.
 
 Days a wearable already owns are skipped rather than written, and counted in
 `skippedRecords`. Writing this phone's parallel count of the same walk would
-leave every other app reading Health Connect with both copies of it.
+leave every other app reading Health Connect with both copies of it. A day
+whose every step the integrity checks excluded (`fraudDetection.mode:
+'exclude'`) has its mirrored records deleted rather than left standing (2.5).
+
+When Health Connect refuses a sync for quota, the result says `rateLimited:
+true` with `retryable: true`; the days it did not reach stay pending for the
+next pass.
+
+### `deleteHealthConnectData(startDate, endDate): Promise<HealthConnectDeleteResult>`
+
+Deletes what this package mirrored into Health Connect for the days from
+`startDate` to `endDate`, inclusive (2.5) - its own day and minute records
+only, matched by their client record ids, so nothing else your app writes to
+Health Connect is touched (a time-range delete would take all of it). Steps
+always; distance and calories where their write permission is granted, which
+Health Connect needs to delete.
+
+```ts
+await StepTracker.updateConfig({ healthConnectWriteEnabled: false }); // stop mirroring first
+await StepTracker.deleteHealthConnectData('2026-01-01', '2026-10-03');
+// { startDate: '2026-01-01', endDate: '2026-10-03', recordTypes: ['steps', 'distance'] }
+```
+
+Nothing local changes: a day already mirrored is not written again, but today
+is, at the next sync, while writes are on - so stop mirroring first, as
+above, for a "disconnect Health Connect" button. A day with nothing mirrored
+is fine to include. At most 3,660 days (ten years) per call - each type is
+one delete per 1,000 days, against a write quota of 1,000 calls per 15
+minutes. Days written per minute cost more: one delete per 1,000 minute
+records, and for a day written per minute whose minutes have since aged
+out of local history, every minute of it - about two deletes a type. Rejects with `E_INVALID_CONFIG` for a longer or reversed range,
+`E_HEALTH_CONNECT_UNAVAILABLE`, `E_HEALTH_CONNECT_DENIED` without
+`WRITE_STEPS`, or `E_HEALTH_CONNECT_RATE_LIMITED`.
+
+### `readHealthConnectVitals(startIso, endIso, options?): Promise<HealthConnectVitals>`
+
+Heart rate, blood pressure and the other vitals of Health Connect's vitals
+guide, as other apps wrote them - a watch's heart rate on the same walk, say
+- summarised per type between two ISO-8601 instants with a zone (2.5). Read
+only: this package measures none of them.
+
+```ts
+await StepTracker.initialize({ healthConnectReadVitals: ['heartRate', 'restingHeartRate'] });
+await StepTracker.requestHealthConnectPermissions();
+const { vitals, notGranted } = await StepTracker.readHealthConnectVitals(
+  '2026-10-03T06:00:00Z', '2026-10-03T07:00:00Z',
+);
+// vitals: [{
+//   type: 'heartRate', unit: 'bpm', count: 3600, min: 61, max: 148, avg: 112,
+//   latest: { time: 1759471199000, value: 97, packageName: 'com.fitbit.FitbitMobile' },
+//   truncated: false,
+// }, ...]
+```
+
+| Type | Unit | Permission |
+|---|---|---|
+| `heartRate` | `bpm` | `READ_HEART_RATE` |
+| `restingHeartRate` | `bpm` | `READ_RESTING_HEART_RATE` |
+| `oxygenSaturation` | `percent` | `READ_OXYGEN_SATURATION` |
+| `respiratoryRate` | `breathsPerMinute` | `READ_RESPIRATORY_RATE` |
+| `bloodPressure` | `mmHg` - systolic, with `diastolic` alongside | `READ_BLOOD_PRESSURE` |
+| `bodyTemperature` | `celsius` | `READ_BODY_TEMPERATURE` |
+| `bloodGlucose` | `mmolPerL` | `READ_BLOOD_GLUCOSE` |
+
+`options.types` defaults to `healthConnectReadVitals`. Each type is one more
+read permission: declare it ([PERMISSIONS.md](PERMISSIONS.md#vitals-25)),
+list it in `healthConnectReadVitals` so it goes on the sheet, and have it
+granted. A type asked for but not granted is listed in `notGranted` rather
+than failing the rest. Heart rate is summarised by Health Connect's own
+aggregate - a workout carries a sample a second - so it costs two calls
+whatever the window; the rest are read record by record, newest first, up
+to 20,000 per type (`truncated` past that). Rejects with
+`E_HEALTH_CONNECT_UNAVAILABLE`, `E_HEALTH_CONNECT_DENIED` when no type asked
+for is granted or Health Connect refuses a read from the background, or
+`E_HEALTH_CONNECT_RATE_LIMITED`.
+
+### Rate limits
+
+Health Connect meters every data call an app makes - each page of records,
+each aggregate, each changes call, each insert and delete - in a read quota
+and a write quota, each over 15 minutes and over a day, and tighter in the
+background (no activity on screen and no foreground service) than in the
+foreground. Its defaults today are 2,000 reads per 15 minutes and 16,000 a
+day in the foreground, 1,000 and 8,000 in the background, and 1,000 and 8,000
+writes; it tunes them remotely. A used-up quota fails every call on it - this
+package's and any other Health Connect library's in your app - until it
+refills.
+
+From 2.5 the package spends little of it, and backs off when it runs out:
+
+- **Large pages.** Raw reads take 5,000 records a page, the most Health
+  Connect returns, where they took 1,000; a busy day is one call per type.
+- **Empty page tokens end a read.** On Android 12 and 13 the last page's
+  token can come back empty rather than null, and was taken for "more to
+  come".
+- **The changes feed.** Each day's answer is cached, and Health Connect's
+  changes feed - one call when nothing moved - says which days to drop. A
+  range reads only the days nothing vouches for.
+- **Batched writes.** A sync is one insert, not one per day; pending days'
+  ownership is one read, not one per day; a `full` upload reads its pending
+  days in a few reads up front, not one each.
+- **A breaker.** Once Health Connect refuses a call for quota, no call is
+  made on that quota for 30 seconds, doubling to 15 minutes while the
+  refusals continue. Reads meanwhile answer from what was read before and
+  say `'rate_limited'`; explicit reads reject with
+  `E_HEALTH_CONNECT_RATE_LIMITED`, with `details.retryAfterMs`; a sync says
+  `rateLimited: true` and leaves its days pending. The first refusal also
+  fires the [`error`](#events) event.
+- **Headroom.** The refresh the step sensor asks for while walking stands
+  down once this process has used half of either window, leaving the rest
+  for reads someone is waiting for.
+
+`HealthConnectStatus.rateLimit` shows where the app stands: whether reads or
+writes are held back and for how long, and the calls this package made in
+the last 15 minutes and 24 hours - its own count, not Health Connect's, which
+also counts every other library and is not published. If your app also uses
+another Health Connect library, its calls share these quotas.
 
 ### `getHealthConnectRecords(startIso, endIso, options?): Promise<HealthConnectRecordList>`
 
@@ -1251,11 +1473,13 @@ Every app that published steps over the range, with what each contributed.
   ],
   hasWearable: true,
   healthConnect: 'read',    // | 'not_consulted' | 'timed_out' | 'failed' (2.2.1)
+                            // | 'rate_limited' (2.5)
 }
 ```
 
 An empty `sources` under `healthConnect: 'timed_out'` or `'failed'` is not
-"no other apps": call again. `useHealthConnect` keeps its last list then. A
+"no other apps": call again. Under `'rate_limited'` (2.5) the list holds only
+the days still cached. `useHealthConnect` keeps its last list in all three. A
 failed read is never cached (2.3.7), so the next call reads afresh. In the background -
 no activity on screen and tracking off, the tracking service being a foreground
 service, which Health Connect lets read - without `READ_HEALTH_DATA_IN_BACKGROUND`
@@ -1575,9 +1799,11 @@ request body bytes. Verify it with the key you stored for `keyId` before
 reading the body. An install that never called `attestDevice()` uploads
 exactly as before. `sources` is read from Health Connect at upload time and is `[]`
 when reads are not permitted, the provider is missing or `stepSource` is
-`'device'`; `stepSource` is then this device's. Each pending day costs one
-bounded, cached Health Connect read under `'full'`; pending is normally the
-handful of days since the last successful upload.
+`'device'`; `stepSource` is then this device's. Under `'full'` the pending
+days are read from Health Connect up front, a run of consecutive days per
+read (2.5) - it used to be one read per day - and each day then comes from
+that cache; pending is normally the handful of days since the last
+successful upload.
 
 ---
 
@@ -1613,8 +1839,8 @@ warns once. Use `removeAllListeners()` when that is really what you mean.
 | `motionWindow` | `MotionWindow`. One motion signature window was stored — see [`getMotionWindows`](#getmotionwindowsstartdate-enddate-promisemotionwindow). Features only. |
 | `historyBackfilled` | `{ date, addedSteps, totalSteps, reason: 'gap' \| 'reboot' \| 'late' }`. A **past** day's stored total grew after the fact: gap recovery placed steps on it, or - `'late'` (2.3.7) - steps taken on it arrived after it had closed, held by the phone with the screen off across midnight; those are not recovered steps, and the day's integrity verdict is taken again with them. Once per affected day and write, after the write commits. Never fires under `gapRecovery: 'today'`, `'today_capped'` or `'drop'`. If you have already settled `date` — paid for it, uploaded it — this is the only signal that its number moved. |
 | `syncAuthFailed` | `{ target: 'remote', status, reason: 'unauthorized' \| 'forbidden' \| 'no_key', auth }`. The endpoint refused the credentials, or signature auth had no key. Not retried: refresh with `updateConfig({ remoteSyncHeaders })` or call `attestDevice()`, then `syncNow()`. |
-| `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable? }`. `skippedRecords` counts days left to a wearable that already owns them. |
-| `error` | `{ code, message }`. Emitted from the service, where there is no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. |
+| `syncCompleted` | `{ target: 'health_connect' \| 'remote', syncedRecords, failedRecords, skippedRecords, success, error?, retryable?, rateLimited? }`. `skippedRecords` counts days left to a wearable that already owns them; `rateLimited` (2.5) says Health Connect refused the sync for quota and its days wait for the next pass. |
+| `error` | `{ code, message, retryAfterMs?, quota? }`. Something went wrong with no promise to reject. `E_SENSOR_UNAVAILABLE` means the sensor exists but registration failed and the service is retrying; `E_NO_SENSOR` means there is nothing to register. `E_HEALTH_CONNECT_RATE_LIMITED` (2.5) means Health Connect refused a call for quota - once per refusal, with `retryAfterMs` and `quota` (`'read'` or `'write'`); see [Rate limits](#rate-limits). |
 
 Events fire only while a React instance is alive. The service keeps counting and
 writing to the database regardless — on resume, call `getTodaySteps()` rather
@@ -1645,13 +1871,15 @@ than replaying missed events. `useStepTracker` already does this.
 | `eventThrottleMs` | 500 | minimum ms between `stepsChanged` events |
 | `persistEveryNSteps` | 10 | database flush cadence |
 | `healthConnectEnabled` | `true` | master switch for both reads and writes |
-| `healthConnectSyncIntervalMinutes` | 30 | clamped to WorkManager's 15-minute floor; 0 disables |
+| `healthConnectSyncIntervalMinutes` | 15 | minutes between background mirrors of today; 15 (30 before 2.5) is WorkManager's floor and the longest gap between writes Health Connect's guidance allows. Waits while the battery is low (2.5); 0 disables |
 | `healthConnectReadEnabled` | `true` | set `false` to mirror your own count without ever reading; `READ_*` is then never requested |
 | `healthConnectWriteEnabled` | `true` | set `false` to read a watch's data without adding a second copy of your own; `WRITE_*` is then never requested |
+| `healthConnectWriteGranularity` | `'day'` | `'minute'` mirrors a record for every minute with steps, as Health Connect's guidance for steps asks, rather than one per day (2.5, opt-in; planned as the default in 3.0). Steps whose minute is unknown go into one record over the longest stretch no minute covers; the records always add up to the day. See [Per-minute records](#writehealthconnectstepsdate-string-promiseboolean) |
 | `healthConnectBackgroundRead` | `false` | also request `READ_HEALTH_DATA_IN_BACKGROUND`, for reads with no activity on screen and tracking off - the tracking service is a foreground service, which Health Connect lets read. Without it those reads are not made; see [PERMISSIONS.md](PERMISSIONS.md#background-reads-6) |
 | `healthConnectHistoryRead` | `false` | also request `READ_HEALTH_DATA_HISTORY`; required to read past 30 days |
 | `healthConnectReadActiveCalories` | `false` | also read active calories per source (`StepSource.activeCalories`); one more permission to declare |
 | `healthConnectReadTypes` | `['steps', 'distance', 'totalCalories']` | which record types reads cover, each one read permission to declare; `'steps'` is required. `['steps']` asks for `READ_STEPS` alone, and a day answered from Health Connect then derives distance and calories from the step count. Left at the default, a type the manifest does not declare is simply not read; a type you list yourself must be declared, or requests reject with `E_HEALTH_CONNECT_NOT_DECLARED`. See [PERMISSIONS.md](PERMISSIONS.md) |
+| `healthConnectReadVitals` | `[]` | vitals [`readHealthConnectVitals()`](#readhealthconnectvitalsstartiso-endiso-options-promisehealthconnectvitals) may read (2.5): `'heartRate'`, `'restingHeartRate'`, `'oxygenSaturation'`, `'respiratoryRate'`, `'bloodPressure'`, `'bodyTemperature'`, `'bloodGlucose'`. Each is one read permission to declare; listed, it joins the sheet as an optional extra |
 | `healthConnectIgnoreManualEntries` | `false` | subtract steps the user typed in (`RECORDING_METHOD_MANUAL_ENTRY`) from every Health Connect source before a winner is picked; `manualStepsExcluded` reports how much — see [Manual entries](#manual-entries) |
 | `stepSource` | `'auto'` | `'auto'` \| `'device'` \| `'wearable'` \| `'health_connect'` — see [Step sources](#step-sources-watches-and-other-apps) |
 | `preferredStepSourcePackage` | — | pins one Health Connect origin as the truth |

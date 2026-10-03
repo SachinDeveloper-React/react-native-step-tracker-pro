@@ -13,11 +13,15 @@ import type {
   DeviceCapabilities,
   EventSubscription,
   HealthConnectChanges,
+  HealthConnectDeleteResult,
   HealthConnectRecord,
   HealthConnectRecordList,
   HealthConnectRecordOptions,
   HealthConnectRecordType,
   HealthConnectStatus,
+  HealthConnectVitals,
+  HealthConnectVitalsOptions,
+  HealthConnectVitalType,
   IntegrityEvent,
   IntegrityReport,
   IntegrityToken,
@@ -316,6 +320,18 @@ function assertList(
 
 const READ_TYPES = ['steps', 'distance', 'totalCalories'] as const;
 const RECORD_TYPES: readonly HealthConnectRecordType[] = ['steps', 'distance'];
+/** The longest range `deleteHealthConnectData()` takes - the native side's cap too. */
+const MAX_DELETE_DAYS = 3660;
+
+const VITAL_TYPES: readonly HealthConnectVitalType[] = [
+  'heartRate',
+  'restingHeartRate',
+  'oxygenSaturation',
+  'respiratoryRate',
+  'bloodPressure',
+  'bodyTemperature',
+  'bloodGlucose',
+];
 const SNAPSHOT_PARTS: readonly VerificationSnapshotPart[] = [
   'minutes',
   'motionWindows',
@@ -454,6 +470,10 @@ function normaliseConfig(
     'drop',
   ]);
   assertOneOf('remoteSyncPayload', config.remoteSyncPayload, ['totals', 'full']);
+  assertOneOf('healthConnectWriteGranularity', config.healthConnectWriteGranularity, [
+    'day',
+    'minute',
+  ]);
   assertOneOf('notificationLockScreen', config.notificationLockScreen, [
     'private',
     'public',
@@ -475,6 +495,8 @@ function normaliseConfig(
       "healthConnectReadTypes must include 'steps'"
     );
   }
+  // Empty is allowed: it takes every vital back off the sheet.
+  assertList('healthConnectReadVitals', config.healthConnectReadVitals, VITAL_TYPES);
   if (config.height != null && (config.height < 50 || config.height > 260)) {
     throw new StepTrackerError('E_INVALID_CONFIG', 'height must be 50–260 cm');
   }
@@ -1109,9 +1131,75 @@ export const StepTracker = {
     }>;
   },
 
-  /** Upserts one day's steps/distance/calories into Health Connect. */
+  /**
+   * Writes one day's steps, distance and calories into Health Connect now,
+   * the way the periodic sync does - one record, or per-minute records
+   * under `healthConnectWriteGranularity: 'minute'` - and resolves true
+   * once all of it landed.
+   */
   async writeHealthConnectSteps(date: string): Promise<boolean> {
     return call(() => getNativeModule().writeHealthConnectSteps(date));
+  },
+
+  /**
+   * Deletes what this package mirrored into Health Connect for the days
+   * from `startDate` to `endDate`, inclusive (yyyy-MM-dd): its own day and
+   * minute records only, matched by their client record ids, so nothing
+   * else your app writes to Health Connect is touched. Steps always; distance and
+   * calories where their write permission is granted. Rejects with
+   * `E_HEALTH_CONNECT_DENIED` without `WRITE_STEPS`, which deleting needs.
+   *
+   * Nothing local changes. A day already mirrored is not written again,
+   * but today is, at the next sync - set `healthConnectWriteEnabled: false`
+   * first to stop mirroring for good, or call `clearHistory()` as well to
+   * erase the days everywhere.
+   */
+  async deleteHealthConnectData(
+    startDate: string,
+    endDate: string
+  ): Promise<HealthConnectDeleteResult> {
+    assertRange(startDate, endDate);
+    // Ten years: past that it is thousands of deletes against a write quota
+    // of a thousand per 15 minutes.
+    const days = (Date.parse(endDate) - Date.parse(startDate)) / 86_400_000 + 1;
+    if (!(days <= MAX_DELETE_DAYS)) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        `deleteHealthConnectData covers at most ${MAX_DELETE_DAYS} days per call`
+      );
+    }
+    return call(() =>
+      getNativeModule().deleteHealthConnectData(startDate, endDate)
+    ) as Promise<HealthConnectDeleteResult>;
+  },
+
+  /**
+   * Heart rate, blood pressure and the other vitals other apps wrote to
+   * Health Connect between two ISO-8601 instants with a zone, summarised
+   * per type: how many measurements, their range, their mean and the
+   * latest. `options.types` defaults to `healthConnectReadVitals`; each
+   * needs its read permission declared, listed there, and granted. A type
+   * not granted is listed in `notGranted` rather than failing the rest.
+   *
+   * Heart rate is summarised by Health Connect's own aggregate - a
+   * workout carries a sample a second - so it costs two calls whatever the
+   * window; every other type is read record by record, newest first.
+   * Rejects with `E_HEALTH_CONNECT_UNAVAILABLE`, `E_HEALTH_CONNECT_DENIED`
+   * when no type asked for is granted (or Health Connect refuses a read
+   * from the background), or `E_HEALTH_CONNECT_RATE_LIMITED`.
+   */
+  async readHealthConnectVitals(
+    startIso: string,
+    endIso: string,
+    options: HealthConnectVitalsOptions = {}
+  ): Promise<HealthConnectVitals> {
+    const [start, end] = utcInstantRange(startIso, endIso);
+    assertList('types', options.types, VITAL_TYPES, { nonEmpty: true });
+    const native: Record<string, unknown> = {};
+    if (options.types !== undefined) native.types = options.types;
+    return call(() =>
+      getNativeModule().readHealthConnectVitals(start, end, native)
+    ) as Promise<HealthConnectVitals>;
   },
 
   async syncWithHealthConnect(): Promise<SyncEvent> {

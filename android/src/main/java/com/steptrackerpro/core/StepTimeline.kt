@@ -139,6 +139,40 @@ object MinuteAttribution {
 
     private fun park(minute: Long, steps: Int): Share =
         if (steps <= LUMP_STEPS) Share(minute, steps, 0) else Share(minute, 0, steps)
+
+    /**
+     * Where a delta's steps go for Health Connect's per-minute records -
+     * `healthConnectWriteGranularity: 'minute'`. As [attribute], except a
+     * lump is spread over the interval it arrived after rather than parked:
+     * for a cadence judgement, steps whose minute is unknown must not invent
+     * a steady walk, but a record of when steps were taken is best served
+     * by "somewhere in this window", evenly, which is also how every reader
+     * of an interval record reads it. A few steps after a rest are still the
+     * walk starting, in the minute they arrived in; an untimed sample still
+     * has only its arrival. Returns minute start -> steps, summing to
+     * [steps].
+     */
+    fun spread(fromMs: Long, toMs: Long, steps: Int, timed: Boolean = true): Map<Long, Int> {
+        if (steps <= 0 || toMs <= 0L) return emptyMap()
+        val arrival = minuteOf(toMs)
+        val gap = toMs - fromMs
+        if (!timed || fromMs <= 0L || gap <= 0L) return mapOf(arrival to steps)
+        if (gap > MAX_TIMED_GAP_MS && steps <= LUMP_STEPS) return mapOf(arrival to steps)
+        val out = LinkedHashMap<Long, Int>()
+        var minute = minuteOf(fromMs)
+        var coveredMs = 0L
+        var assigned = 0
+        while (minute <= arrival) {
+            val overlap = minOf(toMs, minute + MINUTE_MS) - maxOf(fromMs, minute)
+            coveredMs += overlap.coerceAtLeast(0L)
+            val upTo = if (minute == arrival) steps else ((steps.toLong() * coveredMs + gap / 2) / gap).toInt()
+            val share = (upTo - assigned).coerceAtLeast(0)
+            if (share > 0) out[minute] = share
+            assigned += share
+            minute += MINUTE_MS
+        }
+        return out
+    }
 }
 
 /**

@@ -47,7 +47,7 @@ Permissions in one place: [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 | OEM killers    | foreground restart, 15-minute watchdog, boot receiver; every step counted while dead is recovered from the hardware counter, including across midnight |
 | Storage        | Room — `step_history` + `daily_summary`, 31–35 day retention      |
 | Reboot         | `BootReceiver` restarts the service and re-anchors the counter    |
-| Health Connect | availability, permissions scoped to config, read, write, idempotent sync |
+| Health Connect | availability and features, permissions scoped to config, read, write - per day, or per minute as Health Connect's guidance asks (opt-in) - idempotent batched sync, deletes, opt-in vitals; spends little of Health Connect's rate limits and backs off when they run out |
 | Watches        | reads a paired watch through Health Connect and never double-counts |
 | Continuity     | Health Connect says 6,000 → the phone keeps it moving: 6,001, 6,005, 6,010 |
 | Fraud checks   | opt-in: flags shaken phones, swing gadgets, charging, vehicles and implausible totals; event log; Keystore attestation and signed snapshots |
@@ -102,6 +102,7 @@ await StepTracker.initialize({
   stepSource: "auto", // phone sensor vs. a paired watch — see below
   healthConnectReadEnabled: true, // false → mirror-only, READ_* never requested
   healthConnectWriteEnabled: true, // false → display-only, WRITE_* never requested
+  healthConnectWriteGranularity: "day", // "minute" → a record per walking minute (opt-in)
   gapRecovery: "split", // where steps counted while dead across midnight go
   remoteSyncUrl: "https://api.example.com/steps", // optional
 });
@@ -176,6 +177,7 @@ getHealthConnectStatus()      enableHealthConnect()     requestHealthConnectPerm
 installHealthConnect()        openHealthConnectSettings()   revokeHealthConnectPermissions()
 readHealthConnectSteps(a, b)  writeHealthConnectSteps(date)   syncWithHealthConnect()
 getHealthConnectRecords(a, b, opts)  getHealthConnectChangesToken(opts)  getHealthConnectChanges(token)
+readHealthConnectVitals(a, b, opts)  deleteHealthConnectData(from, to)
 
 getStepSources(from, to)      getCurrentStepSource()
 setPreferredStepSource(pkg)   getInstalledCompanionApps()
@@ -246,6 +248,13 @@ the phone, so adding them roughly doubles the count. Each policy picks one:
 With no Health Connect grant, `"auto"` is exactly the phone's own sensor —
 resolution only engages once the user allows reads. Let the user choose a source
 explicitly with `getStepSources()` and `setPreferredStepSource()`.
+
+**Rate limits.** Health Connect meters every call an app makes and refuses
+all of them once a quota is used up. The package reads 5,000 records a page,
+keeps each day's answer until Health Connect's changes feed says it moved,
+writes every pending day in one insert, and backs off after a refusal -
+answering from what it read before with `healthConnect: 'rate_limited'` -
+see [Rate limits](docs/API.md#rate-limits).
 
 **Why `auto` merges.** A watch publishes in batches. Take its number and the
 display freezes at 6,000 for the whole walk, then jumps. Instead `auto`
@@ -344,10 +353,12 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-A hundred and seventy-two Jest tests cover config validation, the flows in
+A hundred and eighty-five Jest tests cover config validation, the flows in
 the JS layer, the typed and legacy event paths, the hook's config handling,
-the shipped Jest mock and the Expo plugin. Two hundred and eleven JVM tests
-cover step-source resolution, the `auto` merge and its coverage rule,
+the shipped Jest mock and the Expo plugin. Two hundred and sixty-five JVM tests
+cover Health Connect's rate limits - the breaker, the windows, both
+providers' refusals - range reads and vitals summaries, per-minute records -
+that they add up to the day and never overlap - step-source resolution, the `auto` merge and its coverage rule,
 manual-entry exclusion and wearable trust, gap splitting under all four
 policies, the accelerometer pedometer against synthetic gait, motion
 signatures against a synthetic walk and shake, the fraud detector against
@@ -357,7 +368,7 @@ and the remote payload — chiefly that a phone and a watch are never added toge
 phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
-with the screen off is not a shake. Seventy-five instrumented tests cover the
+with the screen off is not a shake. Seventy-six instrumented tests cover the
 reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
 pause and counter-reset paths by feeding samples to the engine directly, the
 Room migrations against real rows, and the integrity layer and sync
@@ -371,12 +382,18 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.4.0** — the notification
-can show miles (`notificationDistanceUnit`), Health Connect is read with the
-app closed while tracking is on, `readHealthConnectSteps()` rejects when it
-cannot read instead of answering "no steps", the notification moves to the
-new day whatever ended the old one, and a failed database write in the
-background no longer crashes the app. **2.3.7** counted steps the phone
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.5.0** — Health Connect
+checked against Google's guides: the package spends little of Health
+Connect's rate limits and backs off when they run out, can write a record
+per walking minute (`healthConnectWriteGranularity: 'minute'`, opt-in),
+deletes what it mirrored (`deleteHealthConnectData()`), reads vitals other
+apps wrote (`readHealthConnectVitals()`), and reports feature support, work
+profiles and the phone's own step tracking in the status. **2.4.0** let the
+notification show miles (`notificationDistanceUnit`), read Health Connect
+with the app closed while tracking is on, made `readHealthConnectSteps()`
+reject when it cannot read instead of answering "no steps", moved the
+notification to the new day whatever ended the old one, and stopped a failed
+database write in the background from crashing the app. **2.3.7** counted steps the phone
 delivers late across midnight on the day they were taken and checked them
 there, reported a failed Health Connect read as failed instead of as a day
 with no other apps, made a read of yesterday wait for its last steps, and

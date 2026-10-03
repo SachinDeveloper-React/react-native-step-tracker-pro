@@ -66,6 +66,31 @@ describe('Expo config plugin', () => {
     ).toThrow(/heartRate/);
   });
 
+  it('declares one read permission per vital asked for, and none with reads off', () => {
+    expect(
+      manifest.permissionsFor({
+        healthConnect: {
+          readTypes: ['steps'],
+          write: false,
+          vitals: ['bloodPressure', 'heartRate'],
+        },
+      })
+    ).toEqual([
+      'android.permission.health.READ_STEPS',
+      'android.permission.health.READ_HEART_RATE',
+      'android.permission.health.READ_BLOOD_PRESSURE',
+    ]);
+    expect(
+      manifest.permissionsFor({ healthConnect: { read: false, vitals: ['heartRate'] } })
+    ).not.toContain('android.permission.health.READ_HEART_RATE');
+    expect(() =>
+      manifest.permissionsFor({ healthConnect: { vitals: ['steps'] } })
+    ).toThrow(/steps/);
+    expect(() =>
+      manifest.permissionsFor({ healthConnect: { vitals: 'heartRate' } })
+    ).toThrow(/array/);
+  });
+
   it('adds only what the manifest does not already declare', () => {
     const result = manifest.applyPermissions(
       {

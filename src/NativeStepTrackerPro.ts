@@ -101,6 +101,12 @@ export interface Spec extends TurboModule {
   ): Promise<UnsafeObject>;
   getHealthConnectChangesToken(options: UnsafeObject): Promise<string>;
   getHealthConnectChanges(token: string): Promise<UnsafeObject>;
+  readHealthConnectVitals(
+    startIso: string,
+    endIso: string,
+    options: UnsafeObject
+  ): Promise<UnsafeObject>;
+  deleteHealthConnectData(startDate: string, endDate: string): Promise<UnsafeObject>;
 
   // ---- step sources ----------------------------------------------------
   getStepSources(startDate: string, endDate: string): Promise<UnsafeObject>;

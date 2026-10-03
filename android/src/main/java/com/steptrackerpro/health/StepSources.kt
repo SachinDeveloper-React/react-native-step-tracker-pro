@@ -311,8 +311,18 @@ object StepSourceCatalog {
     const val PLATFORM_PACKAGE_PREFIX = "com.android.healthconnect.phone."
     const val PLATFORM_APP_NAME = "This phone (Android)"
 
+    /**
+     * This phone's exact synthetic package name, once the platform has said
+     * - see [DeviceDataSources.currentOrigin]. The prefix covers the shape
+     * documented today; this covers whatever shape the platform actually
+     * uses on this device.
+     */
+    @Volatile
+    var currentDeviceOrigin: String? = null
+
     fun isPlatformOrigin(packageName: String): Boolean =
-        packageName == PLATFORM_PACKAGE || packageName.startsWith(PLATFORM_PACKAGE_PREFIX)
+        packageName == PLATFORM_PACKAGE || packageName.startsWith(PLATFORM_PACKAGE_PREFIX) ||
+            packageName == currentDeviceOrigin
 
     private data class Entry(val appName: String, val kind: StepSourceKind)
 

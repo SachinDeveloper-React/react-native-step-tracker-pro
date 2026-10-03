@@ -45,7 +45,13 @@ data class StepTrackerConfig(
     val eventThrottleMs: Long = 500L,
     val persistEveryNSteps: Int = 10,
     val healthConnectEnabled: Boolean = true,
-    val healthConnectSyncIntervalMinutes: Int = 30,
+    /**
+     * Minutes between the background syncs that mirror today into Health
+     * Connect. 15 - WorkManager's floor, and the longest gap between writes
+     * Health Connect's guidance allows - from 2.5; 30 before. 0 turns the
+     * periodic sync off.
+     */
+    val healthConnectSyncIntervalMinutes: Int = 15,
     /**
      * Read other apps' steps back out of Health Connect. Off means the
      * `READ_*` permissions are never requested and every policy behaves like
@@ -94,6 +100,21 @@ data class StepTrackerConfig(
     val healthConnectReadTypesExplicit: Boolean = false,
     /** The app set [healthConnectWriteEnabled] itself - see [healthConnectReadTypesExplicit]. */
     val healthConnectWriteExplicit: Boolean = false,
+    /**
+     * Vitals `readHealthConnectVitals()` may read, by
+     * [com.steptrackerpro.health.VitalType] `jsValue`. None by default:
+     * each is one more read permission the app declares and justifies, and
+     * is only asked for once listed here.
+     */
+    val healthConnectReadVitals: List<String> = emptyList(),
+    /**
+     * How finely this device's count is written to Health Connect - one of
+     * [WriteGranularity]: a record per day (`day`, the default, as every
+     * earlier release wrote), or a record per minute with steps (`minute`),
+     * as Health Connect's write guide asks, so other apps' charts and Health
+     * Connect's own de-duplication see when the steps were taken.
+     */
+    val healthConnectWriteGranularity: String = WriteGranularity.DAY,
     /** One of [com.steptrackerpro.health.StepSourcePolicy]'s `jsValue`s. */
     val stepSource: String = "auto",
     /** Pins one Health Connect origin package as the source of truth. */
@@ -269,6 +290,10 @@ data class StepTrackerConfig(
             .parse(healthConnectReadTypes)
             .sortedBy { it.ordinal }
             .map { it.jsValue },
+        healthConnectReadVitals = com.steptrackerpro.health.VitalType
+            .parseLenient(healthConnectReadVitals)
+            .map { it.jsValue },
+        healthConnectWriteGranularity = WriteGranularity.from(healthConnectWriteGranularity),
         privacyPolicyUrl = privacyPolicyUrl?.takeIf { it.isNotBlank() },
         remoteSyncPayload = com.steptrackerpro.sync.RemotePayload.Shape.from(remoteSyncPayload).jsValue,
         remoteSyncAuth = if (remoteSyncAuth == RemoteSyncAuth.SIGNATURE) RemoteSyncAuth.SIGNATURE else RemoteSyncAuth.HEADERS,
@@ -331,6 +356,8 @@ data class StepTrackerConfig(
         put("healthConnectReadTypes", JSONArray(healthConnectReadTypes))
         put("healthConnectReadTypesExplicit", healthConnectReadTypesExplicit)
         put("healthConnectWriteExplicit", healthConnectWriteExplicit)
+        put("healthConnectReadVitals", JSONArray(healthConnectReadVitals))
+        put("healthConnectWriteGranularity", healthConnectWriteGranularity)
         put("stepSource", stepSource)
         put("preferredStepSourcePackage", preferredStepSourcePackage ?: JSONObject.NULL)
         put("wearableTrust", wearableTrust)
@@ -383,6 +410,10 @@ data class StepTrackerConfig(
             val readTypes = json.optJSONArray("healthConnectReadTypes")?.let { arr ->
                 (0 until arr.length()).mapNotNull { arr.optString(it) }
             } ?: fallback.healthConnectReadTypes
+            // Absent before 2.5: none, as then.
+            val vitals = json.optJSONArray("healthConnectReadVitals")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optString(it) }
+            } ?: fallback.healthConnectReadVitals
             return StepTrackerConfig(
                 heightCm = json.optDouble("height", fallback.heightCm),
                 weightKg = json.optDouble("weight", fallback.weightKg),
@@ -452,6 +483,10 @@ data class StepTrackerConfig(
                 // initialize() passes the key again.
                 healthConnectReadTypesExplicit = json.optBoolean("healthConnectReadTypesExplicit", false),
                 healthConnectWriteExplicit = json.optBoolean("healthConnectWriteExplicit", false),
+                healthConnectReadVitals = vitals,
+                healthConnectWriteGranularity = json.optString(
+                    "healthConnectWriteGranularity", fallback.healthConnectWriteGranularity
+                ),
                 privacyPolicyUrl = json.optStringOrNull("privacyPolicyUrl"),
                 remoteSyncUrl = json.optStringOrNull("remoteSyncUrl"),
                 remoteSyncHeaders = headers,
@@ -578,6 +613,14 @@ class ConfigStore(context: Context) {
         private const val KEY_CONFIG = "config_json"
         private const val KEY_HEADERS_SEALED = "remote_headers_sealed"
     }
+}
+
+/** Values of [StepTrackerConfig.healthConnectWriteGranularity]. */
+object WriteGranularity {
+    const val DAY = "day"
+    const val MINUTE = "minute"
+
+    fun from(value: String?): String = if (value == MINUTE) MINUTE else DAY
 }
 
 /** Values of [StepTrackerConfig.remoteSyncAuth]. */

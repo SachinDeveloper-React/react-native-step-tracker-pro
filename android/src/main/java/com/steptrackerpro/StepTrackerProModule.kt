@@ -989,11 +989,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
      * screen and no foreground service - without
      * `READ_HEALTH_DATA_IN_BACKGROUND`. That rule is Health Connect's to
      * apply, so it is not guessed at beforehand: a read it would allow is
-     * never refused here.
+     * never refused here. A refusal for quota rejects as rate limited, with
+     * how long until the next call is tried.
      */
     private suspend fun healthConnectRead(promise: Promise, read: suspend () -> Any?) {
         try {
             promise.resolve(read())
+        } catch (limited: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+            rejectRateLimited(promise, limited)
         } catch (denied: SecurityException) {
             val message = denied.message ?: "Health Connect read permission is not granted"
             promise.reject(
@@ -1009,10 +1012,131 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * `E_HEALTH_CONNECT_RATE_LIMITED`, with `retryAfterMs` - how long until
+     * a call on that quota is tried again - and `quota` (`read` or `write`)
+     * in `userInfo`.
+     */
+    private fun rejectRateLimited(
+        promise: Promise,
+        limited: com.steptrackerpro.health.HealthConnectRateLimitedException
+    ) {
+        promise.reject(
+            "E_HEALTH_CONNECT_RATE_LIMITED",
+            limited.message,
+            limited,
+            Bridge.map(
+                mapOf(
+                    "retryAfterMs" to limited.retryAfterMs,
+                    "quota" to limited.category.name.lowercase()
+                )
+            )
+        )
+    }
+
+    /**
+     * Summaries of the vitals in [options].types - `healthConnectReadVitals`
+     * when absent - between two instants. Like the raw reads, a read that
+     * cannot happen rejects: no provider, or no type's permission granted.
+     * Types not granted are listed in `notGranted` rather than failing the
+     * ones that are.
+     */
+    @ReactMethod
+    override fun readHealthConnectVitals(startIso: String, endIso: String, options: ReadableMap, promise: Promise) {
+        launchSafely(promise) {
+            val names = options.optStringList("types") ?: core.config().healthConnectReadVitals
+            val types = com.steptrackerpro.health.VitalType.parse(names)
+            if (types == null || types.isEmpty()) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "types takes " + com.steptrackerpro.health.VitalType.entries.joinToString(", ") { it.jsValue } +
+                        " - pass some, or list them in healthConnectReadVitals"
+                )
+                return@launchSafely
+            }
+            if (core.healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) {
+                promise.reject("E_HEALTH_CONNECT_UNAVAILABLE", "Health Connect is not available on this device")
+                return@launchSafely
+            }
+            val granted = core.healthConnect.grantedPermissions()
+            if (types.none { it.permission in granted }) {
+                promise.reject(
+                    "E_HEALTH_CONNECT_DENIED",
+                    "Health Connect read permission is not granted: " + types.joinToString(", ") { it.permission }
+                )
+                return@launchSafely
+            }
+            healthConnectRead(promise) {
+                Bridge.map(core.healthConnect.readVitals(Instant.parse(startIso), Instant.parse(endIso), types))
+            }
+        }
+    }
+
+    /**
+     * Mirrors one day into Health Connect now, the way the sync does - one
+     * record, or per-minute records under `healthConnectWriteGranularity:
+     * 'minute'` - and resolves true once all of it landed.
+     */
     @ReactMethod
     override fun writeHealthConnectSteps(date: String, promise: Promise) {
         launchSafely(promise) {
-            promise.resolve(core.healthConnect.writeDay(core.mirrorTotals(core.dayTotals(date))))
+            promise.resolve(core.writeHealthConnectDay(date))
+        }
+    }
+
+    /**
+     * Deletes the records this package mirrored into Health Connect for the
+     * days from [startDate] to [endDate], inclusive - its own day and minute
+     * records only, by client record id, never anything else the app
+     * writes. Needs
+     * `WRITE_STEPS`; distance and calories go too where their write
+     * permission is granted.
+     */
+    @ReactMethod
+    override fun deleteHealthConnectData(startDate: String, endDate: String, promise: Promise) {
+        launchSafely(promise) {
+            // Validated in JS; a range past ten years would be thousands of
+            // deletes against a write quota of a thousand per 15 minutes.
+            if (DateKeys.daysBetween(startDate, endDate) !in 1..MAX_DELETE_DAYS) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "startDate must be on or before endDate, at most $MAX_DELETE_DAYS days apart"
+                )
+                return@launchSafely
+            }
+            if (core.healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) {
+                promise.reject("E_HEALTH_CONNECT_UNAVAILABLE", "Health Connect is not available on this device")
+                return@launchSafely
+            }
+            if (!core.healthConnect.canWriteSteps()) {
+                promise.reject(
+                    "E_HEALTH_CONNECT_DENIED",
+                    "Health Connect permission to write steps is not granted; deleting needs it: " +
+                        HealthConnectManager.ReadType.STEPS.writePermission
+                )
+                return@launchSafely
+            }
+            try {
+                val types = core.deleteHealthConnectDays(startDate, endDate)
+                promise.resolve(
+                    Bridge.map(
+                        mapOf(
+                            "startDate" to startDate,
+                            "endDate" to endDate,
+                            "recordTypes" to types.map { it.jsValue }
+                        )
+                    )
+                )
+            } catch (limited: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+                rejectRateLimited(promise, limited)
+            } catch (denied: SecurityException) {
+                // A grant revoked between the check and the delete.
+                promise.reject(
+                    "E_HEALTH_CONNECT_DENIED",
+                    denied.message ?: "Health Connect permission to write steps is not granted",
+                    denied
+                )
+            }
         }
     }
 
@@ -1256,6 +1380,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             } else {
                 current.healthConnectReadTypes
             },
+            healthConnectWriteGranularity = patch.optString(
+                "healthConnectWriteGranularity", current.healthConnectWriteGranularity
+            ) ?: current.healthConnectWriteGranularity,
+            healthConnectReadVitals = if (patch.hasKey("healthConnectReadVitals") && !patch.isNull("healthConnectReadVitals")) {
+                patch.getArray("healthConnectReadVitals")?.toStringList() ?: current.healthConnectReadVitals
+            } else {
+                current.healthConnectReadVitals
+            },
             stepSource = patch.optString("stepSource", current.stepSource) ?: current.stepSource,
             preferredStepSourcePackage = patch.optString(
                 "preferredStepSourcePackage", current.preferredStepSourcePackage
@@ -1359,6 +1491,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         "healthConnectIgnoreManualEntries" to config.healthConnectIgnoreManualEntries,
         "healthConnectReadActiveCalories" to config.healthConnectReadActiveCalories,
         "healthConnectReadTypes" to config.healthConnectReadTypes,
+        "healthConnectReadVitals" to config.healthConnectReadVitals,
+        "healthConnectWriteGranularity" to config.healthConnectWriteGranularity,
         "stepSource" to config.stepSource,
         "preferredStepSourcePackage" to config.preferredStepSourcePackage,
         "wearableTrust" to config.wearableTrust,
@@ -1397,5 +1531,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         const val NAME = "StepTrackerPro"
         const val EVENT_PREFIX = "StepTrackerPro:"
         private const val PERMISSION_REQUEST_CODE = 7731
+
+        /** The longest range `deleteHealthConnectData()` takes: ten years. */
+        const val MAX_DELETE_DAYS = 3_660
     }
 }

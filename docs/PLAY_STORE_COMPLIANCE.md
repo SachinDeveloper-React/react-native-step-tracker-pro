@@ -67,7 +67,8 @@ Requirements:
   activity with your own (see
   [INSTALLATION.md](INSTALLATION.md#health-connect-rationale-screen)).
 - Declare the optional permissions (`READ_HEALTH_DATA_IN_BACKGROUND`,
-  `READ_HEALTH_DATA_HISTORY`, `READ_ACTIVE_CALORIES_BURNED`) only when their
+  `READ_HEALTH_DATA_HISTORY`, `READ_ACTIVE_CALORIES_BURNED`, and each vital in
+  `healthConnectReadVitals` - `READ_HEART_RATE` and so on) only when their
   config flag is on, and justify each on the form. Background reads in
   particular get extra scrutiny; the justification that fits this package is
   *"keeps the step count shown in the ongoing notification in sync with a
@@ -75,7 +76,9 @@ Requirements:
 - No advertising, no selling health data, and no sharing it with third parties
   for anything unrelated to the feature the user asked for.
 - Data deletion must be possible from inside your app. `clearHistory()` covers
-  your local store; Health Connect data is deleted from the Health Connect app.
+  your local store, and `deleteHealthConnectData(start, end)` (2.5) what this
+  package mirrored into Health Connect; the user can also delete from the
+  Health Connect app.
 
 ### Read-only vs read-write
 
@@ -105,7 +108,11 @@ alongside the platform's. Three options:
   watch's data still reaches your UI, but nothing of yours is added to the
   user's Health Connect record. The cleanest answer if another app already
   owns step counting for this user.
-- **Write with attribution** — the default.
+- **Write with attribution** — the default. With
+  `healthConnectWriteGranularity: 'minute'` your records say which minutes
+  the steps were taken in, so where they overlap the platform's, Health
+  Connect's priority order decides minute by minute rather than across a
+  whole day at once.
 - **Off entirely** — `healthConnectEnabled: false`, strip the health
   permissions from your manifest. No declaration form at all (Mode A).
 

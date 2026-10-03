@@ -22,6 +22,14 @@ export type StepTrackerErrorCode =
    * manifest. From 2.0 the app declares them; see docs/PERMISSIONS.md.
    */
   | 'E_HEALTH_CONNECT_NOT_DECLARED'
+  /**
+   * Health Connect refused the call for quota, or refused one on the same
+   * quota a moment ago and this one was not made. `details.retryAfterMs`
+   * says when the next call is tried, `details.quota` which quota
+   * (`'read'` or `'write'`). Also emitted on the `error` event, once per
+   * refusal. From 2.5.
+   */
+  | 'E_HEALTH_CONNECT_RATE_LIMITED'
   /** `requestIntegrityToken()` needs `com.google.android.play:integrity` in the app. */
   | 'E_INTEGRITY_UNAVAILABLE'
   /**

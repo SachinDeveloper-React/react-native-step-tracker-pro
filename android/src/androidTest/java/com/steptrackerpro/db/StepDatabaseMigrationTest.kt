@@ -64,7 +64,8 @@ class StepDatabaseMigrationTest {
         // will actually go through.
         val db = helper.runMigrationsAndValidate(
             NAME, StepDatabase.VERSION, true,
-            StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4, StepDatabase.MIGRATION_4_5
+            StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4, StepDatabase.MIGRATION_4_5,
+            StepDatabase.MIGRATION_5_6
         )
 
         db.query("SELECT date, totalSteps, recoveredSteps FROM daily_summary ORDER BY date").use { cursor ->
@@ -88,8 +89,9 @@ class StepDatabaseMigrationTest {
             assertTrue(cursor.moveToFirst())
             assertEquals(0, cursor.getInt(0))
         }
-        // So do the integrity tables: no minute is back-filled from history nobody timed.
-        for (table in listOf("step_minute", "integrity_day", "integrity_event")) {
+        // So do the integrity tables, and the per-minute mirror: no minute is
+        // back-filled from history nobody timed.
+        for (table in listOf("step_minute", "integrity_day", "integrity_event", "mirror_minute")) {
             db.query("SELECT COUNT(*) FROM $table").use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals(0, cursor.getInt(0))
@@ -121,6 +123,36 @@ class StepDatabaseMigrationTest {
         db.query("SELECT COUNT(*) FROM motion_window").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals(1, cursor.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
+    fun migrate5To6KeepsTheIntegrityMinutesAndAddsTheMirrorTable() {
+        // Version 5 as it shipped in 1.5 through 2.4.
+        helper.createDatabase(NAME, 5).apply {
+            execSQL(
+                "INSERT INTO step_minute (minuteStart, date, steps, untimedSteps, chargingSteps, stillSteps, vehicleSteps) " +
+                    "VALUES (60000, '2026-09-14', 80, 5, 10, 0, 0)"
+            )
+            close()
+        }
+        val db = helper.runMigrationsAndValidate(NAME, 6, true, StepDatabase.MIGRATION_5_6)
+        db.query("SELECT steps, untimedSteps FROM step_minute").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(80, cursor.getInt(0))
+            assertEquals(5, cursor.getInt(1))
+        }
+        // Empty: nothing was written per minute before the table existed.
+        db.query("SELECT COUNT(*) FROM mirror_minute").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+        // `written` defaults to nothing written.
+        db.execSQL("INSERT INTO mirror_minute (minuteStart, date, steps) VALUES (120000, '2026-09-14', 12)")
+        db.query("SELECT written FROM mirror_minute").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
         }
         db.close()
     }
@@ -184,6 +216,20 @@ class StepDatabaseMigrationTest {
             }
             integrity.pruneEventsToNewest(2)
             assertEquals(listOf(13L, 14L), integrity.findEvents(0L, 100L).map { it.at })
+
+            // Mirror minutes add up across flushes and keep what was written.
+            val mirror = room.mirrorMinuteDao()
+            mirror.addAll(listOf(MirrorMinuteEntity(60_000L, "2026-09-03", 40)))
+            mirror.setWrittenAll(mapOf(60_000L to 40))
+            mirror.addAll(listOf(MirrorMinuteEntity(60_000L, "2026-09-03", 15)))
+            val kept = mirror.findDate("2026-09-03").single()
+            assertEquals(55, kept.steps)
+            assertEquals(40, kept.written)
+            // A history clear keeps what Health Connect holds; a forget lets the row go.
+            mirror.clearStepsBefore("2026-09-04")
+            assertEquals(0, mirror.deleteEmpty())
+            mirror.forgetWritten(listOf("2026-09-03"))
+            assertEquals(1, mirror.deleteEmpty())
         } finally {
             room.close()
         }

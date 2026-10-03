@@ -209,6 +209,7 @@ await StepTracker.initialize({
   healthConnectEnabled: true,          // default
   healthConnectReadEnabled: true,      // default
   healthConnectWriteEnabled: true,     // default; false to read without mirroring
+  healthConnectWriteGranularity: 'day', // default; 'minute' writes a record per walking minute
   // The tracking service already lets Health Connect be read with the app
   // closed; add healthConnectBackgroundRead: true only for reads while it is
   // down - on phones whose maker kills it often.
@@ -344,8 +345,9 @@ The full list, with what each is for, is in
   never treated as a wearable. Under `'auto'` it is a harmless near-duplicate
   of the phone's own count — and on a fresh install mid-day it is exactly
   what supplies the steps taken before the app existed.
-- The sync worker mirrors the phone's days into Health Connect every 30
-  minutes with stable `clientRecordId`s. Days a wearable already owns are
+- The sync worker mirrors the phone's days into Health Connect every 15
+  minutes (30 before 2.5) with stable `clientRecordId`s, every pending day in
+  one insert. Days a wearable already owns are
   skipped, so other apps never see two copies of one walk.
 
 ### Play Console

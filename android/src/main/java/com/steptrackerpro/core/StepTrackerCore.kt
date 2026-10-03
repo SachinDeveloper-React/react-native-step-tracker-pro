@@ -79,10 +79,27 @@ class StepTrackerCore private constructor(context: Context) {
         appContext, repository, scope, writeLane, ::config
     ) { date -> dayTotals(date).steps }
 
+    /**
+     * This device's steps per minute on their way to `mirror_minute`, for
+     * Health Connect's per-minute records - only under
+     * `healthConnectWriteGranularity: 'minute'`.
+     */
+    private val mirrorMinutes = MirrorMinuteBuffer()
+
+    /**
+     * Held while minutes go from [mirrorMinutes] to `mirror_minute`, so the
+     * per-minute mirror can read today's count and today's minutes as of
+     * one instant - see [liveTodayWithMinutes].
+     */
+    private val mirrorRowsLock = Mutex()
+
     val engine = StepCounterEngine(state, metrics).apply {
         onDayRollover = { closing, newDate -> handleRollover(closing, newDate) }
         onBackfill = { shares, reason -> handleBackfill(shares, reason) }
-        onObserved = { from, to, steps, timed -> integrity.onObserved(from, to, steps, timed) }
+        onObserved = { from, to, steps, timed ->
+            integrity.onObserved(from, to, steps, timed)
+            if (writesMinutes()) mirrorMinutes.record(from, to, steps, timed)
+        }
         onLate = { scheduleLateSteps() }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
         gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
@@ -142,11 +159,31 @@ class StepTrackerCore private constructor(context: Context) {
     private val syncMutex = Mutex()
     private val sourceCache = SourceCache()
 
+    /** The last look at the changes feed behind [sourceCache] - see [confirmCachedSources]. */
+    private val feedCheckedAt = AtomicLong(NEVER)
+    private val feedMutex = Mutex()
+
     init {
         // Sources cached under the old grants would carry the old answer -
         // no distance after the user allowed it, say - for up to ten minutes
         // on a past day. Dropped the moment a fresh read sees a change.
         healthConnect.onGrantsChanged = { sourceCache.invalidate() }
+        // Health Connect refusing a call for quota is the app's to know about
+        // - it is also every other Health Connect call the app makes, through
+        // any library - and nothing else would tell it: the reads that follow
+        // fall back quietly. Once per refusal; the calls held back after it
+        // say nothing.
+        healthConnect.onRateLimited = { refusal ->
+            StepEventBus.emit(
+                StepEventBus.Events.ERROR,
+                mapOf(
+                    "code" to "E_HEALTH_CONNECT_RATE_LIMITED",
+                    "message" to (refusal.message ?: "Health Connect rate limit reached"),
+                    "retryAfterMs" to refusal.retryAfterMs,
+                    "quota" to refusal.category.name.lowercase()
+                )
+            )
+        }
         // Owed by a process that died before it could add them. Last, so
         // everything the write touches is in place when it runs.
         if (state.lateSteps.isNotEmpty()) scheduleLateSteps(delayMs = 0L)
@@ -239,7 +276,10 @@ class StepTrackerCore private constructor(context: Context) {
             activeCalories = config.healthConnectReadActiveCalories,
             readTypes = HealthConnectManager.ReadType.parse(config.healthConnectReadTypes),
             readTypesExplicit = config.healthConnectReadTypesExplicit,
-            writeExplicit = config.healthConnectWriteExplicit
+            writeExplicit = config.healthConnectWriteExplicit,
+            vitals = com.steptrackerpro.health.VitalType.parseLenient(config.healthConnectReadVitals),
+            backgroundReadAvailable = healthConnect.backgroundReadAvailable,
+            historyReadAvailable = healthConnect.historyReadAvailable
         ).forManifest(com.steptrackerpro.util.PermissionHelper.declaredPermissions(appContext))
     }
 
@@ -358,6 +398,7 @@ class StepTrackerCore private constructor(context: Context) {
             scope.launch(writeLane) {
                 repository.saveDay(totals)
                 runCatching { integrity.flush() }
+                runCatching { flushMirrorMinutes() }
                 checkPeriodGoals(totals)
             }
         }
@@ -512,6 +553,7 @@ class StepTrackerCore private constructor(context: Context) {
         sourceCache.invalidate()
         val closed = scope.launch(writeLane + ClosingDay) {
             repository.saveDay(closing)
+            runCatching { flushMirrorMinutes() }
             // The closing day's final verdict, from everything flushed for it.
             runCatching { integrity.onDayClosed(closing.date) }
             // The local date can also move backwards - travelling west across
@@ -577,6 +619,26 @@ class StepTrackerCore private constructor(context: Context) {
         repository.overwriteDay(today)
         // Logged, and today's minutes go with the count they described.
         runCatching { integrity.onReset(today.date) }
+        // So do the minutes kept for Health Connect's per-minute records -
+        // all but what Health Connect holds for each, which the next pass
+        // compares against to delete it.
+        mirrorRowsLock.withLock {
+            mirrorMinutes.clear()
+            runCatching { repository.clearMirrorSteps(today.date) }
+        }
+        // What was mirrored before the reset goes too. Nothing would replace
+        // it otherwise: a day with no steps has nothing to write, so every
+        // other app reading Health Connect kept the old count until the
+        // first step - and the sync after it - wrote over it. In order with
+        // the syncs, and only while the day is still empty: once a step has
+        // come, the next sync writes over the old count anyway.
+        scope.launch {
+            runCatching {
+                syncMutex.withLock {
+                    if (liveToday().steps == 0 && healthMirrorInUse()) deleteMirrored(listOf(today.date))
+                }
+            }
+        }
     }
 
     suspend fun clearHistory() = withContext(writeLane) {
@@ -624,6 +686,7 @@ class StepTrackerCore private constructor(context: Context) {
         scope.launch(writeLane) {
             repository.saveDay(totals)
             runCatching { integrity.flush() }
+            runCatching { flushMirrorMinutes() }
             // Late steps still waiting out their delay go now, while the
             // process is sure to be here.
             runCatching { creditLateSteps() }
@@ -664,15 +727,33 @@ class StepTrackerCore private constructor(context: Context) {
     /** Today's live totals, straight from the counter rather than the database. */
     fun liveToday(): DayTotals {
         rollDayIfDue()
-        val snapshot = engine.snapshot()
-        return DayTotals(
-            snapshot.date,
-            snapshot.steps,
-            snapshot.distance,
-            snapshot.calories,
-            false,
-            recoveredSteps = snapshot.recoveredSteps
-        )
+        return totalsOf(engine.snapshot())
+    }
+
+    private fun totalsOf(snapshot: StepSnapshot): DayTotals = DayTotals(
+        snapshot.date,
+        snapshot.steps,
+        snapshot.distance,
+        snapshot.calories,
+        false,
+        recoveredSteps = snapshot.recoveredSteps
+    )
+
+    /**
+     * Today's live totals and its stored per-minute mirror rows, as of one
+     * instant: the buffer is drained under the engine's lock in the same
+     * breath as the count is read, and no other flush lands until the rows
+     * are read back. Read apart, a step taken between the two would sit in
+     * one and not the other, and the record of unplaced steps would come
+     * and go with every walk.
+     */
+    private suspend fun liveTodayWithMinutes(): Pair<DayTotals, List<MinuteWritePlan.Minute>> {
+        rollDayIfDue()
+        return mirrorRowsLock.withLock {
+            val (snapshot, drained) = synchronized(engine) { engine.snapshot() to mirrorMinutes.drain() }
+            runCatching { repository.addMirrorMinutes(drained) }
+            totalsOf(snapshot) to repository.mirrorMinutes(snapshot.date)
+        }
     }
 
     suspend fun stats(start: String, end: String, goal: Int?): RangeStats {
@@ -866,12 +947,33 @@ class StepTrackerCore private constructor(context: Context) {
         if (!shouldConsultHealthConnect()) return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         // Fresh for evidence that gets signed: a cached list may be half a
         // minute old, and a hot-path timeout is too short for a busy day.
+        // Evidence never falls back on an old answer when a read is refused
+        // for quota: it says so, with no sources.
         val list = readSourcesForDay(
             date,
             timeoutMs = if (fresh) HC_RANGE_READ_TIMEOUT_MS else HC_READ_TIMEOUT_MS,
-            useCache = !fresh
+            useCache = !fresh,
+            staleIfRefused = false
         )
         return list.copy(sources = stampTrust(list.sources))
+    }
+
+    /**
+     * Reads each of [dates]' Health Connect origins into the cache, in as
+     * few reads as cover them, each answered in full - so a loop that then
+     * asks for each day on its own - a `full` upload's - is answered from
+     * the cache instead of reading every day by itself. A day the reads do
+     * not reach is read on its own when asked for, as before.
+     */
+    suspend fun prefetchSources(dates: Collection<String>) {
+        if (dates.isEmpty() || !shouldConsultHealthConnect()) return
+        val sorted = dates.sorted()
+        runCatching {
+            sourcesForRange(
+                sorted.first(), sorted.last(), HC_RANGE_READ_TIMEOUT_MS,
+                requireDetail = true, only = sorted.toSet()
+            )
+        }
     }
 
     /**
@@ -1019,6 +1121,8 @@ class StepTrackerCore private constructor(context: Context) {
                 ?: return result("timeout")
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
+        } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+            return result(HealthConnectRead.RATE_LIMITED)
         } catch (_: Exception) {
             return result("failed")
         }
@@ -1101,11 +1205,13 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     /**
-     * Today's origin split goes stale thirty seconds after the last read. The
-     * sensor path cannot fetch it, but it can ask for a fetch: a walk with the
-     * app closed then keeps the notification and `stepsChanged` in step with a
-     * watch that syncs mid-walk, instead of waiting for the next screen open.
-     * Throttled well below the cache TTL so it never becomes a poll.
+     * Today's origin split goes stale thirty seconds after the last read, or
+     * the changes feed's last word on it. The sensor path cannot fetch it,
+     * but it can ask for a fetch: a walk with the app closed then keeps the
+     * notification and `stepsChanged` in step with a watch that syncs
+     * mid-walk, instead of waiting for the next screen open. Throttled to
+     * once a minute so it never becomes a poll, and when nothing moved the
+     * fetch is one look at the feed rather than a read.
      */
     private fun refreshTodaySourcesIfStale() {
         val config = config()
@@ -1117,7 +1223,14 @@ class StepTrackerCore private constructor(context: Context) {
         val last = lastSourceRefreshAt.get()
         if (now - last < SOURCE_REFRESH_MIN_INTERVAL_MS) return
         if (!lastSourceRefreshAt.compareAndSet(last, now)) return
-        scope.launch { runCatching { resolveToday() } }
+        scope.launch {
+            // Nobody is waiting for this one, so it stands down once this
+            // process has used a good share of the read quota - leaving the
+            // rest for the reads someone is waiting for. The notification
+            // keeps the last answer and the day's lead meanwhile.
+            if (!healthConnect.hasReadHeadroom()) return@launch
+            runCatching { resolveToday() }
+        }
     }
 
     /**
@@ -1138,9 +1251,11 @@ class StepTrackerCore private constructor(context: Context) {
     /**
      * Range stats with every day resolved against Health Connect.
      *
-     * The per-origin data for the whole window is fetched once rather than per
-     * day: a month of raw step records is a single paged read, thirty of them
-     * is thirty.
+     * The per-origin data for the window comes from the cache where the
+     * changes feed still vouches for a day, and the rest is fetched in as few
+     * reads as cover it rather than per day: a month of raw step records is a
+     * single paged read, thirty of them is thirty. A stats screen refreshing
+     * while its user walks re-reads today, not the month.
      */
     suspend fun resolvedStats(start: String, end: String, goal: Int?): RangeStats {
         val stored = stats(start, end, goal)
@@ -1177,28 +1292,9 @@ class StepTrackerCore private constructor(context: Context) {
         // gets longer than a single day's read. Running out of time is said,
         // not passed off as a range with no watch in it; the next call reads
         // again.
-        var read = HealthConnectRead.READ
-        // On the uptime clock, like the timeout itself: a clock the user
-        // moves mid-read cannot stretch or shrink what the refill is given.
-        val deadline = android.os.SystemClock.elapsedRealtime() + HC_RANGE_READ_TIMEOUT_MS
-        val byDate = try {
-            withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
-                healthConnect.readDailyStepsBySource(
-                    DateKeys.startOfDayInstant(start),
-                    minOf(DateKeys.endOfDayInstant(end), Instant.now()),
-                    coverageStartForToday(),
-                    deadline = deadline
-                )
-            } ?: run {
-                read = HealthConnectRead.TIMED_OUT
-                emptyMap()
-            }
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            read = HealthConnectRead.FAILED
-            emptyMap()
-        }
+        val range = sourcesForRange(start, end, HC_RANGE_READ_TIMEOUT_MS)
+        val read = range.healthConnect
+        val byDate = range.byDate
 
         val policy = sourcePolicy()
         val preferred = preferredSourcePackage()
@@ -1275,27 +1371,129 @@ class StepTrackerCore private constructor(context: Context) {
         ) {
             return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         }
-        // On the uptime clock, like the timeout itself: a clock the user
-        // moves mid-read cannot stretch or shrink what the refill is given.
-        val deadline = android.os.SystemClock.elapsedRealtime() + HC_RANGE_READ_TIMEOUT_MS
-        return try {
-            withTimeoutOrNull(HC_RANGE_READ_TIMEOUT_MS) {
-                healthConnect.listSources(
-                    DateKeys.startOfDayInstant(start),
-                    minOf(DateKeys.endOfDayInstant(end), Instant.now()),
-                    deadline
-                )
-            }?.let { SourceList(stampTrust(it), HealthConnectRead.READ) }
-                ?: SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            SourceList(emptyList(), HealthConnectRead.FAILED)
-        }
+        val range = sourcesForRange(start, end, HC_RANGE_READ_TIMEOUT_MS)
+        return SourceList(stampTrust(healthConnect.mergeSources(range.byDate.values)), range.healthConnect)
     }
 
     /** [listSources]' answer: the sources, and how the read went - one of [HealthConnectRead]. */
     data class SourceList(val sources: List<StepSource>, val healthConnect: String)
+
+    /**
+     * Each day's Health Connect origins over a range, and how the reading
+     * went. Under [HealthConnectRead.TIMED_OUT] and [HealthConnectRead.FAILED]
+     * there are none, as a range's callers have always promised; under
+     * [HealthConnectRead.RATE_LIMITED], the days the cache still holds.
+     */
+    private data class RangeSources(val byDate: Map<String, List<StepSource>>, val healthConnect: String)
+
+    /**
+     * Each day from [start] to [end] - or only [only]'s, when given - from
+     * the cache where it still vouches for the day (see [confirmCachedSources]),
+     * and the rest from as few reads as cover them: each run of days the
+     * cache could not answer is one read, so a stats screen that refreshes
+     * as its user walks re-reads today alone. With [requireDetail], only days
+     * answered in full count as cached, and a run is read at most
+     * [HealthConnectManager.RAW_READ_MAX_DAYS] at a time so that it is
+     * answered in full too. Every day read is cached for the next caller.
+     */
+    private suspend fun sourcesForRange(
+        start: String,
+        end: String,
+        timeoutMs: Long,
+        requireDetail: Boolean = false,
+        only: Set<String>? = null
+    ): RangeSources {
+        val today = DateKeys.today()
+        val dates = DateKeys.rangeOf(start, if (end > today) today else end)
+            .filter { only == null || it in only }
+        if (dates.isEmpty()) return RangeSources(emptyMap(), HealthConnectRead.READ)
+        confirmCachedSources()
+        val byDate = HashMap<String, List<StepSource>>()
+        val missing = ArrayList<String>()
+        for (date in dates) {
+            val cached = sourceCache.get(date, requireDetail)
+            if (cached != null) byDate[date] = cached else missing += date
+        }
+        // On the uptime clock, like the timeout itself: a clock the user
+        // moves mid-read cannot stretch or shrink what the refill is given.
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+        val maxRun = if (requireDetail) HealthConnectManager.RAW_READ_MAX_DAYS.toInt() else Int.MAX_VALUE
+        var read = HealthConnectRead.READ
+        for (run in HealthConnectManager.runsOf(missing, maxRun)) {
+            val left = deadline - android.os.SystemClock.elapsedRealtime()
+            if (left <= 0L) {
+                read = HealthConnectRead.TIMED_OUT
+                break
+            }
+            val runStart = DateKeys.startOfDayInstant(run.first())
+            val runEnd = minOf(DateKeys.endOfDayInstant(run.last()), Instant.now())
+            if (!runEnd.isAfter(runStart)) {
+                run.forEach { byDate[it] = emptyList() }
+                continue
+            }
+            try {
+                val days = withTimeoutOrNull(left) {
+                    healthConnect.readSourcesByDay(runStart, runEnd, coverageStartForToday(), deadline = deadline)
+                }
+                if (days == null) {
+                    read = HealthConnectRead.TIMED_OUT
+                    break
+                }
+                for (date in run) {
+                    val sources = days.byDate[date].orEmpty()
+                    byDate[date] = sources
+                    sourceCache.put(date, sources, detailed = date in days.detailed)
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+                read = HealthConnectRead.RATE_LIMITED
+                break
+            } catch (_: Exception) {
+                read = HealthConnectRead.FAILED
+                break
+            }
+        }
+        return when (read) {
+            HealthConnectRead.READ -> RangeSources(byDate, read)
+            // An old answer beats none while Health Connect will not be read.
+            HealthConnectRead.RATE_LIMITED -> {
+                for (date in dates) {
+                    if (date !in byDate) sourceCache.getStale(date, requireDetail)?.let { byDate[date] = it }
+                }
+                RangeSources(byDate, read)
+            }
+            else -> RangeSources(emptyMap(), read)
+        }
+    }
+
+    /**
+     * Brings the source cache up to date with Health Connect's changes feed:
+     * a day whose records moved since the last look is dropped, and every
+     * other day is vouched for again - one call where re-reading even one
+     * quiet day costs a page per record type. At most every
+     * [FEED_CHECK_INTERVAL_MS]. The first look of a process takes the
+     * feed's token before anything is cached, so the answers read after it
+     * can be vouched for from then on; a look that had to start the token
+     * over vouches for nothing. When the feed cannot be read, entries expire
+     * as they always have.
+     */
+    private suspend fun confirmCachedSources() {
+        if (android.os.SystemClock.elapsedRealtime() - feedCheckedAt.get() < FEED_CHECK_INTERVAL_MS) return
+        feedMutex.withLock {
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            if (startedAt - feedCheckedAt.get() < FEED_CHECK_INTERVAL_MS) return
+            val changed = try {
+                withTimeoutOrNull(HC_READ_TIMEOUT_MS) { healthConnect.changedSinceLastLook() }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+            feedCheckedAt.set(android.os.SystemClock.elapsedRealtime())
+            if (changed != null) sourceCache.confirm(changed, startedAt)
+        }
+    }
 
     /**
      * Resolution from data already in the cache, with no Health Connect call.
@@ -1389,68 +1587,142 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     private suspend fun sourcesForDay(date: String): List<StepSource> =
-        readSourcesForDay(date, HC_READ_TIMEOUT_MS, useCache = true).sources
+        readSourcesForDay(date, HC_READ_TIMEOUT_MS, useCache = true, staleIfRefused = true).sources
 
     /**
      * One day's origins and how the read went. Only a finished read is
      * cached; a timeout or a failure is tried again next time. A caller's
      * own cancellation is passed on rather than read as a failed read.
+     *
+     * @param staleIfRefused when Health Connect refuses the read for quota,
+     *   answer with the day's last read however old, for a number on screen
+     *   - never for evidence, which says it was refused instead.
      */
-    private suspend fun readSourcesForDay(date: String, timeoutMs: Long, useCache: Boolean): SourceList {
-        if (useCache) sourceCache.get(date)?.let { return SourceList(it, HealthConnectRead.READ) }
+    private suspend fun readSourcesForDay(
+        date: String,
+        timeoutMs: Long,
+        useCache: Boolean,
+        staleIfRefused: Boolean = false
+    ): SourceList {
+        if (useCache) {
+            confirmCachedSources()
+            sourceCache.get(date)?.let { return SourceList(it, HealthConnectRead.READ) }
+        }
         val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
         val start = DateKeys.startOfDayInstant(date)
         if (!end.isAfter(start)) return SourceList(emptyList(), HealthConnectRead.READ)
         val coverage = if (date == DateKeys.today()) coverageStartForToday() else 0L
         return try {
-            val sources = withTimeoutOrNull(timeoutMs) {
-                healthConnect.readDailyStepsBySource(start, end, coverage)[date].orEmpty()
+            val day = withTimeoutOrNull(timeoutMs) {
+                healthConnect.readSourcesByDay(start, end, coverage)
             } ?: return SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
-            sourceCache.put(date, sources)
+            val sources = day.byDate[date].orEmpty()
+            sourceCache.put(date, sources, detailed = date in day.detailed)
             SourceList(sources, HealthConnectRead.READ)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
+        } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+            val stale = if (staleIfRefused) sourceCache.getStale(date, requireDetail = true) else null
+            SourceList(stale.orEmpty(), HealthConnectRead.RATE_LIMITED)
         } catch (_: Exception) {
             SourceList(emptyList(), HealthConnectRead.FAILED)
         }
     }
 
     /**
-     * Health Connect reads are cross-process IPC plus a database query, and
-     * `getTodaySteps()` is the call an app makes on every screen focus. Serving
-     * a few seconds' stale origin split from memory keeps that cheap; the
-     * device's own count inside the resolution is always live regardless,
-     * because it comes from the engine rather than from here.
+     * Each day's Health Connect origins, as last read. Health Connect reads
+     * are cross-process IPC plus a database query, they count against its
+     * rate limits, and `getTodaySteps()` is the call an app makes on every
+     * screen focus. Serving the origin split from memory keeps that cheap;
+     * the device's own count inside the resolution is always live
+     * regardless, because it comes from the engine rather than from here.
+     *
+     * An entry is good for [TODAY_TTL_MS] (today) or [PAST_TTL_MS] (a past
+     * day) after it was read - or after the changes feed last vouched that
+     * nothing moved on that day, see [confirmCachedSources] - and never more
+     * than [TODAY_MAX_AGE_MS] / [PAST_MAX_AGE_MS] after it was read, in case
+     * the feed missed something. Expired entries are kept, for a read Health
+     * Connect refuses for quota to fall back on. On the uptime clock.
      */
     private class SourceCache {
-        private data class Entry(val at: Long, val sources: List<StepSource>)
+        private class Entry(
+            val readAt: Long,
+            var confirmedAt: Long,
+            val sources: List<StepSource>,
+            /** Read in full - see [HealthConnectManager.DaySources.detailed]. */
+            val detailed: Boolean
+        )
 
         private val entries = HashMap<String, Entry>()
 
+        /**
+         * The day's sources while they can still be vouched for. With
+         * [requireDetail] - a day resolved on its own - only an entry read in
+         * full: a day a long range filled from aggregates has no
+         * recording-method split to take manual entries out of.
+         */
         @Synchronized
-        fun get(date: String): List<StepSource>? {
+        fun get(date: String, requireDetail: Boolean = true): List<StepSource>? {
             val entry = entries[date] ?: return null
-            val ttl = if (date == DateKeys.today()) TODAY_TTL_MS else PAST_TTL_MS
-            if (android.os.SystemClock.elapsedRealtime() - entry.at > ttl) {
-                entries.remove(date)
-                return null
-            }
-            return entry.sources
+            if (requireDetail && !entry.detailed) return null
+            return entry.sources.takeIf { fresh(date, entry, android.os.SystemClock.elapsedRealtime()) }
         }
 
+        /** The day's sources however old - only for a read Health Connect refused for quota. */
         @Synchronized
-        fun put(date: String, sources: List<StepSource>) {
-            if (entries.size > MAX_ENTRIES) entries.clear()
-            entries[date] = Entry(android.os.SystemClock.elapsedRealtime(), sources)
+        fun getStale(date: String, requireDetail: Boolean): List<StepSource>? =
+            entries[date]?.takeIf { !requireDetail || it.detailed }?.sources
+
+        @Synchronized
+        fun put(date: String, sources: List<StepSource>, detailed: Boolean) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            // A range's partial answer never displaces a full one still good.
+            val current = entries[date]
+            if (!detailed && current != null && current.detailed && fresh(date, current, now)) return
+            entries[date] = Entry(now, now, sources, detailed)
+            if (entries.size > MAX_ENTRIES) {
+                entries.entries.sortedBy { it.value.readAt }
+                    .take(entries.size - MAX_ENTRIES)
+                    .forEach { entries.remove(it.key) }
+            }
+        }
+
+        /**
+         * Applies a look at the changes feed taken at [at]: the days it saw
+         * move are dropped, and every other entry read before [at] is
+         * vouched for as of then.
+         */
+        @Synchronized
+        fun confirm(changed: HealthConnectManager.ChangedDays, at: Long) {
+            if (changed.all) {
+                entries.clear()
+                return
+            }
+            changed.dates.forEach { entries.remove(it) }
+            entries.values.forEach { if (it.confirmedAt < at) it.confirmedAt = at }
         }
 
         @Synchronized
         fun invalidate() = entries.clear()
 
+        @Synchronized
+        fun invalidate(dates: Collection<String>) = dates.forEach { entries.remove(it) }
+
+        private fun fresh(date: String, entry: Entry, now: Long): Boolean {
+            val today = date == DateKeys.today()
+            val ttl = if (today) TODAY_TTL_MS else PAST_TTL_MS
+            val maxAge = if (today) TODAY_MAX_AGE_MS else PAST_MAX_AGE_MS
+            return now - entry.confirmedAt <= ttl && now - entry.readAt <= maxAge
+        }
+
         private companion object {
             const val TODAY_TTL_MS = 30_000L
             const val PAST_TTL_MS = 600_000L
-            const val MAX_ENTRIES = 64
+            const val TODAY_MAX_AGE_MS = 60 * 60_000L
+            const val PAST_MAX_AGE_MS = 6 * 60 * 60_000L
+
+            /** A year of days and then some: a yearly chart keeps its days. */
+            const val MAX_ENTRIES = 400
         }
     }
 
@@ -1492,56 +1764,344 @@ class StepTrackerCore private constructor(context: Context) {
         // Today first, so its live totals win over the row just written for it.
         val targets = (listOf(today) + pending).distinctBy { it.date }
 
-        var succeeded = 0
-        var failed = 0
+        // A day a wearable already owns must not be mirrored from here.
+        // Health Connect keeps origins separate, so writing this phone's
+        // parallel count of the same walk leaves every other app reading
+        // Health Connect with both copies of it.
+        val owners = externalOwners(targets, today.date)
         var skipped = 0
+        var deferred = 0
         val done = ArrayList<DayTotals>(targets.size)
+        val rows = HashMap<String, DayTotals>()
+        val mirrors = ArrayList<DayTotals>()
         for (day in targets) {
-            // A day a wearable already owns must not be mirrored from here.
-            // Health Connect keeps origins separate, so writing this phone's
-            // parallel count of the same walk leaves every other app reading
-            // Health Connect with both copies of it.
-            if (isOwnedByExternalSource(day.date)) {
-                skipped++
-                // Marked done rather than left pending: nothing about this day
-                // will ever make it writable, and leaving it queued would have
-                // the worker retry it for as long as it stays in retention.
-                if (day.date != today.date) done.add(day)
-                continue
+            when (owners[day.date]) {
+                // Health Connect would not say, for quota: neither written nor
+                // skipped, but left for the next pass.
+                null -> {
+                    deferred++
+                    continue
+                }
+                true -> {
+                    skipped++
+                    // Marked done rather than left pending: nothing about this day
+                    // will ever make it writable, and leaving it queued would have
+                    // the worker retry it for as long as it stays in retention.
+                    if (day.date != today.date) done.add(day)
+                    continue
+                }
+                false -> Unit
             }
-            if (healthConnect.writeDay(mirrorTotals(day))) {
-                succeeded++
-                // Today stays unsynced: it is still moving.
-                if (day.date != today.date) done.add(day)
-            } else {
-                failed++
-            }
+            rows[day.date] = day
+            mirrors += mirrorTotals(day)
         }
+        val pass = mirror(rows, mirrors, config)
+        val succeeded = pass.written.size
+        val failed = pass.failed.size + deferred
+        val rateLimited = pass.rateLimited || deferred > 0
+        // Today stays unsynced: it is still moving.
+        pass.written.forEach { date -> if (date != today.date) rows[date]?.let { done.add(it) } }
         // Only days still holding the count this pass read: one a backfill
         // grew meanwhile stays queued, and the next pass writes its new total.
         repository.markSynced(SyncTarget.HEALTH_CONNECT, done)
         state.lastHealthSyncAt = System.currentTimeMillis()
-        // Our own records just changed, so the cached origin split is stale.
-        sourceCache.invalidate()
+        // Our own records just changed on these days, so their cached origin
+        // split is stale. Only these: the rest of what is cached still holds.
+        sourceCache.invalidate(pass.changed)
 
         // A write that failed against an available, permitted provider is worth
         // another attempt; nothing else here is.
         val result = syncResult(
-            "health_connect", succeeded, failed, failed == 0, null,
-            retryable = failed > 0, skipped = skipped
+            "health_connect", succeeded, failed, failed == 0,
+            if (rateLimited) RATE_LIMITED_MESSAGE else null,
+            retryable = failed > 0, skipped = skipped, rateLimited = rateLimited
         )
         StepEventBus.emit(StepEventBus.Events.SYNC_COMPLETED, result)
         result
     }
 
+    /** How one pass of mirroring went - see [mirror]. */
+    private data class MirrorPass(
+        /** Days everything was written for - including days with nothing to write. */
+        val written: Set<String>,
+        /** Days some of whose write did not land; worth another attempt. */
+        val failed: Set<String>,
+        /** Days whose records in Health Connect changed, so their cached origin split is stale. */
+        val changed: Set<String>,
+        /** Health Connect refused a call for quota. */
+        val rateLimited: Boolean
+    )
+
     /**
-     * Whether the resolved owner of a day is some other app. Cheap in the common
-     * case: the policy check short-circuits before any Health Connect call.
+     * Mirrors [mirrors] - each [rows] day's totals as they go into Health
+     * Connect - as one record per day, or per minute under
+     * `healthConnectWriteGranularity: 'minute'`. Under the sync lock.
      */
-    private suspend fun isOwnedByExternalSource(date: String): Boolean {
-        if (!shouldConsultHealthConnect()) return false
-        return runCatching { resolveDay(date).usedExternal }.getOrDefault(false)
+    private suspend fun mirror(
+        rows: Map<String, DayTotals>,
+        mirrors: List<DayTotals>,
+        config: StepTrackerConfig = config()
+    ): MirrorPass =
+        if (config.healthConnectWriteGranularity == WriteGranularity.MINUTE) {
+            mirrorMinuteDays(rows, mirrors)
+        } else {
+            mirrorDays(rows, mirrors)
+        }
+
+    /** Day mode: one record per day and type, every pending day in one insert. */
+    private suspend fun mirrorDays(rows: Map<String, DayTotals>, mirrors: List<DayTotals>): MirrorPass {
+        // Every step taken out under exclude mode: there is nothing to
+        // write, and whatever was written before - flagged steps included -
+        // has to go, or other apps keep reading it.
+        val emptied = mirrors.filter { it.steps <= 0 && (rows[it.date]?.steps ?: 0) > 0 }.map { it.date }
+        val writable = mirrors.filter { it.date !in emptied }
+        // A day minute mode wrote keeps no minute record under the day
+        // record about to cover it: Health Connect counts only one of two
+        // overlapping records from one app.
+        val cleanup = clearMinuteRecords(writable.map { it.date })
+        // One insert for every day there is to write, rather than one a day.
+        val outcome = healthConnect.writeDays(writable.filter { it.date !in cleanup.blocked })
+        outcome.written.maxOrNull()?.let { state.noteDayWrites(it) }
+        val written = LinkedHashSet(outcome.written)
+        val failed = LinkedHashSet(outcome.failed + cleanup.blocked)
+        var rateLimited = outcome.rateLimited || cleanup.rateLimited
+        if (emptied.isNotEmpty() && !rateLimited) {
+            try {
+                deleteMirrored(emptied)
+                written += emptied
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+                rateLimited = true
+                failed += emptied
+            } catch (_: Exception) {
+                failed += emptied
+            }
+        } else {
+            failed += emptied
+        }
+        return MirrorPass(written, failed, written + cleanup.cleared, rateLimited)
     }
+
+    /**
+     * Minute mode: a record per minute with steps, and the day record for
+     * the steps no minute holds - see [MinuteWritePlan] and
+     * [HealthConnectManager.writeMinutes]. Only what moved since the last
+     * pass is written, and a pass that fails part way leaves what landed
+     * recorded, for the next one to carry on from.
+     */
+    private suspend fun mirrorMinuteDays(rows: Map<String, DayTotals>, mirrors: List<DayTotals>): MirrorPass {
+        val today = DateKeys.today()
+        // Today as of now, with its minutes as of the same instant; the
+        // drain behind it stores every other day's pending minutes too.
+        val live = if (mirrors.any { it.date == today }) {
+            liveTodayWithMinutes().takeIf { (totals, _) -> totals.date == today }
+        } else {
+            runCatching { flushMirrorMinutes() }
+            null
+        }
+        val now = Instant.now()
+        val residuals = state.mirrorResiduals
+        // Every minute's distance and calories are its share of the day's,
+        // so a profile change - height, stride, weight - moves all of them:
+        // today's are written again, not only the minutes that changed.
+        val metricsNow = metricsSignature()
+        val rewrite = metricsNow != state.mirrorMetrics
+        // The last day day mode may have written a full-day record for; an
+        // install from before 2.5 may have, up to today.
+        val dayRecordsThrough = state.dayWritesThrough ?: today.also { state.noteDayWrites(it) }
+        val idle = LinkedHashSet<String>()
+        val days = mirrors.mapNotNull { listed ->
+            val fresh = live?.takeIf { (totals, _) -> totals.date == listed.date }
+            val mirror = fresh?.let { mirrorTotals(it.first) } ?: listed
+            val own = fresh?.first ?: rows[listed.date]
+            val minutes = fresh?.second ?: repository.mirrorMinutes(listed.date)
+            val anyWritten = minutes.any { it.written > 0 }
+            val stands = mirror.date in residuals
+            val counted = (own?.steps ?: 0) > 0
+            // No steps, and nothing of ours in Health Connect for the day: an
+            // idle morning has nothing to write and nothing to delete.
+            if (mirror.steps <= 0 && !counted && !anyWritten && !stands) {
+                idle += mirror.date
+                return@mapNotNull null
+            }
+            val dayEnd = minOf(DateKeys.endOfDayInstant(mirror.date), now)
+            val plan = MinuteWritePlan.plan(
+                minutes, mirror.steps, DateKeys.startOfDayMillis(mirror.date), dayEnd.toEpochMilli(), rewrite,
+                observed = own?.let { it.steps - it.recoveredSteps } ?: mirror.steps
+            )
+            HealthConnectManager.MinuteDay(
+                totals = mirror,
+                dayEnd = dayEnd,
+                upserts = plan.upserts,
+                deletes = plan.deletes,
+                residual = plan.residual,
+                residualSpan = plan.residualSpan,
+                // The day record goes once no step is left for it: it held
+                // some last time, or - on a day's first pass - day mode may
+                // have written the whole day into it.
+                deleteResidual = plan.residual == 0 &&
+                    (stands || (!anyWritten && counted && mirror.date <= dayRecordsThrough))
+            )
+        }
+        val outcome = healthConnect.writeMinutes(days)
+        withContext(writeLane) { repository.markMirrorWritten(outcome.written) }
+        state.mirrorResiduals = residuals + outcome.residualWritten - outcome.residualDeleted
+        state.noteMinuteWrites(outcome.inserted)
+        if (rewrite && (today in outcome.complete || today in idle)) state.mirrorMetrics = metricsNow
+        return MirrorPass(outcome.complete + idle, outcome.failed, outcome.changed, outcome.rateLimited)
+    }
+
+    /** Distance and calories per step as the profile stands - see [StepStateStore.mirrorMetrics]. */
+    private fun metricsSignature(): String =
+        String.format(java.util.Locale.ROOT, "%.6f|%.6f", metrics.distance(1), metrics.calories(1))
+
+    /** What [clearMinuteRecords] did. */
+    private data class MinuteCleanup(
+        /** Days whose minute records are gone. */
+        val cleared: Set<String> = emptySet(),
+        /** Days whose minute records could not be deleted: not to be written as a day this time. */
+        val blocked: Set<String> = emptySet(),
+        /** Health Connect refused the delete for quota. */
+        val rateLimited: Boolean = false
+    )
+
+    /**
+     * Deletes the minute records [dates] still have in Health Connect from
+     * minute mode, before a day record covers them.
+     */
+    private suspend fun clearMinuteRecords(dates: List<String>): MinuteCleanup {
+        val spans = state.minuteWriteDays
+        val candidates = dates.filterTo(HashSet()) { it in spans }
+        if (candidates.isEmpty()) return MinuteCleanup()
+        val written = repository.writtenMirrorMinutes(candidates.min(), candidates.max())
+            .filterKeys { it in candidates }
+        if (written.isEmpty()) return MinuteCleanup()
+        return try {
+            healthConnect.deleteOwnDays(emptyList(), minutes = written)
+            withContext(writeLane) { repository.forgetMirrorWritten(written.keys) }
+            state.mirrorResiduals = state.mirrorResiduals - written.keys
+            state.forgetMinuteWrites(written.keys)
+            MinuteCleanup(cleared = written.keys)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
+            MinuteCleanup(blocked = written.keys, rateLimited = true)
+        } catch (_: Exception) {
+            MinuteCleanup(blocked = written.keys)
+        }
+    }
+
+    /**
+     * Deletes every record this package mirrored into Health Connect for
+     * [dates] - day records and minute records - and forgets that the
+     * minutes were written. A day minute mode wrote whose minutes the table
+     * no longer remembers - pruned with history - has every minute of it
+     * deleted by id. Throws as [HealthConnectManager.deleteOwnDays] does.
+     */
+    private suspend fun deleteMirrored(dates: Collection<String>): Set<HealthConnectManager.ReadType> {
+        val sorted = dates.distinct().sorted()
+        if (sorted.isEmpty()) return healthConnect.deleteOwnDays(emptyList())
+        val wanted = sorted.toSet()
+        val written = repository.writtenMirrorMinutes(sorted.first(), sorted.last()).filterKeys { it in wanted }
+        val spans = state.minuteWriteDays
+        val unremembered = if (spans.isEmpty()) {
+            emptySet()
+        } else {
+            val remembered = repository.mirrorDates(sorted.first(), sorted.last())
+            sorted.filterTo(LinkedHashSet()) { it in spans && it !in remembered }
+        }
+        val types = healthConnect.deleteOwnDays(sorted, written, unremembered)
+        withContext(writeLane) { repository.forgetMirrorWritten(sorted) }
+        state.mirrorResiduals = state.mirrorResiduals - wanted
+        state.forgetMinuteWrites(wanted)
+        return types
+    }
+
+    /**
+     * `writeHealthConnectSteps(date)`: one day mirrored now, the way the
+     * sync mirrors it - per minute in minute mode - and true once all of it
+     * landed. In order with the syncs. A day a wearable owns is written all
+     * the same: the caller asked for it.
+     */
+    suspend fun writeHealthConnectDay(date: String): Boolean = syncMutex.withLock {
+        val day = dayTotals(date)
+        val pass = mirror(mapOf(date to day), listOf(mirrorTotals(day)))
+        sourceCache.invalidate(pass.changed)
+        date in pass.written
+    }
+
+    /** Writes pending per-minute steps to `mirror_minute`. */
+    private suspend fun flushMirrorMinutes() {
+        mirrorRowsLock.withLock { repository.addMirrorMinutes(mirrorMinutes.drain()) }
+    }
+
+    /** Per-minute records are on: steps are kept a minute at a time for them. */
+    private fun writesMinutes(): Boolean {
+        val config = config()
+        return config.healthConnectEnabled && config.healthConnectWriteEnabled &&
+            config.healthConnectWriteGranularity == WriteGranularity.MINUTE
+    }
+
+    /**
+     * Whether some other app owns each of [days] - its resolved answer is not
+     * this device - or null for a day Health Connect refused to say about for
+     * quota. Today goes through [resolveDay], where its continuity baseline
+     * lives; every other day comes from one read per run of consecutive days
+     * the cache cannot answer, where there used to be one read per day. Cheap in the common
+     * case: the policy check short-circuits before any Health Connect call. A
+     * read that fails or runs out of time leaves the days to this device, as
+     * it always has.
+     */
+    private suspend fun externalOwners(days: List<DayTotals>, today: String): Map<String, Boolean?> {
+        if (!shouldConsultHealthConnect()) return days.associate { it.date to false }
+        val out = HashMap<String, Boolean?>()
+        val past = days.filter { it.date != today }
+        if (past.size < days.size) out[today] = runCatching { resolveDay(today).usedExternal }.getOrDefault(false)
+        if (past.isEmpty()) return out
+        val dates = past.mapTo(HashSet()) { it.date }
+        val range = sourcesForRange(
+            dates.min(), dates.max(), HC_RANGE_READ_TIMEOUT_MS, requireDetail = true, only = dates
+        )
+        val policy = sourcePolicy()
+        val preferred = preferredSourcePackage()
+        val reliable = coverageReliable()
+        val ignoreManual = config().healthConnectIgnoreManualEntries
+        val trust = wearableTrust()
+        val allowlist = wearableAllowlist()
+        for (day in past) {
+            val sources = range.byDate[day.date]
+            if (sources == null && range.healthConnect == HealthConnectRead.RATE_LIMITED) {
+                out[day.date] = null
+                continue
+            }
+            out[day.date] = runCatching {
+                val suspect = integrity.suspect(day.date, day.steps)
+                StepSourceResolver.resolve(
+                    policy, adjusted(day, suspect, integrity.excluded(suspect)), sources.orEmpty(), preferred, metrics,
+                    deviceCoverageReliable = reliable,
+                    ignoreManualEntries = ignoreManual,
+                    wearableTrust = trust,
+                    wearableAllowlist = allowlist
+                ).usedExternal
+            }.getOrDefault(false)
+        }
+        return out
+    }
+
+    /**
+     * Deletes the records this package mirrored into Health Connect for the
+     * days from [start] to [end] - only its own, day and minute records, by
+     * client record id - of each type whose write permission is granted,
+     * which are returned. Nothing else local changes: a day already marked
+     * synced is not written again, and today is, at the next sync, while
+     * writes are on.
+     */
+    suspend fun deleteHealthConnectDays(start: String, end: String): Set<HealthConnectManager.ReadType> =
+        syncMutex.withLock {
+            val dates = DateKeys.rangeOf(start, end)
+            deleteMirrored(dates).also { sourceCache.invalidate(dates) }
+        }
 
     private fun syncResult(
         target: String,
@@ -1550,7 +2110,8 @@ class StepTrackerCore private constructor(context: Context) {
         success: Boolean,
         error: String?,
         retryable: Boolean = false,
-        skipped: Int = 0
+        skipped: Int = 0,
+        rateLimited: Boolean = false
     ): Map<String, Any?> = mapOf(
         "target" to target,
         "syncedRecords" to synced,
@@ -1559,7 +2120,9 @@ class StepTrackerCore private constructor(context: Context) {
         "skippedRecords" to skipped,
         "success" to success,
         "error" to error,
-        "retryable" to retryable
+        "retryable" to retryable,
+        /** Health Connect refused a call for quota; what it covered waits for the next pass. */
+        "rateLimited" to rateLimited
     )
 
     companion object {
@@ -1590,6 +2153,12 @@ class StepTrackerCore private constructor(context: Context) {
 
         /** Floor between sensor-triggered Health Connect refreshes of today. */
         private const val SOURCE_REFRESH_MIN_INTERVAL_MS = 60_000L
+
+        /** Floor between looks at the changes feed behind the source cache. */
+        private const val FEED_CHECK_INTERVAL_MS = 15_000L
+
+        /** The sync result's `error` when Health Connect refused it for quota. */
+        const val RATE_LIMITED_MESSAGE = "Health Connect rate limit reached; the rest waits for the next sync"
 
         /**
          * How long a late batch's steps wait before they are added to their

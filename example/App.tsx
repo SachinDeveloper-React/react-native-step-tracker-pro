@@ -70,6 +70,12 @@ function healthSummary(health: ReturnType<typeof useHealthConnect>): string {
     default:
       break;
   }
+  if (status.rateLimit?.readsLimited) {
+    // Health Connect refused a read for quota. The numbers on screen are the
+    // last ones it gave, and reads resume on their own.
+    const seconds = Math.ceil(status.rateLimit.readsRetryAfterMs / 1000);
+    return `Connected, resting: Health Connect's read limit was reached. Reads resume in ${seconds} s.`;
+  }
   if (status.granted) {
     return health.hasWearable
       ? 'Connected. A wearable is publishing steps.'
@@ -116,6 +122,10 @@ export default function App() {
     // trusted for its whole margin; anything else stamping TYPE_WATCH is
     // bound by the coverage rule like a phone-side app.
     wearableTrust: 'catalog',
+    // Mirror into Health Connect a minute at a time, as its guidance for
+    // steps asks, so other apps' charts show when the steps were taken.
+    // 'day' (the default) writes one record per day.
+    healthConnectWriteGranularity: 'minute',
     // Every step the tracker saw is judged on the day it was taken, steps
     // the phone held across midnight included; a closed day that grows says
     // so with historyBackfilled. 'drop' where a paid day must never change.

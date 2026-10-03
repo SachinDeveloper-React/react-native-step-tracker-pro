@@ -14,7 +14,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MotionWindowEntity::class,
         StepMinuteEntity::class,
         IntegrityDayEntity::class,
-        IntegrityEventEntity::class
+        IntegrityEventEntity::class,
+        MirrorMinuteEntity::class
     ],
     version = StepDatabase.VERSION,
     exportSchema = true
@@ -26,12 +27,13 @@ abstract class StepDatabase : RoomDatabase() {
     abstract fun motionWindowDao(): MotionWindowDao
     abstract fun stepMinuteDao(): StepMinuteDao
     abstract fun integrityDao(): IntegrityDao
+    abstract fun mirrorMinuteDao(): MirrorMinuteDao
 
     companion object {
         private const val NAME = "step_tracker_pro.db"
 
         /** Kept next to the `@Database` annotation; the migration test targets it. */
-        const val VERSION = 5
+        const val VERSION = 6
 
         /**
          * Health Connect and the remote endpoint used to share the `synced`
@@ -138,9 +140,31 @@ abstract class StepDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * The `mirror_minute` table behind Health Connect's per-minute
+         * records (`healthConnectWriteGranularity: 'minute'`). A new table
+         * only, starting empty: a day it has no minutes for is written as
+         * one record, as before.
+         */
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `mirror_minute` (" +
+                        "`minuteStart` INTEGER NOT NULL, " +
+                        "`date` TEXT NOT NULL, " +
+                        "`steps` INTEGER NOT NULL, " +
+                        "`written` INTEGER NOT NULL DEFAULT 0, " +
+                        "PRIMARY KEY(`minuteStart`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mirror_minute_date` ON `mirror_minute` (`date`)"
+                )
+            }
+        }
+
         /** Every migration, in order, for the builder and the migration test. */
         internal val MIGRATIONS: Array<Migration> =
-            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
 
         @Volatile
         private var instance: StepDatabase? = null

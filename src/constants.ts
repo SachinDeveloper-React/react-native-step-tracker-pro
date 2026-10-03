@@ -21,11 +21,13 @@ export const DEFAULT_CONFIG: Required<
     | 'healthConnectSyncIntervalMinutes'
     | 'healthConnectReadEnabled'
     | 'healthConnectWriteEnabled'
+    | 'healthConnectWriteGranularity'
     | 'healthConnectBackgroundRead'
     | 'healthConnectHistoryRead'
     | 'healthConnectIgnoreManualEntries'
     | 'healthConnectReadActiveCalories'
     | 'healthConnectReadTypes'
+    | 'healthConnectReadVitals'
     | 'stepSource'
     | 'wearableTrust'
     | 'remoteSyncPayload'
@@ -55,14 +57,16 @@ export const DEFAULT_CONFIG: Required<
   eventThrottleMs: 500,
   persistEveryNSteps: 10,
   healthConnectEnabled: true,
-  healthConnectSyncIntervalMinutes: 30,
+  healthConnectSyncIntervalMinutes: 15,
   healthConnectReadEnabled: true,
   healthConnectWriteEnabled: true,
+  healthConnectWriteGranularity: 'day',
   healthConnectBackgroundRead: false,
   healthConnectHistoryRead: false,
   healthConnectIgnoreManualEntries: false,
   healthConnectReadActiveCalories: false,
   healthConnectReadTypes: ['steps', 'distance', 'totalCalories'],
+  healthConnectReadVitals: [],
   stepSource: 'auto',
   wearableTrust: 'metadata',
   remoteSyncPayload: 'totals',

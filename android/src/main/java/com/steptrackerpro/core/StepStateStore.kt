@@ -103,6 +103,73 @@ class StepStateStore(context: Context) {
         set(value) = prefs.edit().putLong(KEY_LAST_HC_SYNC, value).apply()
 
     /**
+     * Days some per-minute record (`healthConnectWriteGranularity:
+     * 'minute'`) was written for and not deleted since - see [DateSpans]. A
+     * day here may have minute records in Health Connect the
+     * `mirror_minute` table no longer remembers - pruned with history - so
+     * deleting such a day lists every minute of it.
+     */
+    val minuteWriteDays: DateSpans
+        @Synchronized get() = DateSpans.decode(prefs.getString(KEY_MINUTE_WRITE_DAYS, null))
+
+    /** Notes that [dates] now have per-minute records in Health Connect. */
+    @Synchronized
+    fun noteMinuteWrites(dates: Collection<String>) {
+        val before = minuteWriteDays
+        val after = before.plus(dates)
+        if (after != before) prefs.edit().putString(KEY_MINUTE_WRITE_DAYS, after.encode()).apply()
+    }
+
+    /** Notes that [dates] no longer have any per-minute record in Health Connect. */
+    @Synchronized
+    fun forgetMinuteWrites(dates: Collection<String>) {
+        val before = minuteWriteDays
+        val after = before.minus(dates)
+        if (after != before) prefs.edit().putString(KEY_MINUTE_WRITE_DAYS, after.encode()).apply()
+    }
+
+    /**
+     * The latest day a day record was written for in day mode, or null when
+     * nothing says - an install from before 2.5, which wrote one every day.
+     * A later day holds no full-day record for minute mode to delete.
+     */
+    val dayWritesThrough: String?
+        get() = prefs.getString(KEY_DAY_WRITES_THROUGH, null)?.takeIf { it.length == 10 }
+
+    /** Notes that a day record may have been written for [date] in day mode. */
+    @Synchronized
+    fun noteDayWrites(date: String) {
+        val through = dayWritesThrough
+        if (through == null || date > through) prefs.edit().putString(KEY_DAY_WRITES_THROUGH, date).apply()
+    }
+
+    /**
+     * Distance and calories per step that today's minute records were last
+     * written with, so a profile change - height, stride, weight - writes
+     * them all again rather than leaving the morning on the old figures.
+     */
+    var mirrorMetrics: String?
+        get() = prefs.getString(KEY_MIRROR_METRICS, null)
+        set(value) = prefs.edit().putString(KEY_MIRROR_METRICS, value).apply()
+
+    /**
+     * Days whose day record holds, in minute mode, the steps no minute
+     * record does - so a pass that finds none left knows to delete it.
+     * Days a year old are dropped: nothing writes them any more.
+     */
+    var mirrorResiduals: Set<String>
+        get() = prefs.getString(KEY_MIRROR_RESIDUALS, null)
+            ?.split(',')
+            ?.filterTo(LinkedHashSet()) { it.length == 10 }
+            .orEmpty()
+        set(value) {
+            val cutoff = DateKeys.minusDays(DateKeys.today(), 400)
+            prefs.edit()
+                .putString(KEY_MIRROR_RESIDUALS, value.filter { it >= cutoff }.sorted().joinToString(","))
+                .apply()
+        }
+
+    /**
      * Version stamp for Health Connect's `clientRecordVersion`, which resolves
      * same-id collisions by keeping the higher value. It must never go
      * backwards, so it cannot simply be the wall clock: after the user moves
@@ -467,6 +534,10 @@ class StepStateStore(context: Context) {
         private const val KEY_LAST_EVENT_AT = "last_event_at"
         private const val KEY_AUTO_START = "should_auto_start"
         private const val KEY_LAST_HC_SYNC = "last_hc_sync_at"
+        private const val KEY_MINUTE_WRITE_DAYS = "hc_minute_write_days"
+        private const val KEY_MIRROR_METRICS = "hc_mirror_metrics"
+        private const val KEY_DAY_WRITES_THROUGH = "hc_day_writes_through"
+        private const val KEY_MIRROR_RESIDUALS = "hc_mirror_residuals"
         private const val KEY_HC_VERSION = "hc_record_version"
         private const val KEY_HC_DENIALS = "hc_permission_denials"
         private const val KEY_PREFERRED_SOURCE = "preferred_step_source"

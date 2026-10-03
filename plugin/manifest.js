@@ -6,7 +6,7 @@
  * From 2.0 the library's own manifest carries only what sensor-only counting
  * needs. These add what an app opts into:
  *
- *   healthConnect: true | false | { read, write, readTypes, backgroundRead, historyRead, activeCalories }
+ *   healthConnect: true | false | { read, write, readTypes, backgroundRead, historyRead, activeCalories, vitals }
  *   notificationIcon: 'ic_stat_steps'
  *
  * `healthConnect: false` says the app never uses Health Connect: the
@@ -20,6 +20,8 @@
  *
  * `readTypes` matches the `healthConnectReadTypes` config option: the read
  * permissions declared are the ones for those types, steps always.
+ * `vitals` matches `healthConnectReadVitals`: one read permission per vital
+ * listed, none by default.
  *   batteryOptimizationPrompt: true
  */
 
@@ -30,6 +32,17 @@ const READ_TYPE_PERMISSIONS = {
   steps: 'STEPS',
   distance: 'DISTANCE',
   totalCalories: 'TOTAL_CALORIES_BURNED',
+};
+
+/** Health Connect's permission suffix for each `healthConnectReadVitals` name. */
+const VITAL_PERMISSIONS = {
+  heartRate: 'HEART_RATE',
+  restingHeartRate: 'RESTING_HEART_RATE',
+  oxygenSaturation: 'OXYGEN_SATURATION',
+  respiratoryRate: 'RESPIRATORY_RATE',
+  bloodPressure: 'BLOOD_PRESSURE',
+  bodyTemperature: 'BODY_TEMPERATURE',
+  bloodGlucose: 'BLOOD_GLUCOSE',
 };
 
 /** The permissions a set of plugin options needs, in manifest order. */
@@ -46,6 +59,7 @@ function permissionsFor(options = {}) {
     if (read && scope.backgroundRead) out.push(`${HEALTH}READ_HEALTH_DATA_IN_BACKGROUND`);
     if (read && scope.historyRead) out.push(`${HEALTH}READ_HEALTH_DATA_HISTORY`);
     if (read && scope.activeCalories) out.push(`${HEALTH}READ_ACTIVE_CALORIES_BURNED`);
+    if (read) vitalsFor(scope.vitals).forEach((t) => out.push(`${HEALTH}READ_${t}`));
   }
   if (options.batteryOptimizationPrompt) {
     out.push('android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS');
@@ -72,6 +86,24 @@ function readTypesFor(readTypes) {
   return Object.keys(READ_TYPE_PERMISSIONS)
     .filter((t) => t === 'steps' || readTypes.includes(t))
     .map((t) => READ_TYPE_PERMISSIONS[t]);
+}
+
+/** The permission suffixes for a `vitals` option, in a fixed order; none when it is absent. */
+function vitalsFor(vitals) {
+  if (vitals == null) return [];
+  if (!Array.isArray(vitals)) {
+    throw new Error('react-native-step-tracker-pro: healthConnect.vitals must be an array');
+  }
+  const unknown = vitals.filter((v) => !(v in VITAL_PERMISSIONS));
+  if (unknown.length > 0) {
+    throw new Error(
+      `react-native-step-tracker-pro: unknown healthConnect.vitals ${unknown.join(', ')}; ` +
+        `use ${Object.keys(VITAL_PERMISSIONS).join(', ')}`
+    );
+  }
+  return Object.keys(VITAL_PERMISSIONS)
+    .filter((v) => vitals.includes(v))
+    .map((v) => VITAL_PERMISSIONS[v]);
 }
 
 const TOOLS = 'http://schemas.android.com/tools';

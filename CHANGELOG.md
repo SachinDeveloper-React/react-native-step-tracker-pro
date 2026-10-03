@@ -5,6 +5,151 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-10-03
+
+Health Connect, checked against Google's guides - availability and
+features, data format, writing, reading, aggregating, deleting, syncing,
+metadata, rate limiting, on-device step tracking and vitals - starting from
+apps running out of Health Connect's rate limits. A minor release: it adds
+API, and per-minute records are opt-in.
+
+### Fixed
+
+- **Health Connect's rate limits ran out under ordinary use.** Health
+  Connect meters every call an app makes - each page of records, each
+  aggregate, each changes call, each insert and delete - over 15 minutes and
+  over a day, tighter in the background, and once a quota is used up it
+  refuses every call on it, this package's and any other Health Connect
+  library's in the app. The package spent it freely: `useStepStats()`
+  refreshes a window that includes today every 30 seconds while steps come
+  in, and every refresh re-read the whole window, 1,000 records a page - a
+  month of a busy watch was up to 60 calls per record type each time; a sync
+  made one insert per pending day, and one read per pending day to see
+  whether a wearable owned it; a `full` upload read Health Connect once per
+  pending day, in the background, where the quota is tightest. And once the
+  quota was gone the package kept calling, which kept it gone. Now:
+  - pages are 5,000 records, the most Health Connect returns;
+  - each day's answer is cached and Health Connect's changes feed - one call
+    when nothing moved - says which days to drop, so a range reads only the
+    days nothing vouches for: a month's stats refreshing during a walk read
+    today alone;
+  - a sync writes every pending day in one insert (up to 1,000 records per
+    call; a batch that fails costs only its own days), and decides which
+    days a wearable owns from one read per run of consecutive pending days
+    the cache cannot answer; a `full` upload reads its pending days up front
+    the same way;
+  - after a refusal no call is made on that quota for 30 seconds, doubling
+    to 15 minutes while refusals continue. Reads meanwhile answer the screen
+    from what was read before and say `'rate_limited'`, explicit reads
+    reject with `E_HEALTH_CONNECT_RATE_LIMITED`, a sync leaves its days
+    pending, and evidence - a snapshot's `sources`, a `full` upload - says
+    `'rate_limited'` with no sources rather than an old answer;
+  - the refresh the step sensor asks for while walking stands down once
+    this process has used half of either window.
+- **On Android 12 and 13 a read could carry on past its last page.** Health
+  Connect's guidance is that the last page's token can come back as an empty
+  string rather than null there, and across some IPC boundaries; the package
+  took empty for "more to come" and sent it back as the next page's token.
+  Empty ends a read now.
+- **A permission check that failed switched Health Connect off.** On
+  Android 13 and lower the provider refuses even the permission check once
+  the app's quota is used up; the failure read as "nothing granted", so
+  `getHealthConnectStatus()` reported no grants, `healthConnectStatusChanged`
+  fired, and the watch's steps dropped off the screen. A failed check keeps
+  the last answer now.
+- **`resetToday()` left the old count in Health Connect.** A day with no
+  steps has nothing to write, so the mirrored record kept the pre-reset count
+  for every other app until the next step's sync. It is deleted with the
+  reset now. So is a day's record when exclude mode takes every one of its
+  steps out (`fraudDetection.mode: 'exclude'`): it used to keep the flagged
+  steps written before.
+- **Android 8 was offered a Health Connect it cannot install.** The
+  provider app needs Android 9, but on 8 the status said `not_installed`
+  and `installable: true`, and `installHealthConnect()` - and
+  `enableHealthConnect()` - sent the user to a Play listing that could not
+  install it. It says `not_supported` there now.
+- **Yearly stats could show today differently from the day view on an
+  install day.** The long-window read left out the split of today at the
+  moment this device began counting, which lets a phone-side app fill in the
+  morning; it reads today the way the day view does now.
+
+### Added
+
+- **`HealthConnectStatus.rateLimit`**: whether reads or writes are held back
+  after a refusal and for how long, and the calls this package made in the
+  last 15 minutes and 24 hours. `'rate_limited'` joins `HealthConnectRead`
+  (`RangeStats.healthConnect`, `StepSourceList.healthConnect`, a snapshot's
+  `sourcesStatus`) and a snapshot's `healthConnectRecords.status`;
+  `E_HEALTH_CONNECT_RATE_LIMITED` the error codes, with `details.retryAfterMs`
+  and `details.quota`, also sent on the `error` event once per refusal;
+  `rateLimited` the Health Connect `SyncEvent`. `useHealthConnect()` keeps its
+  last sources when a read is refused, as for one that timed out.
+- **Per-minute Health Connect records, opt-in:
+  `healthConnectWriteGranularity: 'minute'`.** Google's write guide asks
+  for steps as interval records - a minute at a time - so other apps can
+  tell when they were taken, and Health Connect can weigh them against a
+  watch's minute by minute; the package wrote one record per day. Now it
+  can write a record for every minute with steps, distance and calories
+  going with each minute's share. Steps whose minute is not known - credited
+  by gap recovery or after a reboot, or taken before the switch - go into
+  one record over the longest stretch of the day no minute covers. The
+  records add up to the day's total exactly and never overlap, at any point
+  of a write: Health Connect counts only one of two overlapping records from
+  the same app. Each sync writes only the minutes that changed, in as few
+  inserts as Health Connect allows. Switching back and forth replaces each
+  day's records of the other kind at its next write;
+  `writeHealthConnectSteps(date)` writes the way the sync does, and
+  `deleteHealthConnectData()` takes minute records too. `'day'` stays the
+  default for now and is planned to change in 3.0. The minutes live in a
+  new table; the database moves to schema version 6 on its own.
+- **`deleteHealthConnectData(startDate, endDate)`** deletes what the package
+  mirrored into Health Connect for those days - its own day and minute
+  records only, by client record id, never anything else the app writes -
+  for an in-app "delete my data" or "disconnect".
+- **`readHealthConnectVitals(startIso, endIso, { types })`** summarises the
+  vitals of Google's vitals guide that other apps wrote - heart rate, resting
+  heart rate, blood oxygen, respiratory rate, blood pressure, body
+  temperature, blood glucose - per type: count, range, mean and the latest
+  measurement. Read-only and opt-in: `healthConnectReadVitals` lists the ones
+  to put on the sheet, each one more permission to declare
+  (`READ_HEART_RATE` and so on; the Expo plugin's `healthConnect.vitals`),
+  and `HealthConnectStatus.grantedVitals` says which the user allowed. Heart
+  rate comes from Health Connect's own aggregate, two calls whatever the
+  window.
+- **Feature checks.** Background and history reads are Health Connect
+  features; a provider too old for one cannot grant its permission. It is
+  left off the sheet there, and `backgroundReadAvailable` /
+  `historyReadAvailable` in the status say so.
+- **`HealthConnectStatus.deviceStepTracking`**: whether Health Connect counts
+  this phone's steps itself (Android 14 with SDK extension 20), and the
+  package name its records carry here, from the platform's
+  `getCurrentDeviceDataSource()` where it has it - which also makes an origin
+  of any shape the platform gives this phone count as this phone.
+- **Work profiles.** Health Connect does not work in one; an app running in
+  one gets `availability: 'not_supported'` and `workProfile: true` rather
+  than reads that fail and writes that vanish.
+- Records the package writes carry the phone's maker and model with the
+  phone device type, as Health Connect's metadata guidance asks. Raw records
+  name Health Connect's extended device types - `'hearable'`, `'glasses'`,
+  `'consumer_medical_device'` and the rest.
+
+### Changed
+
+- `healthConnectSyncIntervalMinutes` defaults to 15, from 30: the longest
+  gap between writes Health Connect's guidance allows, and WorkManager's
+  floor. Each sync is one insert now. The periodic sync waits while the
+  battery is low, as the same guidance asks; a day's close and `syncNow()`
+  still write at once.
+
+### Docs
+
+- API.md has a [Rate limits](docs/API.md#rate-limits) section, the new
+  calls and per-minute records; TROUBLESHOOTING.md what to do about
+  `E_HEALTH_CONNECT_RATE_LIMITED`; PERMISSIONS.md vitals, features, work
+  profiles and the 30-day history window, which counts from the first
+  grant; ARCHITECTURE.md the quota, the breaker, the source cache and the
+  per-minute mirror.
+
 ## [2.4.0] - 2026-10-01
 
 Fixes from a review of 2.3.7 and from checking the code around them, and one
@@ -1477,6 +1622,7 @@ Initial release.
 - Turbo Module with an old-architecture shim, and full TypeScript types.
 - `useStepTracker` and `useStepStats` hooks.
 
+[2.5.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.5.0
 [2.4.0]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.4.0
 [2.3.7]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.7
 [2.3.6]: https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/releases/tag/v2.3.6

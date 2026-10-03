@@ -70,7 +70,12 @@ export interface StepTrackerConfig {
   persistEveryNSteps?: number;
   /** Mirror data into Health Connect when permissions are granted. Default true. */
   healthConnectEnabled?: boolean;
-  /** Auto-write today's totals to Health Connect every N minutes. Default 30. 0 disables. */
+  /**
+   * Auto-write today's totals to Health Connect every N minutes. Default 15
+   * (30 before 2.5) - the longest gap between writes Health Connect's
+   * guidance allows, and WorkManager's floor. Each sync is one insert for
+   * every day it writes. 0 disables.
+   */
   healthConnectSyncIntervalMinutes?: number;
   /**
    * Read other apps' steps back out of Health Connect. Default true.
@@ -88,6 +93,13 @@ export interface StepTrackerConfig {
    * Health Connect record, and the `WRITE_*` permissions are never requested.
    */
   healthConnectWriteEnabled?: boolean;
+  /**
+   * How finely this device's count is written to Health Connect. Default
+   * `'day'`: one record per day for steps, distance and calories, rewritten
+   * as the day grows - what every earlier release wrote. See
+   * {@link HealthConnectWriteGranularity}.
+   */
+  healthConnectWriteGranularity?: HealthConnectWriteGranularity;
   /**
    * Also request `READ_HEALTH_DATA_IN_BACKGROUND`. Default false.
    *
@@ -141,6 +153,15 @@ export interface StepTrackerConfig {
    * figures (`getStepSources()`, `readHealthConnectSteps()`) show 0.
    */
   healthConnectReadTypes?: HealthConnectReadType[];
+  /**
+   * Vitals `readHealthConnectVitals()` may read - heart rate, blood pressure
+   * and the rest of {@link HealthConnectVitalType}. Default none. Each is one
+   * more read permission (`android.permission.health.READ_HEART_RATE` and so
+   * on) that your app declares and justifies to Play; listed here, it joins
+   * the permission sheet as an optional extra - refusing it does not refuse
+   * steps.
+   */
+  healthConnectReadVitals?: HealthConnectVitalType[];
   /**
    * How to reconcile this phone's sensor with what other apps published to
    * Health Connect. Default 'auto'. See {@link StepSourcePolicy}.
@@ -340,6 +361,32 @@ export type HealthConnectDataType = 'steps' | 'distance' | 'totalCalories';
 
 /** A record type `healthConnectReadTypes` can name. */
 export type HealthConnectReadType = HealthConnectDataType;
+
+/**
+ * How finely `healthConnectWriteGranularity` writes this device's count to
+ * Health Connect.
+ *
+ * - `'day'` (the default): one record per day and type, from midnight to
+ *   now, rewritten as the day grows - what every earlier release wrote.
+ * - `'minute'` (2.5, opt-in; planned to become the default in 3.0): a record
+ *   for every minute with steps, as Health Connect's guidance for steps
+ *   asks, so other apps' charts show when the steps were taken and Health
+ *   Connect can weigh them against a watch minute by minute. Distance and
+ *   calories follow each minute's share of the day's. Steps whose minute
+ *   is not known - credited by gap recovery or after a reboot, or taken
+ *   before the switch - go into one record over the longest stretch of the
+ *   day no minute covers, never overlapping one, so the records always add
+ *   up to the day's total. Each sync writes only the minutes that changed,
+ *   still in as few inserts as Health Connect allows. Minute records have
+ *   the ids `stp-steps-<date>-<epoch minute>` (and `stp-distance-…`,
+ *   `stp-calories-…`); the rest keeps the day's id, `stp-steps-<date>`.
+ *
+ * Switching either way cleans up after itself: the next sync deletes the
+ * records of the other kind for each day it writes, so the two never
+ * overlap - Health Connect counts only one of two overlapping records from
+ * the same app.
+ */
+export type HealthConnectWriteGranularity = 'day' | 'minute';
 
 /**
  * Where a distance figure came from, so a server can tell a measured
@@ -570,11 +617,20 @@ export interface SnapshotHealthConnectRecords {
    * false), `'unavailable'` (no provider), `'not_granted'` (a read
    * permission for `recordTypes` is missing, or the app is in the
    * background - no activity on screen and tracking off - without
-   * `READ_HEALTH_DATA_IN_BACKGROUND`), `'timeout'` or `'failed'`.
+   * `READ_HEALTH_DATA_IN_BACKGROUND`), `'timeout'`, `'failed'`, or
+   * `'rate_limited'` (2.5: Health Connect refused the read for quota - see
+   * `HealthConnectStatus.rateLimit`).
    * The step-source policy does not matter here: an explicit ask reads
    * whenever it can.
    */
-  status: 'read' | 'disabled' | 'unavailable' | 'not_granted' | 'timeout' | 'failed';
+  status:
+    | 'read'
+    | 'disabled'
+    | 'unavailable'
+    | 'not_granted'
+    | 'timeout'
+    | 'failed'
+    | 'rate_limited';
   recordTypes: HealthConnectRecordType[];
   records: AnyHealthConnectRecord[];
   /** More than 10,000 records of one type that day. */
@@ -658,7 +714,18 @@ export interface HealthConnectRecordBase {
       | 'head_mounted'
       | 'fitness_band'
       | 'chest_strap'
-      | 'smart_display';
+      | 'smart_display'
+      /*
+       * Health Connect's extended device types, from 2.5. Older providers
+       * report these as 'unknown'.
+       */
+      | 'consumer_medical_device'
+      | 'glasses'
+      | 'hearable'
+      | 'fitness_machine'
+      | 'fitness_equipment'
+      | 'portable_computer'
+      | 'meter';
     manufacturer: string | null;
     model: string | null;
   } | null;
@@ -722,6 +789,81 @@ export interface HealthConnectChanges<
   nextToken: string | null;
   /** Call again with `nextToken` straight away. */
   hasMore: boolean;
+}
+
+/**
+ * A vital `readHealthConnectVitals()` reads, from Health Connect's vitals
+ * guide. This package measures none of them; a watch or a cuff writes them,
+ * and each is one more read permission - see `healthConnectReadVitals`.
+ */
+export type HealthConnectVitalType =
+  /** Beats per minute, every sample; summarised by Health Connect's own aggregate. */
+  | 'heartRate'
+  /** Beats per minute at rest, usually one a day. */
+  | 'restingHeartRate'
+  /** Blood oxygen, percent. */
+  | 'oxygenSaturation'
+  /** Breaths per minute. */
+  | 'respiratoryRate'
+  /** mmHg: systolic in the main figures, diastolic in `diastolic`. */
+  | 'bloodPressure'
+  /** Degrees Celsius. */
+  | 'bodyTemperature'
+  /** mmol/L. */
+  | 'bloodGlucose';
+
+export interface HealthConnectVitalsOptions {
+  /** Default `healthConnectReadVitals`. */
+  types?: HealthConnectVitalType[];
+}
+
+/** One measurement: when, what, and which app wrote it. */
+export interface HealthConnectVitalMeasurement {
+  /** Epoch ms. */
+  time: number;
+  value: number;
+  packageName: string;
+}
+
+/** Count, range, mean and latest of one series of measurements. Null figures when there were none. */
+export interface HealthConnectVitalStats {
+  /** Measurements in the window: every sample for heart rate, every record for the rest. */
+  count: number;
+  min: number | null;
+  max: number | null;
+  avg: number | null;
+  latest: HealthConnectVitalMeasurement | null;
+}
+
+export interface HealthConnectVitalSummary extends HealthConnectVitalStats {
+  type: HealthConnectVitalType;
+  unit: 'bpm' | 'percent' | 'breathsPerMinute' | 'mmHg' | 'celsius' | 'mmolPerL';
+  /** Blood pressure only: the diastolic series, the main figures being systolic. */
+  diastolic?: HealthConnectVitalStats;
+  /**
+   * More than 20,000 records in the window: the figures cover the newest
+   * of them. Narrow the window. Never for heart rate, whose figures are
+   * Health Connect's own aggregate.
+   */
+  truncated: boolean;
+}
+
+export interface HealthConnectVitals {
+  /** One per type read, in `HealthConnectVitalType` order. */
+  vitals: HealthConnectVitalSummary[];
+  /** Types asked for whose read permission is not granted - left out of `vitals`. */
+  notGranted: HealthConnectVitalType[];
+}
+
+/** What `deleteHealthConnectData()` deleted. */
+export interface HealthConnectDeleteResult {
+  startDate: string;
+  endDate: string;
+  /**
+   * The types whose records were deleted for those days - those whose write
+   * permission is granted, which Health Connect needs to delete. Steps always.
+   */
+  recordTypes: HealthConnectDataType[];
 }
 
 /**
@@ -983,7 +1125,8 @@ export interface RangeStats {
    * Whether other apps' steps went into these days; see
    * {@link HealthConnectRead}. Under `'timed_out'` or `'failed'` the days are
    * this device's own count, not a range without a watch - call again.
-   * From 2.2.1.
+   * Under `'rate_limited'` the days Health Connect answered recently keep
+   * that answer and the rest are this device's own. From 2.2.1.
    */
   healthConnect?: HealthConnectRead;
 }
@@ -1029,8 +1172,8 @@ export interface VerificationSnapshot {
   sources: StepSource[];
   /**
    * Whether `sources` is what Health Connect holds, or empty because it was
-   * not asked, ran out of time or failed - never the same as "no other
-   * apps". Signed with the rest. From 2.3.
+   * not asked, ran out of time, failed or was refused for quota - never the
+   * same as "no other apps". Signed with the rest. From 2.3.
    */
   sourcesStatus?: HealthConnectRead;
   /** What the current policy resolved to, for comparison only. */
@@ -1187,6 +1330,79 @@ export interface HealthConnectStatus {
    * point — call `openHealthConnectSettings()` instead.
    */
   shouldOpenSettings: boolean;
+  /*
+   * The six below are always sent from 2.5. They are optional in the type
+   * only so status objects built by hand for an older version still
+   * type-check.
+   */
+  /**
+   * The installed Health Connect can grant `READ_HEALTH_DATA_IN_BACKGROUND`
+   * at all. An older provider cannot: the permission is then not asked
+   * for, and `backgroundReadGranted` stays false.
+   */
+  backgroundReadAvailable?: boolean;
+  /** The installed Health Connect can grant `READ_HEALTH_DATA_HISTORY` - see `backgroundReadAvailable`. */
+  historyReadAvailable?: boolean;
+  /** Of `healthConnectReadVitals`, the vitals the user allowed. */
+  grantedVitals?: HealthConnectVitalType[];
+  /**
+   * This app runs in a work profile, where Health Connect is not supported:
+   * `availability` is then `'not_supported'`.
+   */
+  workProfile?: boolean;
+  /** Health Connect counting this phone's steps itself. */
+  deviceStepTracking?: HealthConnectDeviceStepTracking;
+  /** Where this app stands against Health Connect's rate limits. */
+  rateLimit?: HealthConnectRateLimit;
+}
+
+/**
+ * Health Connect's own step counting on this phone: from Android 14 with SDK
+ * extension 20 it counts steps itself, from the same sensor this package
+ * reads, once any app holds `READ_STEPS`. Its records are listed by
+ * `getStepSources()` as this phone (`isPlatform: true`), never as a
+ * wearable.
+ */
+export interface HealthConnectDeviceStepTracking {
+  /** This phone can: Android 14 with SDK extension 20 or later. */
+  available: boolean;
+  /**
+   * The package name its records carry here, when the platform says - a
+   * synthetic name of the form `com.android.healthconnect.phone.<hash>`,
+   * per device and per reading app, since June 2026; `'android'` before.
+   * Null where the platform does not say, or before a read is granted.
+   */
+  dataOrigin: string | null;
+}
+
+/**
+ * Where this app stands against Health Connect's rate limits. Health Connect
+ * meters every data call - each page read, aggregate, changes call, insert
+ * and delete - in a read and a write quota, each over 15 minutes and over a
+ * day, tighter in the background (no activity on screen and no foreground
+ * service) than in the foreground. Once a quota is used up every call on it
+ * fails until it refills, so after a refusal this package makes no calls on
+ * that quota for a while - 30 seconds, doubling to 15 minutes while the
+ * refusals continue. Reads meanwhile answer from what was read before, and
+ * say `'rate_limited'`.
+ */
+export interface HealthConnectRateLimit {
+  /** Reads are held back after Health Connect refused one for quota. For the state the app is in now. */
+  readsLimited: boolean;
+  /** Ms until reads are tried again; 0 when they are not held back. */
+  readsRetryAfterMs: number;
+  writesLimited: boolean;
+  writesRetryAfterMs: number;
+  /**
+   * Calls this package made from the app's process, foreground and
+   * background together, as it counted them - not Health Connect's own
+   * figure, which also counts every other library the app uses and is not
+   * published. For a diagnostics screen.
+   */
+  readsLast15Minutes: number;
+  readsLast24Hours: number;
+  writesLast15Minutes: number;
+  writesLast24Hours: number;
 }
 
 export interface RequestHealthConnectOptions {
@@ -1430,8 +1646,13 @@ export interface StepSourceList {
  *   `READ_HEALTH_DATA_IN_BACKGROUND`, where Health Connect would refuse.
  * - `'timed_out'` / `'failed'`: the read did not finish; the result is this
  *   device's own count. Call again.
+ * - `'rate_limited'` (2.5): Health Connect refused the read for quota. What
+ *   it answered recently is still used; anything else is this device's own
+ *   count. Call again once `HealthConnectStatus.rateLimit.readsLimited` is
+ *   false.
  */
-export type HealthConnectRead = 'read' | 'not_consulted' | 'timed_out' | 'failed';
+export type HealthConnectRead =
+  'read' | 'not_consulted' | 'timed_out' | 'failed' | 'rate_limited';
 
 /** A wearable companion app found installed on this phone. */
 export interface CompanionApp {
@@ -1564,6 +1785,11 @@ export interface SyncEvent {
   /** Worth another attempt. False for states only the user can change. */
   retryable?: boolean;
   /**
+   * Health Connect refused a call for quota; the days it would have written
+   * wait for the next pass. From 2.5, on Health Connect results.
+   */
+  rateLimited?: boolean;
+  /**
    * The remote entry `syncNow()` returns: the upload was queued, not run -
    * it waits for a network - so nothing is synced or failed yet, and its
    * outcome arrives on the `syncCompleted` event, even when there turns out
@@ -1628,7 +1854,22 @@ export interface StepTrackerEventMap {
   syncAuthFailed: SyncAuthFailedEvent;
   stepSourceChanged: StepSourceChangedEvent;
   healthConnectStatusChanged: HealthConnectStatusEvent;
-  error: { code: string; message: string };
+  error: StepTrackerErrorEvent;
+}
+
+/**
+ * The `error` event: something went wrong with nobody's call to reject -
+ * the sensor failing to register (`E_SENSOR_UNAVAILABLE`), or Health
+ * Connect refusing a call for quota (`E_HEALTH_CONNECT_RATE_LIMITED`, from
+ * 2.5, once per refusal - the calls held back after it are quiet).
+ */
+export interface StepTrackerErrorEvent {
+  code: string;
+  message: string;
+  /** `E_HEALTH_CONNECT_RATE_LIMITED`: ms until a call on that quota is tried again. */
+  retryAfterMs?: number;
+  /** `E_HEALTH_CONNECT_RATE_LIMITED`: which quota Health Connect refused. */
+  quota?: 'read' | 'write';
 }
 
 export type StepTrackerEvent = keyof StepTrackerEventMap;

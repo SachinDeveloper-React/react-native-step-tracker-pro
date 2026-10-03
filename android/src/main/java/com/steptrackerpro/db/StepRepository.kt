@@ -10,6 +10,7 @@ import com.steptrackerpro.core.IntegrityFlag
 import com.steptrackerpro.core.JsonMaps
 import com.steptrackerpro.core.MetricsCalculator
 import com.steptrackerpro.core.MinuteSample
+import com.steptrackerpro.core.MinuteWritePlan
 import com.steptrackerpro.core.MotionFeatures
 import com.steptrackerpro.core.RangeStats
 import com.steptrackerpro.core.SyncTarget
@@ -26,6 +27,7 @@ class StepRepository(context: Context) {
     private val motion = db.motionWindowDao()
     private val minuteRows = db.stepMinuteDao()
     private val integrity = db.integrityDao()
+    private val mirrorRows = db.mirrorMinuteDao()
 
     /** The detector's stored verdict on one day. */
     data class StoredEvaluation(
@@ -217,6 +219,8 @@ class StepRepository(context: Context) {
         integrity.deleteOrphanDaysOlderThan(cutoff)
         minuteRows.deleteOrphansOlderThan(cutoff)
         integrity.deleteOrphanEventsOlderThan(cutoff)
+        mirrorRows.deleteOrphansOlderThan(cutoff)
+        mirrorRows.deleteEmpty()
         return deleted
     }
 
@@ -232,7 +236,51 @@ class StepRepository(context: Context) {
         motion.deleteAll()
         minuteRows.deleteAll()
         integrity.deleteAllDays()
+        // Today's per-minute mirror is live state, like the counter itself,
+        // which a clear does not reset either. Earlier days lose what was
+        // counted in each minute but keep what Health Connect holds for it -
+        // a clear leaves Health Connect alone - so deleting those records
+        // later still lists only the minutes that have one.
+        mirrorRows.clearStepsBefore(DateKeys.today())
+        mirrorRows.deleteEmpty()
     }
+
+    // ---- Health Connect per-minute records ------------------------------------
+
+    /** Adds per-minute steps for the mirror on top of what each minute already holds. */
+    suspend fun addMirrorMinutes(minutes: Map<Long, Int>) {
+        if (minutes.isEmpty()) return
+        mirrorRows.addAll(
+            minutes.map { (start, steps) -> MirrorMinuteEntity(minuteStart = start, date = DateKeys.of(start), steps = steps) }
+        )
+    }
+
+    /** One day's stored minutes, as [MinuteWritePlan] takes them. */
+    suspend fun mirrorMinutes(date: String): List<MinuteWritePlan.Minute> =
+        mirrorRows.findDate(date).map { MinuteWritePlan.Minute(it.minuteStart, it.steps, it.written) }
+
+    /** The minutes Health Connect holds a record for, by day, between the two keys. */
+    suspend fun writtenMirrorMinutes(start: String, end: String): Map<String, List<Long>> =
+        mirrorRows.findWritten(start, end).groupBy({ it.date }, { it.minuteStart })
+
+    /** What Health Connect holds for these minutes now. */
+    suspend fun markMirrorWritten(written: Map<Long, Int>) {
+        if (written.isNotEmpty()) mirrorRows.setWrittenAll(written)
+    }
+
+    /** `resetToday()`: the day's counted minutes go; what Health Connect holds is kept until deleted. */
+    suspend fun clearMirrorSteps(date: String) = mirrorRows.clearSteps(date)
+
+    /** Health Connect holds no per-minute record for these days any more. */
+    suspend fun forgetMirrorWritten(dates: Collection<String>) = db.withTransaction {
+        // Inside SQLite's 999 bound parameters per statement.
+        dates.distinct().chunked(500).forEach { mirrorRows.forgetWritten(it) }
+        mirrorRows.deleteEmpty()
+    }
+
+    /** Days between the two keys the per-minute table holds any minute of. */
+    suspend fun mirrorDates(start: String, end: String): Set<String> =
+        mirrorRows.datesBetween(start, end).toSet()
 
     // ---- integrity -----------------------------------------------------------
 

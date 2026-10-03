@@ -120,9 +120,14 @@ export function useHealthConnect(
           daysAgo(windowDays.current),
           today()
         );
-        // A read that ran out of time or failed says nothing about the
-        // sources; keep the last list that was actually read.
-        if (list.healthConnect !== 'timed_out' && list.healthConnect !== 'failed') {
+        // A read that ran out of time, failed or was refused for quota says
+        // nothing reliable about the sources - a refused one holds only the
+        // days still cached; keep the last list that was actually read.
+        if (
+          list.healthConnect !== 'timed_out' &&
+          list.healthConnect !== 'failed' &&
+          list.healthConnect !== 'rate_limited'
+        ) {
           setSources(list.sources);
           setHasWearable(list.hasWearable);
         }

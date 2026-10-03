@@ -128,6 +128,31 @@ data class StepMinuteEntity(
 )
 
 /**
+ * One minute of this device's own steps, for Health Connect's per-minute
+ * records under `healthConnectWriteGranularity: 'minute'`: what was counted
+ * in it, and what the record Health Connect holds for it says - so a sync
+ * writes only the minutes that moved, deletes the ones that went, and picks
+ * up where a failed one stopped. Only minutes with steps, or a record, have
+ * a row. Written only in that mode; pruned with the day tables at
+ * `historyRetentionDays`. Counts, never samples.
+ */
+@Entity(
+    tableName = "mirror_minute",
+    indices = [Index(value = ["date"])]
+)
+data class MirrorMinuteEntity(
+    /** Epoch ms of the minute's start. */
+    @PrimaryKey
+    val minuteStart: Long,
+    /** yyyy-MM-dd the minute falls on, device local. */
+    val date: String,
+    val steps: Int,
+    /** The steps Health Connect's record for this minute holds; 0 for none. */
+    @ColumnInfo(name = "written", defaultValue = "0")
+    val written: Int = 0
+)
+
+/**
  * The detector's last verdict on one day: the strong minute-level flags'
  * union and every flag as JSON. Replaced whole on each evaluation. The daily
  * cap is not stored here - it is applied at read time against the day's

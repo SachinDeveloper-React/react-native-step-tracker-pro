@@ -6,6 +6,8 @@
  *       "healthConnect": { "read": true, "write": true, "backgroundRead": true },
  *       // or, for an app that reads steps alone:
  *       // "healthConnect": { "readTypes": ["steps"], "write": false },
+ *       // and with a watch's heart rate too (healthConnectReadVitals):
+ *       // "healthConnect": { "vitals": ["heartRate", "restingHeartRate"] },
  *       "batteryOptimizationPrompt": false,
  *       "notificationIcon": "ic_stat_steps"
  *     }]

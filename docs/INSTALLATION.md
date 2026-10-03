@@ -179,6 +179,7 @@ grants you do. Declare each one you turn on:
 | `READ_HEALTH_DATA_IN_BACKGROUND` | `healthConnectBackgroundRead` | reading a watch's steps with the app closed and tracking off — while tracking is on, the tracking service is a foreground service, which Health Connect lets read. Without it those reads are not made, and report Health Connect as not consulted |
 | `READ_HEALTH_DATA_HISTORY` | `healthConnectHistoryRead` | reading further back than 30 days, which yearly stats need |
 | `READ_ACTIVE_CALORIES_BURNED` | `healthConnectReadActiveCalories` | `StepSource.activeCalories` |
+| `READ_HEART_RATE`, `READ_RESTING_HEART_RATE`, `READ_OXYGEN_SATURATION`, `READ_RESPIRATORY_RATE`, `READ_BLOOD_PRESSURE`, `READ_BODY_TEMPERATURE`, `READ_BLOOD_GLUCOSE` | each vital's name in `healthConnectReadVitals` (2.5) | `readHealthConnectVitals()` |
 
 ### Expo
 
@@ -201,9 +202,10 @@ opt-in permissions and raises `android.minSdkVersion` to 26:
 
 `healthConnect` takes `true` for the default read and write sets, or an object
 with `read`, `write` (both default `true`), `readTypes`, `backgroundRead`,
-`historyRead` and `activeCalories`. `readTypes` matches the
+`historyRead`, `activeCalories` and `vitals`. `readTypes` matches the
 `healthConnectReadTypes` config option - `["steps"]` declares `READ_STEPS`
-alone - so pass the same list to both. Leave `healthConnect` out for
+alone - so pass the same list to both; `vitals` matches
+`healthConnectReadVitals` - `["heartRate"]` declares `READ_HEART_RATE` (2.5). Leave `healthConnect` out for
 sensor-only counting.
 `batteryOptimizationPrompt: true` adds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
 `healthConnect: false` says the app never uses Health Connect and removes the

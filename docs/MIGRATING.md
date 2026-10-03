@@ -1,5 +1,31 @@
 # Migrating
 
+## From 2.4 to 2.5
+
+Nothing to change in code for most apps.
+
+- **`'rate_limited'` joins `HealthConnectRead`** - `RangeStats.healthConnect`,
+  `StepSourceList.healthConnect`, a snapshot's `sourcesStatus` - and a
+  snapshot's `healthConnectRecords.status`: Health Connect refused the read
+  for quota. A `switch` that handles every value needs one more case, and a
+  server that validates `sourcesStatus` against a fixed list needs one more
+  value. Treat it like `'timed_out'`: not "no other apps", and worth asking
+  again later. See [Rate limits](API.md#rate-limits).
+- **The Health Connect sync runs every 15 minutes by default**, from 30, and
+  waits while the battery is low. Set `healthConnectSyncIntervalMinutes: 30`
+  to keep the old pace.
+- **Records the package writes carry the phone's maker and model** with the
+  phone device type. Nothing reads them differently; an app showing where
+  steps came from can now say which phone.
+- **The database moves to schema version 6** on its own, adding one empty
+  table for per-minute records; every row stays as it is.
+- **Per-minute records are opt-in**: `healthConnectWriteGranularity:
+  'minute'` writes a record for every minute with steps, as Health Connect's
+  guidance for steps asks. Nothing changes until you set it; the next sync
+  after switching, either way, replaces each day's records of the other
+  kind. It is planned to become the default in 3.0. See
+  [Per-minute records](API.md#writehealthconnectstepsdate-string-promiseboolean).
+
 ## From 2.2 to 2.3
 
 Nothing to change in code for most apps; two defaults move.

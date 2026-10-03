@@ -279,6 +279,46 @@ doubling is almost always outside it:
   carry `sourcesStatus: 'not_consulted'`. With tracking on they read it: the
   tracking service is a foreground service, which Health Connect lets read.
 
+## `E_HEALTH_CONNECT_RATE_LIMITED`, or `'rate_limited'` everywhere
+
+Health Connect refused calls for quota: it meters every page read, aggregate,
+changes call, insert and delete per app, over 15 minutes and over a day, and
+refuses everything on a used-up quota until it refills - see
+[Rate limits](API.md#rate-limits). The messages it sends are "API call quota
+exceeded" (Android 14+) and "Rate limited request quota has been exceeded"
+(Android 13 and lower). From 2.5 the package backs off on its own and the
+screen keeps the last answer, so:
+
+- **Nothing to do in the common case.** Reads answer from what was read
+  before with `healthConnect: 'rate_limited'`, syncs leave their days
+  pending, and both carry on once Health Connect answers again - after 30
+  seconds, up to 15 minutes. `getHealthConnectStatus().rateLimit` says
+  whether reads or writes are held back, and for how long.
+- **Check what else calls Health Connect.** The quotas are per app, shared
+  with every Health Connect library the app uses. `rateLimit.readsLast15Minutes`
+  is this package's share; if it is low and the refusals keep coming,
+  something else spends the rest - a polling loop in your own code, often.
+- **Do not poll the raw reads.** `getHealthConnectRecords()` in a timer costs a
+  call per 5,000 records per type each time; follow
+  `getHealthConnectChanges()` instead, which costs one call when nothing moved.
+- **Older versions** (2.4 and before) read 1,000 records a page, re-read a
+  whole stats window on every refresh, wrote one insert per pending day and
+  read Health Connect once per pending day for a `full` upload - and on
+  Android 12 and 13 could carry a read on past its last page. A busy watch and
+  an open stats screen were enough to run out. Update.
+
+## Health Connect lists an entry a minute from this app
+
+That is `healthConnectWriteGranularity: 'minute'` (2.5): a record for every
+minute with steps, as Health Connect's guidance for steps asks, plus one
+record for the day's steps whose minute is not known - steps credited after a
+reboot or by gap recovery, or taken before the setting went on - over the
+longest stretch no minute covers. They add up to the day's total; Health
+Connect's own screens add them for you. For one entry per day, set `'day'`
+(the default): the next sync replaces each day's minute entries as it writes
+the day. Days already written keep theirs - they add up the same - unless
+you delete them with `deleteHealthConnectData()`.
+
 ## A source shows as `kind: 'unknown'`
 
 `kind` is read from the `Device` the writing app stamped on its records, with a

@@ -124,20 +124,26 @@ class RemoteSyncWorker(
             return Result.success()
         }
 
-        // The full shape reads Health Connect once per pending day, at upload
+        // The full shape reads Health Connect for the pending days at upload
         // time, so the server sees the origins as they stood when the batch
         // was built. Pending is normally the handful of days since the last
-        // successful upload and each read is bounded and cached by the core,
-        // but a provider that is hanging times out per read, and two hundred
-        // of those would outlast the worker's own budget - so the whole pass
-        // is bounded too, and a day it did not reach uploads as this device's
-        // own with no origins, exactly as a day whose read was not permitted.
+        // successful upload, read up front a run of days at a time and then
+        // answered from the core's cache, but a provider that is hanging
+        // times out per read, and two hundred of those would outlast the
+        // worker's own budget - so the whole pass is bounded too, and a day it
+        // did not reach uploads as this device's own with no origins, exactly
+        // as a day whose read was not permitted.
         val shape = RemotePayload.Shape.from(config.remoteSyncPayload)
         // Each day's suspect steps, from stored verdicts - one read for the batch.
         val suspects = detailOrNull { core.integrity.suspects(pending) } ?: emptyMap()
         val details = HashMap<String, RemotePayload.DayDetail>()
         if (shape == RemotePayload.Shape.FULL) {
             withTimeoutOrNull(DETAIL_TIMEOUT_MS) {
+                // One read per run of pending days into the cache, so the
+                // loop below asks the cache rather than Health Connect for
+                // each day: two hundred pending days were two hundred reads,
+                // in the background, where Health Connect's quota is tightest.
+                detailOrNull { core.prefetchSources(pending.map { it.date }) }
                 for (day in pending) {
                     val sourceList = detailOrNull { core.unresolvedSources(day.date) }
                     details[day.date] = RemotePayload.DayDetail(

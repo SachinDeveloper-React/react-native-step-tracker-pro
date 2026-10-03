@@ -69,6 +69,8 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun readHealthConnectSteps(startIso: String, endIso: String, promise: Promise)
     abstract fun writeHealthConnectSteps(date: String, promise: Promise)
     abstract fun syncWithHealthConnect(promise: Promise)
+    abstract fun readHealthConnectVitals(startIso: String, endIso: String, options: ReadableMap, promise: Promise)
+    abstract fun deleteHealthConnectData(startDate: String, endDate: String, promise: Promise)
 
     abstract fun getStepSources(startDate: String, endDate: String, promise: Promise)
     abstract fun getCurrentStepSource(promise: Promise)

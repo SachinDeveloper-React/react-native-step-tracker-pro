@@ -5,13 +5,21 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.changes.DeletionChange
 import androidx.health.connect.client.changes.UpsertionChange
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
+import androidx.health.connect.client.records.BloodGlucoseRecord
+import androidx.health.connect.client.records.BloodPressureRecord
+import androidx.health.connect.client.records.BodyTemperatureRecord
 import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.records.HeartRateRecord
+import androidx.health.connect.client.records.OxygenSaturationRecord
 import androidx.health.connect.client.records.Record
+import androidx.health.connect.client.records.RespiratoryRateRecord
+import androidx.health.connect.client.records.RestingHeartRateRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.metadata.DataOrigin
@@ -27,6 +35,7 @@ import androidx.health.connect.client.units.Length
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
 import com.steptrackerpro.core.StepStateStore
+import com.steptrackerpro.health.HealthConnectQuota.Category
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.Period
@@ -34,17 +43,27 @@ import java.time.ZoneId
 import kotlin.reflect.KClass
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
 /**
  * Health Connect read/write, permissions and provider availability.
  *
  * Writes are idempotent: every record carries a stable `clientRecordId` of the
- * form `stp-<type>-<date>`, so re-syncing a day replaces the previous record
- * instead of stacking duplicates. That is what makes "sync today's total every
- * 30 minutes" safe. Health Connect keeps the higher `clientRecordVersion` on a
- * collision, so that value must never go backwards - see
- * [StepStateStore.nextHealthRecordVersion].
+ * form `stp-<type>-<date>` - or `stp-<type>-<date>-<epoch minute>` for a
+ * per-minute record, see [writeMinutes] - so re-syncing a day replaces the
+ * previous record instead of stacking duplicates. That is what makes "sync
+ * today's total every 15 minutes" safe. Health Connect keeps the higher
+ * `clientRecordVersion` on a collision, so that value must never go
+ * backwards - see [StepStateStore.nextHealthRecordVersion].
+ *
+ * Every data call - each page read, each aggregate, each changes call, each
+ * insert or delete - goes through [metered], which counts it against Health
+ * Connect's rate limits and stops making calls on a quota Health Connect has
+ * just refused - see [HealthConnectQuota]. Pages are as large as Health
+ * Connect allows, writes go in batches, and the changes feed tells the
+ * core's cache which days moved, so a day nobody touched is never read twice.
  */
 class HealthConnectManager(
     private val context: Context,
@@ -79,24 +98,38 @@ class HealthConnectManager(
 
     /**
      * The record types `healthConnectReadTypes` can name - also the three
-     * this package writes, so each carries its write permission too.
+     * this package writes, so each carries its write permission too, and
+     * the prefix of the `clientRecordId` its day records carry.
      */
-    enum class ReadType(val jsValue: String, val permission: String, val writePermission: String) {
-        STEPS(
-            "steps",
-            HealthPermission.getReadPermission(StepsRecord::class),
-            HealthPermission.getWritePermission(StepsRecord::class)
-        ),
-        DISTANCE(
-            "distance",
-            HealthPermission.getReadPermission(DistanceRecord::class),
-            HealthPermission.getWritePermission(DistanceRecord::class)
-        ),
-        TOTAL_CALORIES(
-            "totalCalories",
-            HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
-            HealthPermission.getWritePermission(TotalCaloriesBurnedRecord::class)
-        );
+    enum class ReadType(
+        val jsValue: String,
+        val recordClass: KClass<out Record>,
+        private val clientIdPrefix: String
+    ) {
+        STEPS("steps", StepsRecord::class, "stp-steps-"),
+        DISTANCE("distance", DistanceRecord::class, "stp-distance-"),
+        TOTAL_CALORIES("totalCalories", TotalCaloriesBurnedRecord::class, "stp-calories-");
+
+        val permission: String = HealthPermission.getReadPermission(recordClass)
+        val writePermission: String = HealthPermission.getWritePermission(recordClass)
+
+        /**
+         * The `clientRecordId` of the record this package writes for [date]:
+         * the whole day, or - in minute mode - the steps no minute holds.
+         */
+        fun clientRecordId(date: String): String = clientIdPrefix + date
+
+        /**
+         * The `clientRecordId` of [date]'s minute record starting at
+         * [minuteStart] - `stp-steps-<date>-<epoch minute>`, the minutes since
+         * 1970-01-01T00:00Z. Counted from the epoch rather than from the
+         * day's midnight so a minute keeps its id whatever the zone does
+         * afterwards - a flight, a clock change - and a delete finds the
+         * record it wrote; and a day's ids can still be listed without
+         * having stored them.
+         */
+        fun minuteRecordId(date: String, minuteStart: Long): String =
+            "$clientIdPrefix$date-${Math.floorDiv(minuteStart, MINUTE_MS)}"
 
         companion object {
             val ALL: Set<ReadType> = entries.toSet()
@@ -163,18 +196,26 @@ class HealthConnectManager(
             ?.also { cachedClient = it }
     }
 
-    fun availability(): Availability = when (HealthConnectClient.getSdkStatus(context)) {
-        HealthConnectClient.SDK_AVAILABLE -> Availability.AVAILABLE
-        HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> Availability.UPDATE_REQUIRED
-        // From Android 14 Health Connect is part of the platform, so there is
-        // nothing to install: an unavailable SDK there means the device does
-        // not support it at all. Below 14 it is an APK the user can install.
-        else -> if (Build.VERSION.SDK_INT >= 34) {
-            Availability.NOT_SUPPORTED
-        } else if (isProviderInstalled()) {
-            Availability.NOT_SUPPORTED
-        } else {
-            Availability.NOT_INSTALLED
+    fun availability(): Availability {
+        // Health Connect does not work in a work profile: the sheet can grant
+        // there, but no call succeeds and nothing is written. Said up front,
+        // rather than as reads that fail and writes that vanish.
+        if (workProfile) return Availability.NOT_SUPPORTED
+        return when (HealthConnectClient.getSdkStatus(context)) {
+            HealthConnectClient.SDK_AVAILABLE -> Availability.AVAILABLE
+            HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> Availability.UPDATE_REQUIRED
+            // From Android 14 Health Connect is part of the platform, so there is
+            // nothing to install: an unavailable SDK there means the device does
+            // not support it at all. Below 14 it is an APK the user can install
+            // - from Android 9: the APK does not install on 8, where sending
+            // the user to Play was a dead end.
+            else -> if (Build.VERSION.SDK_INT >= 34 || Build.VERSION.SDK_INT < MIN_PROVIDER_SDK) {
+                Availability.NOT_SUPPORTED
+            } else if (isProviderInstalled()) {
+                Availability.NOT_SUPPORTED
+            } else {
+                Availability.NOT_INSTALLED
+            }
         }
     }
 
@@ -182,6 +223,111 @@ class HealthConnectManager(
         context.packageManager.getPackageInfo(StepSourceCatalog.PROVIDER_PACKAGE, 0)
         true
     }.getOrDefault(false)
+
+    /** This app runs in a work profile, where Health Connect is not supported. Fixed for the process's life. */
+    val workProfile: Boolean by lazy {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && runCatching {
+            context.getSystemService(android.os.UserManager::class.java)?.isManagedProfile == true
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Whether the installed Health Connect has [feature], one of
+     * `HealthConnectFeatures.FEATURE_*`. Background and history reads are
+     * features: a provider too old for one cannot grant its permission, so
+     * it is neither requested nor reported as missing there. A local check -
+     * the provider's version - not a metered call.
+     */
+    fun featureAvailable(feature: Int): Boolean = runCatching {
+        client()?.features?.getFeatureStatus(feature) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+    }.getOrDefault(false)
+
+    val backgroundReadAvailable: Boolean
+        get() = featureAvailable(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND)
+
+    val historyReadAvailable: Boolean
+        get() = featureAvailable(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY)
+
+    // ---- rate limits -----------------------------------------------------
+
+    /** What this process has drawn on Health Connect's quotas, and which it may not draw on now. */
+    val quota = HealthConnectQuota { android.os.SystemClock.elapsedRealtime() }
+
+    /**
+     * Called with Health Connect's refusal each time it refuses a call for
+     * quota - not for the calls held back afterwards. Set by the core,
+     * which reports it.
+     */
+    @Volatile
+    var onRateLimited: ((HealthConnectRateLimitedException) -> Unit)? = null
+
+    /**
+     * Makes one Health Connect data call on [category]'s quota - the
+     * foreground or background one, as Health Connect will judge it. Throws
+     * [HealthConnectRateLimitedException] without calling while Health
+     * Connect has just refused that quota, and in place of its refusal.
+     */
+    private suspend fun <T> metered(category: Category, call: suspend () -> T): T {
+        val foreground = inForegroundNow()
+        val wait = quota.retryAfterMs(category, foreground)
+        if (wait > 0L) throw HealthConnectRateLimitedException(category, wait)
+        quota.record(category, foreground)
+        return try {
+            call().also { quota.onAccepted(category, foreground) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (!HealthConnectErrors.isRateLimited(error)) throw error
+            val refusal = HealthConnectRateLimitedException(category, quota.onRefused(category, foreground), error)
+            runCatching { onRateLimited?.invoke(refusal) }
+            throw refusal
+        }
+    }
+
+    /**
+     * Whether Health Connect counts this app as in the foreground right now
+     * - see [inForegroundForReads]. Which quota a call draws on, and whether
+     * a read needs the background grant.
+     */
+    fun inForegroundNow(): Boolean {
+        val info = android.app.ActivityManager.RunningAppProcessInfo()
+        android.app.ActivityManager.getMyMemoryState(info)
+        return inForegroundForReads(info.importance)
+    }
+
+    /**
+     * Whether work nobody is waiting for - a refresh the sensor asked for -
+     * may read Health Connect now: see [HealthConnectQuota.hasHeadroom].
+     */
+    fun hasReadHeadroom(): Boolean = quota.hasHeadroom(Category.READ, inForegroundNow())
+
+    // ---- this phone's own step counting ----------------------------------
+
+    @Volatile
+    private var deviceOrigin: String? = null
+
+    @Volatile
+    private var deviceOriginAsked = false
+
+    /**
+     * This phone's own synthetic package name in Health Connect, asked once
+     * per process - and again after the grants change, since the platform
+     * only answers an app that holds a read grant. See [DeviceDataSources].
+     * Its callers hold `READ_STEPS`. A timeout stands like an answer: asked
+     * again on every read, a platform that never answers would cost every
+     * read the wait.
+     */
+    suspend fun currentDeviceOrigin(): String? {
+        if (deviceOriginAsked) return deviceOrigin
+        if (client() == null) return null
+        val origin = kotlinx.coroutines.withTimeoutOrNull(DEVICE_ORIGIN_TIMEOUT_MS) {
+            DeviceDataSources.currentOrigin(context)
+        }
+        deviceOrigin = origin
+        origin?.let { StepSourceCatalog.currentDeviceOrigin = it }
+        deviceOriginAsked = true
+        return origin
+    }
 
     // ---- permissions -----------------------------------------------------
 
@@ -214,12 +360,33 @@ class HealthConnectManager(
                 if (android.os.SystemClock.elapsedRealtime() - at < GRANT_CACHE_MS) return set
             }
         }
-        val set = runCatching { client()?.permissionController?.getGrantedPermissions() }
-            .getOrNull() ?: emptySet()
+        val hc = client()
+        val set = if (hc == null) {
+            emptySet()
+        } else {
+            try {
+                hc.permissionController.getGrantedPermissions()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // A check that failed is not a revocation. The provider APK
+                // refuses even this call once the app's quota is used up, and
+                // reading that as "nothing granted" told the app - and the
+                // user - that Health Connect had been switched off. The last
+                // answer stands, uncached, so the next call asks again.
+                return lastGranted ?: emptySet()
+            }
+        }
         grantedCache = android.os.SystemClock.elapsedRealtime() to set
         val previous = lastGranted
         lastGranted = set
-        if (previous != null && previous != set) onGrantsChanged?.invoke()
+        if (previous != null && previous != set) {
+            // The token's types may no longer be readable, and the platform
+            // answers the device question only with a read grant.
+            resetChangesFeed()
+            deviceOriginAsked = false
+            onGrantsChanged?.invoke()
+        }
         return set
     }
 
@@ -307,7 +474,18 @@ class HealthConnectManager(
          * because the manifest does not declare them. Reported in
          * `undeclaredPermissions`, never requested, never a rejection.
          */
-        val dropped: Set<String> = emptySet()
+        val dropped: Set<String> = emptySet(),
+        /** Vitals to read, from `healthConnectReadVitals` - opt-ins, like [activeCalories]. Only with [read]. */
+        val vitals: Set<VitalType> = emptySet(),
+        /**
+         * The installed Health Connect has the background-read feature. A
+         * provider without it cannot grant [backgroundRead]'s permission, so
+         * it is not asked for - asking for a permission the provider does not
+         * know can cost the whole sheet.
+         */
+        val backgroundReadAvailable: Boolean = true,
+        /** The installed Health Connect has the history-read feature - see [backgroundReadAvailable]. */
+        val historyReadAvailable: Boolean = true
     ) {
         /** The read permissions [readTypes] need. */
         val readPermissions: Set<String>
@@ -372,13 +550,14 @@ class HealthConnectManager(
             return fitted.copy(dropped = requested - fitted.requested)
         }
 
-        /** Required plus whichever optional grants were opted into. */
+        /** Required plus whichever optional grants were opted into, and the provider has. */
         val requested: Set<String>
             get() = buildSet {
                 addAll(required)
-                if (backgroundRead) PERMISSION_BACKGROUND_READ?.let { add(it) }
-                if (historyRead) PERMISSION_HISTORY_READ?.let { add(it) }
+                if (backgroundRead && backgroundReadAvailable) PERMISSION_BACKGROUND_READ?.let { add(it) }
+                if (historyRead && historyReadAvailable) PERMISSION_HISTORY_READ?.let { add(it) }
                 if (read && activeCalories) add(READ_ACTIVE_CALORIES)
+                if (read) addAll(VitalType.permissions(vitals))
             }
     }
 
@@ -405,15 +584,13 @@ class HealthConnectManager(
 
     suspend fun status(scope: PermissionScope = PermissionScope()): Map<String, Any?> {
         val availability = availability()
-        val granted = if (availability == Availability.AVAILABLE) {
-            grantedPermissions(fresh = true)
-        } else {
-            emptySet()
-        }
+        val available = availability == Availability.AVAILABLE
+        val granted = if (available) grantedPermissions(fresh = true) else emptySet()
         val required = scope.required
         val missing = scope.requested - granted
         val denials = state.healthPermissionDenials
         val access = access(granted, scope.readTypes)
+        val origin = if (available && access.readSteps) currentDeviceOrigin() else null
         return mapOf(
             "available" to (availability == Availability.AVAILABLE),
             "availability" to availability.jsValue,
@@ -455,7 +632,22 @@ class HealthConnectManager(
             // the only route left is Health Connect's own settings screen.
             // Only for steps: an unticked distance is not a refusal.
             "shouldOpenSettings" to (denials >= MAX_PROMPTS && !scope.stepsGranted(granted) &&
-                scope.essential.isNotEmpty())
+                scope.essential.isNotEmpty()),
+            // Whether the installed provider can grant the two optional
+            // reads at all. Without the feature the permission is not asked
+            // for, so `backgroundReadGranted` stays false however often.
+            "backgroundReadAvailable" to (available && scope.backgroundReadAvailable),
+            "historyReadAvailable" to (available && scope.historyReadAvailable),
+            // Of `healthConnectReadVitals`, the ones the user allowed.
+            "grantedVitals" to scope.vitals.filter { it.permission in granted }.map { it.jsValue },
+            "workProfile" to workProfile,
+            // Health Connect counting this phone's steps itself, and the
+            // package name its records carry here when the platform says.
+            "deviceStepTracking" to mapOf(
+                "available" to (available && DeviceDataSources.stepTrackingAvailable()),
+                "dataOrigin" to origin
+            ),
+            "rateLimit" to quota.toMap(inForegroundNow())
         )
     }
 
@@ -471,9 +663,7 @@ class HealthConnectManager(
      * as Health Connect not consulted.
      */
     suspend fun canReadNow(): Boolean {
-        val info = android.app.ActivityManager.RunningAppProcessInfo()
-        android.app.ActivityManager.getMyMemoryState(info)
-        if (inForegroundForReads(info.importance)) return true
+        if (inForegroundNow()) return true
         val background = PERMISSION_BACKGROUND_READ ?: return false
         return grantedPermissions().contains(background)
     }
@@ -512,7 +702,7 @@ class HealthConnectManager(
             timeRangeSlicer = Period.ofDays(1),
             dataOriginFilter = origins.map { DataOrigin(it) }.toSet()
         )
-        return hc.aggregateGroupByPeriod(request)
+        return metered(Category.READ) { hc.aggregateGroupByPeriod(request) }
             .map { group ->
                 DayTotals(
                     date = DateKeys.format(group.startTime.toLocalDate()),
@@ -524,6 +714,22 @@ class HealthConnectManager(
                 )
             }
     }
+
+    /**
+     * [readSourcesByDay]'s answer: each day's origins, and which days were
+     * answered in full.
+     */
+    data class DaySources(
+        val byDate: Map<String, List<StepSource>>,
+        /**
+         * Days answered record by record with every companion type read
+         * through - what a read of that day alone would have said. The rest
+         * were filled from aggregates (no recording-method split, no hourly
+         * profile) or had a companion type cut short: they serve the range
+         * they were read for, and never stand in for a read of the day.
+         */
+        val detailed: Set<String>
+    )
 
     /**
      * Every origin that published steps in the range, keyed by day, with the
@@ -556,20 +762,32 @@ class HealthConnectManager(
          * first read cannot push the read as a whole past the caller's limit.
          */
         deadline: Long = Long.MAX_VALUE
-    ): Map<String, List<StepSource>> {
+    ): Map<String, List<StepSource>> = readSourcesByDay(start, end, coverageStartMs, perDayFill, deadline).byDate
+
+    /** [readDailyStepsBySource], saying which days it answered in full - see [DaySources.detailed]. */
+    suspend fun readSourcesByDay(
+        start: Instant,
+        end: Instant,
+        coverageStartMs: Long = 0L,
+        perDayFill: Boolean = true,
+        deadline: Long = Long.MAX_VALUE
+    ): DaySources {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val self = context.packageName
         val coverageDate = if (coverageStartMs > 0L) DateKeys.of(coverageStartMs) else null
+        // Once per process: this phone's own name in Health Connect, so its
+        // records are classified as this phone's whatever shape the name has.
+        currentDeviceOrigin()
 
-        // A raw read is bounded by MAX_PAGES * PAGE_SIZE records. A watch that
+        // A raw read is bounded by MAX_PAGES * MAX_PAGE_SIZE records. A watch that
         // writes one record a minute produces 1,440 a day, so anything past a
         // few weeks would be silently truncated - and a truncated month looks
         // like a watch that stopped counting half way through. Long windows
         // are answered per origin through the aggregate API instead, which
         // costs one query per origin per window rather than one page per
-        // thousand records.
+        // five thousand records.
         val days = java.time.Duration.between(start, end).toDays()
-        if (days > RAW_READ_MAX_DAYS) return readDailyStepsBySourceAggregated(hc, start, end, deadline)
+        if (days > RAW_READ_MAX_DAYS) return readSourcesByDayAggregated(start, end, coverageStartMs, deadline)
 
         // date -> package -> accumulator
         val buckets = HashMap<String, HashMap<String, Accumulator>>()
@@ -644,9 +862,14 @@ class HealthConnectManager(
         // survives a busy month - and only the day it stopped in and the
         // days before it are discarded.
         val lastDay = DateKeys.of(end.toEpochMilli())
+        // The last day a companion type was cut short through: days up to it
+        // carry a zeroed figure where a read of the day alone would have one.
+        var cutThrough: String? = null
         /** Applies [whole] to each origin's day the read covered, [cut] to the rest. */
         fun settle(outcome: ReadOutcome, oldest: Long, whole: (Accumulator) -> Unit, cut: (Accumulator) -> Unit) {
             val through = incompleteThrough(outcome, oldest.takeIf { it != Long.MAX_VALUE }?.let { DateKeys.of(it) }, lastDay)
+            val previous = cutThrough
+            if (through != null && (previous == null || through > previous)) cutThrough = through
             buckets.forEach { (date, byPackage) ->
                 byPackage.values.forEach { if (through == null || date > through) whole(it) else cut(it) }
             }
@@ -697,9 +920,12 @@ class HealthConnectManager(
                 .map { it.toStepSource(self, withCoverage = date == coverageDate) }
                 .sortedByDescending { it.steps }
         }
+        val dates = datesOf(start, end)
+        val cut = cutThrough
+        fun whole(date: String): Boolean = cut == null || date > cut
         val incomplete = incompleteThrough(
             stepsOutcome, oldestRead.takeIf { it != Long.MAX_VALUE }?.let { DateKeys.of(it) }, DateKeys.of(end.toEpochMilli())
-        ) ?: return read
+        ) ?: return DaySources(read, dates.filterTo(HashSet()) { whole(it) })
 
         // The day the read stopped in, and every day before it, are answered
         // per origin from the aggregate API: exact totals without the
@@ -722,8 +948,11 @@ class HealthConnectManager(
         // so a range agrees with the day view. Those per-day reads fall back
         // to aggregates themselves only for a day that alone outruns the cap.
         val budget = perDayBudget(android.os.SystemClock.elapsedRealtime(), deadline)
+        var filledInFull: Set<String> = emptySet()
         val filled = if (needsRecordingMethods && perDayFill && budget > 0) {
-            val days = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget)
+            val perDays = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget)
+            val days = perDays.mapValues { it.value.sources }
+            filledInFull = perDays.filterValues { it.detailed }.keys
             // A day the budget ran out on is answered from aggregates - it
             // loses the manual split, but the range keeps its other apps
             // rather than timing out as a whole.
@@ -736,8 +965,14 @@ class HealthConnectManager(
         } else {
             aggregateBySource(start, gapEnd, kinds, names)
         }
-        return read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete }
+        return DaySources(
+            byDate = read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete },
+            detailed = dates.filterTo(HashSet()) { if (it > incomplete) whole(it) else it in filledInFull }
+        )
     }
+
+    /** One day of a [perDay] refill: its sources, and whether that read answered it in full. */
+    private data class DayRead(val sources: List<StepSource>, val detailed: Boolean)
 
     /**
      * Each day from [first] to [last] read on its own - never filled a day at
@@ -752,7 +987,7 @@ class HealthConnectManager(
         end: Instant,
         coverageStartMs: Long,
         budgetMs: Long
-    ): Map<String, List<StepSource>> = kotlinx.coroutines.coroutineScope {
+    ): Map<String, DayRead> = kotlinx.coroutines.coroutineScope {
         val deadline = android.os.SystemClock.elapsedRealtime() + budgetMs
         val permits = kotlinx.coroutines.sync.Semaphore(PER_DAY_PARALLEL)
         DateKeys.rangeOf(first, last).map { date ->
@@ -762,9 +997,10 @@ class HealthConnectManager(
                     if (left <= 0) return@withPermit null
                     val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
                     kotlinx.coroutines.withTimeoutOrNull(left) {
-                        date to readDailyStepsBySource(
+                        val day = readSourcesByDay(
                             DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false
-                        )[date].orEmpty()
+                        )
+                        date to DayRead(day.byDate[date].orEmpty(), date in day.detailed)
                     }
                 }
             }
@@ -777,12 +1013,14 @@ class HealthConnectManager(
      * would pass for a window no other app wrote in.
      */
     private suspend fun originsWithSteps(hc: HealthConnectClient, start: Instant, end: Instant): Set<String> =
-        hc.aggregate(
-            AggregateRequest(
-                metrics = setOf(StepsRecord.COUNT_TOTAL),
-                timeRangeFilter = TimeRangeFilter.between(start, end)
+        metered(Category.READ) {
+            hc.aggregate(
+                AggregateRequest(
+                    metrics = setOf(StepsRecord.COUNT_TOTAL),
+                    timeRangeFilter = TimeRangeFilter.between(start, end)
+                )
             )
-        ).dataOrigins.mapTo(HashSet()) { it.packageName }
+        }.dataOrigins.mapTo(HashSet()) { it.packageName }
 
     /**
      * Each of [kinds]' origins' daily totals from the aggregate API, as
@@ -839,30 +1077,33 @@ class HealthConnectManager(
      * `healthConnectIgnoreManualEntries` has nothing to subtract. Every path
      * that resolves a single day - reads, events, the notification, the
      * verification snapshot - is a one-day window and never comes here.
+     *
+     * Only the recent window's days are answered in full; the older ones
+     * could be missing an origin that wrote nothing recently.
      */
-    private suspend fun readDailyStepsBySourceAggregated(
-        hc: HealthConnectClient,
+    private suspend fun readSourcesByDayAggregated(
         start: Instant,
         end: Instant,
+        coverageStartMs: Long,
         deadline: Long
-    ): Map<String, List<StepSource>> {
-        val self = context.packageName
+    ): DaySources {
         val discoveryStart = maxOf(start, end.minus(java.time.Duration.ofDays(RAW_READ_MAX_DAYS)))
-        val recent = readDailyStepsBySource(discoveryStart, end, deadline = deadline)
+        // With the coverage split, so today reads the same here as on its own.
+        val recent = readSourcesByDay(discoveryStart, end, coverageStartMs, deadline = deadline)
         val kinds = HashMap<String, StepSourceKind>()
         val names = HashMap<String, String>()
-        recent.values.flatten().forEach { source ->
+        recent.byDate.values.flatten().forEach { source ->
             val known = kinds[source.packageName]
             if (known == null || source.kind.isWearable) kinds[source.packageName] = source.kind
             names[source.packageName] = source.appName
         }
-        if (kinds.isEmpty()) return emptyMap()
+        if (kinds.isEmpty()) return DaySources(emptyMap(), recent.detailed)
 
         val out = HashMap<String, List<StepSource>>(aggregateBySource(start, end, kinds, names))
         // The recent window's raw numbers are exact and carry real timestamps;
         // let them override the aggregate for the days they cover.
-        recent.forEach { (date, sources) -> out[date] = sources }
-        return out
+        recent.byDate.forEach { (date, sources) -> out[date] = sources }
+        return DaySources(out, recent.detailed)
     }
 
     /** Flattened view of [readDailyStepsBySource] over the whole range. */
@@ -870,10 +1111,16 @@ class HealthConnectManager(
         start: Instant,
         end: Instant,
         deadline: Long = Long.MAX_VALUE
-    ): List<StepSource> {
+    ): List<StepSource> = mergeSources(readDailyStepsBySource(start, end, deadline = deadline).values)
+
+    /**
+     * One entry per origin across a range, from each day's sources: totals
+     * summed, and every per-record figure only as known as its worst day.
+     */
+    fun mergeSources(days: Collection<List<StepSource>>): List<StepSource> {
         val self = context.packageName
         val merged = HashMap<String, Accumulator>()
-        readDailyStepsBySource(start, end, deadline = deadline).values.flatten().forEach { source ->
+        days.flatten().forEach { source ->
             val acc = merged.getOrPut(source.packageName) {
                 Accumulator(source.packageName, self)
             }
@@ -990,19 +1237,21 @@ class HealthConnectManager(
             var token: String? = null
             var pages = 0
             do {
-                val response = hc.readRecords(
-                    ReadRecordsRequest(
-                        recordType = type.type,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        pageSize = PAGE_SIZE,
-                        pageToken = token
+                val response = metered(Category.READ) {
+                    hc.readRecords(
+                        ReadRecordsRequest(
+                            recordType = type.type,
+                            timeRangeFilter = TimeRangeFilter.between(start, end),
+                            pageSize = MAX_PAGE_SIZE,
+                            pageToken = token
+                        )
                     )
-                )
+                }
                 response.records.forEach { record -> anyRecordMap(record)?.let { out += it } }
                 token = response.pageToken
                 pages++
-            } while (token != null && pages < MAX_RAW_PAGES)
-            if (token != null) truncated = true
+            } while (hasMorePages(token) && pages < MAX_RAW_PAGES)
+            if (hasMorePages(token)) truncated = true
         }
         // One list, in time order, whichever type each record is.
         out.sortBy { it["startTime"] as Long }
@@ -1016,7 +1265,9 @@ class HealthConnectManager(
     /** A cursor for [changes] over [types], starting now. Valid for 30 days, per Health Connect. */
     suspend fun changesToken(types: Set<RecordType> = setOf(RecordType.STEPS)): String {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
-        return hc.getChangesToken(ChangesTokenRequest(recordTypes = types.map { it.type }.toSet()))
+        return metered(Category.READ) {
+            hc.getChangesToken(ChangesTokenRequest(recordTypes = types.map { it.type }.toSet()))
+        }
     }
 
     /**
@@ -1036,7 +1287,7 @@ class HealthConnectManager(
         var more = true
         var pages = 0
         while (more && pages < MAX_CHANGE_PAGES) {
-            val response = hc.getChanges(next)
+            val response = metered(Category.READ) { hc.getChanges(next) }
             if (response.changesTokenExpired) {
                 return mapOf(
                     "tokenExpired" to true,
@@ -1065,12 +1316,113 @@ class HealthConnectManager(
         )
     }
 
+    // ---- the changes feed behind the source cache ---------------------------
+
+    /** Which days the changes feed says moved - see [changedSinceLastLook]. */
+    data class ChangedDays(
+        /** Nothing can be vouched for: a new or expired token, a deletion, or more changes than one look reads. */
+        val all: Boolean,
+        /** The days records were inserted or updated on, by start time. */
+        val dates: Set<String>
+    ) {
+        companion object {
+            val ALL = ChangedDays(all = true, dates = emptySet())
+        }
+    }
+
+    private val feedLock = Mutex()
+
+    @Volatile
+    private var feedToken: String? = null
+
+    @Volatile
+    private var feedTypes: Set<KClass<out Record>> = emptySet()
+
     /**
-     * Pages through a record type. Health Connect caps a response at 5000
-     * records and hands back a token; ignoring it silently truncates a busy
-     * day, which for step records is not rare - some watches write one record
-     * per minute.
+     * Which days' records moved since the previous call, from Health
+     * Connect's changes feed - so the core's cache of each day's origins can
+     * keep a day nobody touched instead of reading it again. One call - a
+     * page of changes - when nothing moved, against a page per record type
+     * for reading even one quiet day; Health Connect's own advice is to
+     * follow changes rather than re-read.
+     *
+     * The token covers the types the reads use and are granted, so a change
+     * to any of them is seen. A deletion says only which record went, not
+     * which day, so it reports [ChangedDays.all]; so do a new token and an
+     * expired one. Null when the feed cannot be read at all - no provider,
+     * a grant gone, the quota - and the caller falls back on its own expiry.
      */
+    suspend fun changedSinceLastLook(): ChangedDays? = feedLock.withLock {
+        val hc = client() ?: return@withLock null
+        try {
+            val types = feedRecordTypes()
+            val token = feedToken?.takeIf { types == feedTypes } ?: return@withLock restartFeed(hc, types)
+            val dates = HashSet<String>()
+            var deleted = false
+            var next = token
+            var pages = 0
+            var more: Boolean
+            do {
+                val response = metered(Category.READ) { hc.getChanges(next) }
+                if (response.changesTokenExpired) return@withLock restartFeed(hc, types)
+                response.changes.forEach { change ->
+                    when (change) {
+                        is UpsertionChange -> startOf(change.record)?.let { dates += DateKeys.of(it.toEpochMilli()) }
+                        is DeletionChange -> deleted = true
+                    }
+                }
+                next = response.nextChangesToken
+                more = response.hasMore
+                pages++
+            } while (more && pages < MAX_FEED_PAGES)
+            // A backlog this long - a watch app pushing weeks of history - is
+            // cheaper to answer by re-reading than by paging through.
+            if (more) return@withLock restartFeed(hc, types)
+            feedToken = next
+            if (deleted) ChangedDays.ALL else ChangedDays(all = false, dates = dates)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: HealthConnectRateLimitedException) {
+            // The token is still good; the next look carries on from it.
+            null
+        } catch (_: Exception) {
+            feedToken = null
+            null
+        }
+    }
+
+    /** Forgets the token, so the next look starts a new one and vouches for nothing before it. */
+    fun resetChangesFeed() {
+        feedToken = null
+    }
+
+    private suspend fun restartFeed(hc: HealthConnectClient, types: Set<KClass<out Record>>): ChangedDays {
+        feedToken = null
+        val token = metered(Category.READ) { hc.getChangesToken(ChangesTokenRequest(recordTypes = types)) }
+        feedTypes = types
+        feedToken = token
+        return ChangedDays.ALL
+    }
+
+    /** What the per-source reads consume and may read: steps, and each granted companion type. */
+    private suspend fun feedRecordTypes(): Set<KClass<out Record>> {
+        val granted = grantedPermissions()
+        return buildSet {
+            add(StepsRecord::class)
+            access(granted, readTypes).readTypes.forEach { add(it.recordClass) }
+            if (readActiveCalories && READ_ACTIVE_CALORIES in granted) add(ActiveCaloriesBurnedRecord::class)
+        }
+    }
+
+    /** The start of a record the per-source reads bucket by, or null for a type they do not read. */
+    private fun startOf(record: Record): Instant? = when (record) {
+        is StepsRecord -> record.startTime
+        is DistanceRecord -> record.startTime
+        is TotalCaloriesBurnedRecord -> record.startTime
+        is ActiveCaloriesBurnedRecord -> record.startTime
+        else -> null
+    }
+
     /** How a paged read ended. */
     enum class ReadOutcome {
         /** Every page was read. */
@@ -1079,11 +1431,24 @@ class HealthConnectManager(
         /** Stopped at [MAX_PAGES] with more to read. */
         TRUNCATED,
 
-        /** A page failed - at once, or part way through. */
+        /** A page failed - at once, or part way through - or Health Connect refused it for quota. */
         FAILED
     }
 
-    /** @return how the read ended; only [ReadOutcome.COMPLETE] saw every record. */
+    /**
+     * Pages through a record type, [MAX_PAGE_SIZE] records at a time - the
+     * most Health Connect returns - so a busy day is one call rather than
+     * five. Health Connect hands back a token while more remain; ignoring it
+     * silently truncates a busy day, which for step records is not rare -
+     * some watches write one record per minute. On Android 12 and 13, and
+     * across some IPC boundaries, Health Connect's guidance is that the last
+     * page's token can come back empty rather than null. Taken for "more to
+     * come", it was sent back as the next page's token, and a read that had
+     * finished carried on - a call that could fail the read, or start it over
+     * until the page cap - so empty ends the read too, see [hasMorePages].
+     *
+     * @return how the read ended; only [ReadOutcome.COMPLETE] saw every record.
+     */
     private suspend fun <T : Record> readAll(
         hc: HealthConnectClient,
         type: Class<T>,
@@ -1096,26 +1461,31 @@ class HealthConnectManager(
         var pages = 0
         do {
             val response = try {
-                hc.readRecords(
-                    ReadRecordsRequest(
-                        recordType = type.kotlin,
-                        timeRangeFilter = TimeRangeFilter.between(start, end),
-                        ascendingOrder = !newestFirst,
-                        pageSize = PAGE_SIZE,
-                        pageToken = token
+                metered(Category.READ) {
+                    hc.readRecords(
+                        ReadRecordsRequest(
+                            recordType = type.kotlin,
+                            timeRangeFilter = TimeRangeFilter.between(start, end),
+                            ascendingOrder = !newestFirst,
+                            pageSize = MAX_PAGE_SIZE,
+                            pageToken = token
+                        )
                     )
-                )
+                }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 // A caller's timeout: stop, rather than carry on as a failed read.
                 throw cancelled
             } catch (_: Exception) {
+                // A refusal for quota too: steps that fail here fall through
+                // to the aggregate fill, whose call then says so; a companion
+                // type is cut, as for any failure.
                 return ReadOutcome.FAILED
             }
             response.records.forEach(onRecord)
             token = response.pageToken
             pages++
-        } while (token != null && pages < MAX_PAGES)
-        return if (token == null) ReadOutcome.COMPLETE else ReadOutcome.TRUNCATED
+        } while (hasMorePages(token) && pages < MAX_PAGES)
+        return if (hasMorePages(token)) ReadOutcome.TRUNCATED else ReadOutcome.COMPLETE
     }
 
     private class Accumulator(val packageName: String, self: String) {
@@ -1194,78 +1564,575 @@ class HealthConnectManager(
 
     // ---- writes ----------------------------------------------------------
 
+    /** How a batch of day writes went - see [writeDays]. */
+    data class WriteOutcome(
+        /** Days Health Connect accepted, and days with nothing to write. */
+        val written: Set<String>,
+        /** Days not written: worth another attempt, unless nothing could be written at all. */
+        val failed: Set<String>,
+        /** Health Connect refused a batch for quota, and the batches after it were not tried. */
+        val rateLimited: Boolean = false
+    )
+
     /**
-     * Upserts one day. Returns false when the client is missing, steps may
-     * not be written, or the provider rejected the write. Distance and
-     * calories are written alongside when their grants are there and left
-     * out when not: one insert carrying an ungranted type fails as a whole,
-     * which stopped all mirroring for a user who unticked only distance.
+     * Upserts [days] in as few calls as Health Connect allows: up to
+     * [MAX_RECORDS_PER_INSERT] records per insert, a day's records always in
+     * the same one. Writing a hundred pending days used to be a hundred
+     * inserts - a tenth of the background write quota for one sync. A batch
+     * that fails costs only its own days, which stay pending, and those
+     * already written stay written: Health Connect's advice is to retry from
+     * where a write failed, not to start over. Once one is refused for
+     * quota the rest wait for the next sync.
+     *
+     * Distance and calories are written alongside when their grants are
+     * there and left out when not: one insert carrying an ungranted type
+     * fails as a whole, which stopped all mirroring for a user who unticked
+     * only distance. A day with no steps has nothing to write and counts as
+     * written.
      */
-    suspend fun writeDay(totals: DayTotals): Boolean {
-        val hc = client() ?: return false
-        if (totals.steps <= 0) return true
+    suspend fun writeDays(days: List<DayTotals>): WriteOutcome {
+        val dates = days.mapTo(LinkedHashSet()) { it.date }
+        val hc = client() ?: return WriteOutcome(emptySet(), dates)
         val access = access(grantedPermissions(), readTypes)
-        if (!access.writeSteps) return false
+        if (!access.writeSteps) return WriteOutcome(emptySet(), dates)
 
-        val zone = ZoneId.systemDefault()
-        val start = DateKeys.startOfDayInstant(totals.date)
-        val rawEnd = DateKeys.endOfDayInstant(totals.date)
-        // An open day must not be written with an end time in the future.
-        val end = if (rawEnd.isAfter(Instant.now())) Instant.now() else rawEnd
-        if (!end.isAfter(start)) return true
+        val now = Instant.now()
+        val written = LinkedHashSet<String>()
+        val toWrite = days.filter { day ->
+            (dayInterval(day, now) != null).also { writable -> if (!writable) written += day.date }
+        }
+        if (toWrite.isEmpty()) return WriteOutcome(written, emptySet())
 
-        val startOffset = zone.rules.getOffset(start)
-        val endOffset = zone.rules.getOffset(end)
         // Health Connect resolves same-id collisions by keeping the higher
         // version, so this has to be monotonic. Using the wall clock meant that
         // after the user set the clock back, every write was silently discarded
-        // by the provider while insertRecords still reported success.
+        // by the provider while insertRecords still reported success. One
+        // version for the batch: every record in it is newer than any before.
         val version = state.nextHealthRecordVersion()
-        val device = Device(type = Device.TYPE_PHONE)
+        val batches = ArrayList<MutableList<Pair<String, List<Record>>>>()
+        var size = 0
+        for (day in toWrite) {
+            val records = dayRecords(day, access.writeTypes, version, now)
+            if (batches.isEmpty() || size + records.size > MAX_RECORDS_PER_INSERT) {
+                batches.add(ArrayList())
+                size = 0
+            }
+            batches.last().add(day.date to records)
+            size += records.size
+        }
 
+        val failed = LinkedHashSet<String>()
+        var rateLimited = false
+        for (batch in batches) {
+            if (rateLimited) {
+                batch.forEach { failed += it.first }
+                continue
+            }
+            try {
+                metered(Category.WRITE) { hc.insertRecords(batch.flatMap { it.second }) }
+                batch.forEach { written += it.first }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (limited: HealthConnectRateLimitedException) {
+                rateLimited = true
+                batch.forEach { failed += it.first }
+            } catch (_: Exception) {
+                batch.forEach { failed += it.first }
+            }
+        }
+        return WriteOutcome(written, failed, rateLimited)
+    }
+
+    /**
+     * The span one day's records cover: midnight to midnight, or to now for
+     * the open day - never an end time in the future. Null when there is
+     * nothing to write: no steps, or no time yet.
+     */
+    private fun dayInterval(totals: DayTotals, now: Instant): Pair<Instant, Instant>? {
+        if (totals.steps <= 0) return null
+        val start = DateKeys.startOfDayInstant(totals.date)
+        val rawEnd = DateKeys.endOfDayInstant(totals.date)
+        val end = if (rawEnd.isAfter(now)) now else rawEnd
+        return if (end.isAfter(start)) start to end else null
+    }
+
+    /**
+     * One day's records: steps, and distance and calories where [writeTypes]
+     * allow, each with its zone offset and its device. The device says what
+     * Health Connect's metadata guidance asks for - a phone, by maker and
+     * model - so an app reading these knows what counted them.
+     */
+    private fun dayRecords(totals: DayTotals, writeTypes: Set<ReadType>, version: Long, now: Instant): List<Record> {
+        val (start, end) = dayInterval(totals, now) ?: return emptyList()
+        val zone = ZoneId.systemDefault()
+        val startOffset = zone.rules.getOffset(start)
+        val endOffset = zone.rules.getOffset(end)
+        val device = thisPhone
+        fun metadata(type: ReadType) = Metadata.autoRecorded(
+            device = device,
+            clientRecordId = type.clientRecordId(totals.date),
+            clientRecordVersion = version
+        )
         // Explicitly typed: the three record classes share only the
         // library-internal IntervalRecord supertype, which Kotlin 2.x refuses
         // to infer as a type argument.
-        val records = listOfNotNull<Record>(
+        return listOfNotNull<Record>(
             StepsRecord(
                 count = totals.steps.toLong(),
                 startTime = start,
                 endTime = end,
                 startZoneOffset = startOffset,
                 endZoneOffset = endOffset,
-                metadata = Metadata.autoRecorded(
-                    device = device,
-                    clientRecordId = "stp-steps-${totals.date}",
-                    clientRecordVersion = version
-                )
+                metadata = metadata(ReadType.STEPS)
             ),
-            if (ReadType.DISTANCE !in access.writeTypes) null else DistanceRecord(
+            if (ReadType.DISTANCE !in writeTypes) null else DistanceRecord(
                 distance = Length.meters(totals.distance),
                 startTime = start,
                 endTime = end,
                 startZoneOffset = startOffset,
                 endZoneOffset = endOffset,
-                metadata = Metadata.autoRecorded(
-                    device = device,
-                    clientRecordId = "stp-distance-${totals.date}",
-                    clientRecordVersion = version
-                )
+                metadata = metadata(ReadType.DISTANCE)
             ),
-            if (ReadType.TOTAL_CALORIES !in access.writeTypes) null else TotalCaloriesBurnedRecord(
+            if (ReadType.TOTAL_CALORIES !in writeTypes) null else TotalCaloriesBurnedRecord(
                 energy = Energy.kilocalories(totals.calories),
                 startTime = start,
                 endTime = end,
                 startZoneOffset = startOffset,
                 endZoneOffset = endOffset,
-                metadata = Metadata.autoRecorded(
-                    device = device,
-                    clientRecordId = "stp-calories-${totals.date}",
-                    clientRecordVersion = version
-                )
+                metadata = metadata(ReadType.TOTAL_CALORIES)
             )
         )
+    }
 
-        return runCatching { hc.insertRecords(records); true }.getOrDefault(false)
+    private val thisPhone: Device by lazy {
+        Device(
+            type = Device.TYPE_PHONE,
+            manufacturer = Build.MANUFACTURER?.takeIf { it.isNotBlank() },
+            model = Build.MODEL?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    /**
+     * Deletes the records this package wrote for [dates], by client record
+     * id - so nothing else the app writes to Health Connect itself is
+     * touched, which a time-range delete would take too - for every type
+     * whose write permission is granted; Health Connect needs it to delete.
+     * Each date's day record goes, and its minute records: those in
+     * [minutes] (minute starts, by date), and for a date in [allMinutes]
+     * every minute of the day, for a day whose written minutes nothing
+     * remembers any more. Returns those types. Throws when a delete fails or
+     * is refused for quota: the caller decides whether that matters.
+     */
+    suspend fun deleteOwnDays(
+        dates: Collection<String>,
+        minutes: Map<String, Collection<Long>> = emptyMap(),
+        allMinutes: Set<String> = emptySet()
+    ): Set<ReadType> {
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
+        val types = access(grantedPermissions(), readTypes).writeTypes
+        for (type in types) {
+            val ids = LinkedHashSet<String>()
+            dates.forEach { ids += type.clientRecordId(it) }
+            minutes.forEach { (date, starts) -> starts.forEach { ids += type.minuteRecordId(date, it) } }
+            allMinutes.forEach { date -> minutesOf(date).forEach { ids += type.minuteRecordId(date, it) } }
+            for (chunk in ids.chunked(MAX_IDS_PER_DELETE)) {
+                metered(Category.WRITE) {
+                    hc.deleteRecords(recordType = type.recordClass, recordIdsList = emptyList(), clientRecordIdsList = chunk)
+                }
+            }
+        }
+        return types
+    }
+
+    // ---- per-minute writes -------------------------------------------------
+
+    /** One day's per-minute write - see [writeMinutes]. */
+    data class MinuteDay(
+        /** The day's mirrored totals: every record's distance and calories are a share of them. */
+        val totals: DayTotals,
+        /** Where the day's records end: the next midnight, or now for today. */
+        val dayEnd: Instant,
+        /** Minute start -> steps, for each minute record to write. */
+        val upserts: Map<Long, Int>,
+        /** Minute starts whose record goes. */
+        val deletes: List<Long>,
+        /** The day's steps no minute holds, over [residualSpan]; 0 for none. */
+        val residual: Int,
+        val residualSpan: com.steptrackerpro.core.MinuteWritePlan.Span?,
+        /** The day record goes: it held steps last time, or one from day mode may stand. */
+        val deleteResidual: Boolean
+    ) {
+        val date: String get() = totals.date
+    }
+
+    /** How a [writeMinutes] went. */
+    data class MinuteWriteOutcome(
+        /** Minute start -> what Health Connect now holds for it (0 once deleted), for every part that landed. */
+        val written: Map<Long, Int> = emptyMap(),
+        /** Days every part of whose write landed. */
+        val complete: Set<String> = emptySet(),
+        /** Days some minute record was inserted for: they have per-minute records now. */
+        val inserted: Set<String> = emptySet(),
+        /** Days anything landed for, an insert or a delete: what Health Connect holds for them changed. */
+        val changed: Set<String> = emptySet(),
+        /** Days whose day record now holds their unplaced steps. */
+        val residualWritten: Set<String> = emptySet(),
+        /** Days whose day record was deleted. */
+        val residualDeleted: Set<String> = emptySet(),
+        /** Days some part of whose write did not land; worth another attempt. */
+        val failed: Set<String> = emptySet(),
+        /** Health Connect refused a call for quota, and what came after it was not tried. */
+        val rateLimited: Boolean = false
+    )
+
+    /**
+     * Writes days as per-minute records - `healthConnectWriteGranularity:
+     * 'minute'`, which is what Health Connect's write guide asks of steps -
+     * and the day record (`stp-steps-<date>`) for the steps no minute holds,
+     * over the longest stretch of the day no minute covers. Only what moved
+     * since the last write is sent, from the plans
+     * [com.steptrackerpro.core.MinuteWritePlan] makes.
+     *
+     * Nothing two of these records cover overlaps - Health Connect counts
+     * only one of two overlapping records from the same app - at any point
+     * of the write, not only once it is done. Deletes go first, so a record
+     * on its way out never stands beside the one replacing it, and a day
+     * whose deletes failed writes nothing this time. Then each day's day
+     * record, before its minutes: the full-day record day mode wrote, or
+     * the last pass's residual over a stretch some new minute now falls in,
+     * is cut down to this pass's residual before anything lands inside it,
+     * and a day whose day record did not land writes no minute this time.
+     * Up to [MAX_RECORDS_PER_INSERT] records an insert, a minute's records
+     * always together; a batch that fails costs its days the rest of this
+     * pass, and what landed is reported in `written`, so the next sync
+     * carries on from there rather than starting the day over - Health
+     * Connect's advice for a failed write.
+     */
+    suspend fun writeMinutes(days: List<MinuteDay>): MinuteWriteOutcome {
+        val dates = days.mapTo(LinkedHashSet()) { it.date }
+        if (days.isEmpty()) return MinuteWriteOutcome()
+        val hc = client() ?: return MinuteWriteOutcome(failed = dates)
+        val access = access(grantedPermissions(), readTypes)
+        if (!access.writeSteps) return MinuteWriteOutcome(failed = dates)
+        val types = access.writeTypes
+
+        val written = HashMap<Long, Int>()
+        val failed = LinkedHashSet<String>()
+        val residualWritten = HashSet<String>()
+        val residualDeleted = HashSet<String>()
+        val inserted = HashSet<String>()
+        val changed = HashSet<String>()
+        var rateLimited = false
+
+        // Deletes, one list of ids per type across every day; a chunk that
+        // fails fails the days in it.
+        for (type in types) {
+            val ids = ArrayList<Pair<String, String>>()
+            for (day in days) {
+                day.deletes.forEach { ids += day.date to type.minuteRecordId(day.date, it) }
+                if (day.deleteResidual) ids += day.date to type.clientRecordId(day.date)
+            }
+            for (chunk in ids.chunked(MAX_IDS_PER_DELETE)) {
+                val chunkDates = chunk.mapTo(HashSet()) { it.first }
+                if (rateLimited) {
+                    failed += chunkDates
+                    continue
+                }
+                try {
+                    metered(Category.WRITE) {
+                        hc.deleteRecords(type.recordClass, emptyList(), chunk.map { it.second })
+                    }
+                    changed += chunkDates
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (limited: HealthConnectRateLimitedException) {
+                    rateLimited = true
+                    failed += chunkDates
+                } catch (_: Exception) {
+                    failed += chunkDates
+                }
+            }
+        }
+        for (day in days) {
+            if (day.date in failed) continue
+            day.deletes.forEach { written[it] = 0 }
+            if (day.deleteResidual) residualDeleted += day.date
+        }
+
+        // Inserts, a piece per minute and one for each day's residual - its
+        // day record, first - so a minute's records land or fail together.
+        val now = Instant.now()
+        val version = state.nextHealthRecordVersion()
+        class Piece(val date: String, val minute: Long?, val steps: Int, val records: List<Record>)
+        val pieces = ArrayList<Piece>()
+        for (day in days) {
+            if (day.date in failed) continue
+            val dayStart = DateKeys.startOfDayInstant(day.date)
+            val end = minOf(day.dayEnd, now)
+            val span = day.residualSpan
+            if (day.residual > 0 && span != null) {
+                val start = maxOf(Instant.ofEpochMilli(span.start), dayStart)
+                val spanEnd = minOf(Instant.ofEpochMilli(span.end), end)
+                if (spanEnd.isAfter(start)) {
+                    pieces += Piece(
+                        day.date, null, day.residual,
+                        intervalRecords(day.totals, day.residual, start, spanEnd, types, version) { it.clientRecordId(day.date) }
+                    )
+                }
+            }
+            for ((minute, steps) in day.upserts) {
+                val start = Instant.ofEpochMilli(minute)
+                val minuteEnd = minOf(start.plusMillis(MINUTE_MS), end)
+                // The minute that is still running, at its very first instant.
+                if (!minuteEnd.isAfter(start)) continue
+                pieces += Piece(
+                    day.date, minute, steps,
+                    intervalRecords(day.totals, steps, start, minuteEnd, types, version) { it.minuteRecordId(day.date, minute) }
+                )
+            }
+        }
+        val batches = ArrayList<MutableList<Piece>>()
+        var size = 0
+        for (piece in pieces) {
+            if (batches.isEmpty() || size + piece.records.size > MAX_RECORDS_PER_INSERT) {
+                batches.add(ArrayList())
+                size = 0
+            }
+            batches.last().add(piece)
+            size += piece.records.size
+        }
+        for (planned in batches) {
+            // A day that failed in an earlier batch writes nothing more this
+            // pass: what is left of it could land inside its old day record.
+            val batch = planned.filter { it.date !in failed }
+            if (batch.isEmpty()) continue
+            if (rateLimited) {
+                batch.forEach { failed += it.date }
+                continue
+            }
+            try {
+                metered(Category.WRITE) { hc.insertRecords(batch.flatMap { it.records }) }
+                for (piece in batch) {
+                    if (piece.minute != null) {
+                        written[piece.minute] = piece.steps
+                        inserted += piece.date
+                    } else {
+                        residualWritten += piece.date
+                    }
+                    changed += piece.date
+                }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (limited: HealthConnectRateLimitedException) {
+                rateLimited = true
+                batch.forEach { failed += it.date }
+            } catch (_: Exception) {
+                batch.forEach { failed += it.date }
+            }
+        }
+        return MinuteWriteOutcome(
+            written = written,
+            complete = dates - failed,
+            inserted = inserted,
+            changed = changed,
+            residualWritten = residualWritten,
+            residualDeleted = residualDeleted,
+            failed = failed,
+            rateLimited = rateLimited
+        )
+    }
+
+    /**
+     * The records for [steps] of a day over one interval: steps, and the
+     * day's distance and calories in the same proportion where [types]
+     * allow, each with its zone offsets, its device and its id.
+     */
+    private fun intervalRecords(
+        totals: DayTotals,
+        steps: Int,
+        start: Instant,
+        end: Instant,
+        types: Set<ReadType>,
+        version: Long,
+        id: (ReadType) -> String
+    ): List<Record> {
+        val zone = ZoneId.systemDefault()
+        val startOffset = zone.rules.getOffset(start)
+        val endOffset = zone.rules.getOffset(end)
+        val share = if (totals.steps > 0) steps.toDouble() / totals.steps else 0.0
+        fun metadata(type: ReadType) = Metadata.autoRecorded(
+            device = thisPhone,
+            clientRecordId = id(type),
+            clientRecordVersion = version
+        )
+        return listOfNotNull<Record>(
+            StepsRecord(
+                count = steps.toLong(),
+                startTime = start,
+                endTime = end,
+                startZoneOffset = startOffset,
+                endZoneOffset = endOffset,
+                metadata = metadata(ReadType.STEPS)
+            ),
+            if (ReadType.DISTANCE !in types) null else DistanceRecord(
+                distance = Length.meters(totals.distance * share),
+                startTime = start,
+                endTime = end,
+                startZoneOffset = startOffset,
+                endZoneOffset = endOffset,
+                metadata = metadata(ReadType.DISTANCE)
+            ),
+            if (ReadType.TOTAL_CALORIES !in types) null else TotalCaloriesBurnedRecord(
+                energy = Energy.kilocalories(totals.calories * share),
+                startTime = start,
+                endTime = end,
+                startZoneOffset = startOffset,
+                endZoneOffset = endOffset,
+                metadata = metadata(ReadType.TOTAL_CALORIES)
+            )
+        )
+    }
+
+    // ---- vitals ----------------------------------------------------------
+
+    /**
+     * Each of [types]' measurements between two instants, summarised - see
+     * [VitalSummary]. Heart rate comes from Health Connect's aggregate, since
+     * a workout can carry a sample a second; the rest are read record by
+     * record, newest first, up to [MAX_VITAL_PAGES] pages each. A type whose
+     * read permission is not granted is left out and listed in `notGranted`.
+     * Throws when Health Connect cannot be read.
+     */
+    suspend fun readVitals(start: Instant, end: Instant, types: Set<VitalType>): Map<String, Any?> {
+        val hc = client() ?: throw IllegalStateException("Health Connect is not available")
+        val granted = grantedPermissions()
+        val (readable, refused) = types.partition { it.permission in granted }
+        val filter = TimeRangeFilter.between(start, end)
+        return mapOf(
+            "vitals" to readable.map { readVital(hc, it, filter, start, end).toMap() },
+            "notGranted" to refused.map { it.jsValue }
+        )
+    }
+
+    private suspend fun readVital(
+        hc: HealthConnectClient,
+        type: VitalType,
+        filter: TimeRangeFilter,
+        start: Instant,
+        end: Instant
+    ): VitalSummary {
+        val stats = VitalStats()
+        fun origin(record: Record) = record.metadata.dataOrigin.packageName
+        return when (type) {
+            VitalType.HEART_RATE -> {
+                val result = metered(Category.READ) {
+                    hc.aggregate(
+                        AggregateRequest(
+                            metrics = setOf(
+                                HeartRateRecord.BPM_MIN,
+                                HeartRateRecord.BPM_MAX,
+                                HeartRateRecord.BPM_AVG,
+                                HeartRateRecord.MEASUREMENTS_COUNT
+                            ),
+                            timeRangeFilter = filter
+                        )
+                    )
+                }
+                stats.setAggregate(
+                    count = result[HeartRateRecord.MEASUREMENTS_COUNT] ?: 0L,
+                    min = result[HeartRateRecord.BPM_MIN]?.toDouble(),
+                    max = result[HeartRateRecord.BPM_MAX]?.toDouble(),
+                    avg = result[HeartRateRecord.BPM_AVG]?.toDouble()
+                )
+                // The newest record holds the latest sample: one call, one record.
+                if (stats.count > 0) {
+                    val newest = metered(Category.READ) {
+                        hc.readRecords(
+                            ReadRecordsRequest(
+                                recordType = HeartRateRecord::class,
+                                timeRangeFilter = filter,
+                                ascendingOrder = false,
+                                pageSize = 1
+                            )
+                        )
+                    }
+                    newest.records.firstOrNull()?.let { record ->
+                        record.samples
+                            .filter { !it.time.isBefore(start) && it.time.isBefore(end) }
+                            .maxByOrNull { it.time }
+                            ?.let { stats.offerLatest(it.time.toEpochMilli(), it.beatsPerMinute.toDouble(), origin(record)) }
+                    }
+                }
+                VitalSummary(type, stats)
+            }
+            VitalType.BLOOD_PRESSURE -> {
+                val diastolic = VitalStats()
+                val truncated = readNewestFirst(hc, BloodPressureRecord::class, filter) { record ->
+                    val at = record.time.toEpochMilli()
+                    stats.add(at, record.systolic.inMillimetersOfMercury, origin(record))
+                    diastolic.add(at, record.diastolic.inMillimetersOfMercury, origin(record))
+                }
+                VitalSummary(type, stats, diastolic, truncated)
+            }
+            VitalType.RESTING_HEART_RATE -> VitalSummary(
+                type, stats, truncated = readNewestFirst(hc, RestingHeartRateRecord::class, filter) {
+                    stats.add(it.time.toEpochMilli(), it.beatsPerMinute.toDouble(), origin(it))
+                }
+            )
+            VitalType.OXYGEN_SATURATION -> VitalSummary(
+                type, stats, truncated = readNewestFirst(hc, OxygenSaturationRecord::class, filter) {
+                    stats.add(it.time.toEpochMilli(), it.percentage.value, origin(it))
+                }
+            )
+            VitalType.RESPIRATORY_RATE -> VitalSummary(
+                type, stats, truncated = readNewestFirst(hc, RespiratoryRateRecord::class, filter) {
+                    stats.add(it.time.toEpochMilli(), it.rate, origin(it))
+                }
+            )
+            VitalType.BODY_TEMPERATURE -> VitalSummary(
+                type, stats, truncated = readNewestFirst(hc, BodyTemperatureRecord::class, filter) {
+                    stats.add(it.time.toEpochMilli(), it.temperature.inCelsius, origin(it))
+                }
+            )
+            VitalType.BLOOD_GLUCOSE -> VitalSummary(
+                type, stats, truncated = readNewestFirst(hc, BloodGlucoseRecord::class, filter) {
+                    stats.add(it.time.toEpochMilli(), it.level.inMillimolesPerLiter, origin(it))
+                }
+            )
+        }
+    }
+
+    /**
+     * Pages through [type] newest first, [MAX_VITAL_PAGES] pages at most.
+     * Returns whether records were left unread - the figures then cover the
+     * newest ones. Throws when a page fails, as the vitals read has nothing
+     * to fall back on.
+     */
+    private suspend fun <T : Record> readNewestFirst(
+        hc: HealthConnectClient,
+        type: KClass<T>,
+        filter: TimeRangeFilter,
+        onRecord: (T) -> Unit
+    ): Boolean {
+        var token: String? = null
+        var pages = 0
+        do {
+            val response = metered(Category.READ) {
+                hc.readRecords(
+                    ReadRecordsRequest(
+                        recordType = type,
+                        timeRangeFilter = filter,
+                        ascendingOrder = false,
+                        pageSize = MAX_PAGE_SIZE,
+                        pageToken = token
+                    )
+                )
+            }
+            response.records.forEach(onRecord)
+            token = response.pageToken
+            pages++
+        } while (hasMorePages(token) && pages < MAX_VITAL_PAGES)
+        return hasMorePages(token)
     }
 
     // ---- intents ---------------------------------------------------------
@@ -1325,17 +2192,25 @@ class HealthConnectManager(
         /** Health Connect stops showing the sheet after this many refusals. */
         const val MAX_PROMPTS = 2
 
-        private const val PAGE_SIZE = 1_000
+        /** The oldest Android the Health Connect APK installs on: 9. */
+        private const val MIN_PROVIDER_SDK = 28
 
         /**
-         * Pages a per-source read takes before stopping. A watch writing one
-         * record a minute writes 1,440 a day, so [RAW_READ_MAX_DAYS] of it is
-         * about 50,400 records - past the 50 pages this used to allow.
+         * Records per page: the most Health Connect returns in one, where the
+         * default is 1,000. A busy day - a watch and Health Connect's own
+         * count each writing a record a minute - is one call instead of three.
          */
-        private const val MAX_PAGES = 60
+        const val MAX_PAGE_SIZE = 5_000
+
+        /**
+         * Pages a per-source read takes before stopping: 120,000 records, so
+         * [RAW_READ_MAX_DAYS] of two sources writing one record a minute
+         * each - about 100,800 - is read whole.
+         */
+        private const val MAX_PAGES = 24
 
         /** Longest window answered from raw records; longer ones aggregate. */
-        private const val RAW_READ_MAX_DAYS = 35L
+        const val RAW_READ_MAX_DAYS = 35L
 
         /** How long a granted-permissions answer is reused. */
         private const val GRANT_CACHE_MS = 5_000L
@@ -1344,7 +2219,85 @@ class HealthConnectManager(
         const val LATE_WRITE_MS = 24L * 60 * 60 * 1000
 
         /** Pages [readStepRecords] reads before reporting `truncated`: 10,000 records. */
-        private const val MAX_RAW_PAGES = 10
+        private const val MAX_RAW_PAGES = 2
+
+        /** Health Connect's limit on records in one insert. */
+        const val MAX_RECORDS_PER_INSERT = 1_000
+
+        /** Client record ids per delete call - a day of minutes in two, well inside one binder transaction. */
+        private const val MAX_IDS_PER_DELETE = 1_000
+
+        private const val MINUTE_MS = 60_000L
+
+        /**
+         * The start, epoch ms, of every minute of [date] in the current zone:
+         * 1,440, or an hour more or fewer across a clock change.
+         */
+        fun minutesOf(date: String): List<Long> {
+            val first = Math.floorDiv(DateKeys.startOfDayMillis(date), MINUTE_MS)
+            val end = Math.floorDiv(DateKeys.endOfDayMillis(date) + MINUTE_MS, MINUTE_MS)
+            return (first until end).map { it * MINUTE_MS }
+        }
+
+        /** Pages of changes one look at the feed reads before it re-reads instead: 20,000 changes. */
+        private const val MAX_FEED_PAGES = 20
+
+        /** Pages a vitals read takes per type: 20,000 measurements, newest first. */
+        private const val MAX_VITAL_PAGES = 4
+
+        /**
+         * How long the platform is given to name this phone's data source -
+         * short, as the first read of the process waits for it inside its own
+         * timeout.
+         */
+        private const val DEVICE_ORIGIN_TIMEOUT_MS = 1_000L
+
+        /**
+         * Every date a window touches, from its start to the last instant
+         * before its end - the end itself is excluded, as by Health Connect's
+         * time filter, so a window ending at midnight does not touch the day
+         * after it.
+         */
+        fun datesOf(start: Instant, end: Instant): List<String> =
+            if (!end.isAfter(start)) {
+                emptyList()
+            } else {
+                DateKeys.rangeOf(DateKeys.of(start.toEpochMilli()), DateKeys.of(end.toEpochMilli() - 1))
+            }
+
+        /** Separate reads a range is split into before it is read as one span instead - see [runsOf]. */
+        const val MAX_RANGE_RUNS = 4
+
+        /**
+         * Days split into runs of consecutive ones, each at most [maxDays]
+         * long - one read apiece. Past [maxRuns] runs, the span from the
+         * first day to the last is read instead, in [maxDays] pieces:
+         * re-reading a few cached days in between costs less than a read per
+         * scattered day.
+         */
+        fun runsOf(days: Collection<String>, maxDays: Int, maxRuns: Int = MAX_RANGE_RUNS): List<List<String>> {
+            if (days.isEmpty()) return emptyList()
+            val runs = ArrayList<MutableList<String>>()
+            for (day in days.toSortedSet()) {
+                val current = runs.lastOrNull()
+                if (current != null && current.size < maxDays &&
+                    DateKeys.parse(current.last()).plusDays(1) == DateKeys.parse(day)
+                ) {
+                    current += day
+                } else {
+                    runs += mutableListOf(day)
+                }
+            }
+            if (runs.size <= maxRuns) return runs
+            return DateKeys.rangeOf(runs.first().first(), runs.last().last()).chunked(maxDays)
+        }
+
+        /**
+         * Whether a page token says more pages follow. Android 12 and 13 - and
+         * some IPC boundaries - send the last page's token back empty rather
+         * than null, so empty means done too.
+         */
+        fun hasMorePages(pageToken: String?): Boolean = !pageToken.isNullOrEmpty()
 
         /** Days a per-day refill reads at once. */
         private const val PER_DAY_PARALLEL = 4
@@ -1372,6 +2325,12 @@ class HealthConnectManager(
         /** Pages [changes] reads per call before handing back `hasMore`. */
         private const val MAX_CHANGE_PAGES = 20
 
+        /**
+         * The JS name of a `Device.type`. The extended types newer Health
+         * Connect releases add - from 9 - are named by value: the client
+         * this package compiles against does not have their constants yet,
+         * and a provider that has them hands them back all the same.
+         */
         fun deviceTypeName(type: Int): String = when (type) {
             Device.TYPE_WATCH -> "watch"
             Device.TYPE_PHONE -> "phone"
@@ -1381,8 +2340,24 @@ class HealthConnectManager(
             Device.TYPE_FITNESS_BAND -> "fitness_band"
             Device.TYPE_CHEST_STRAP -> "chest_strap"
             Device.TYPE_SMART_DISPLAY -> "smart_display"
+            DEVICE_TYPE_CONSUMER_MEDICAL_DEVICE -> "consumer_medical_device"
+            DEVICE_TYPE_GLASSES -> "glasses"
+            DEVICE_TYPE_HEARABLE -> "hearable"
+            DEVICE_TYPE_FITNESS_MACHINE -> "fitness_machine"
+            DEVICE_TYPE_FITNESS_EQUIPMENT -> "fitness_equipment"
+            DEVICE_TYPE_PORTABLE_COMPUTER -> "portable_computer"
+            DEVICE_TYPE_METER -> "meter"
             else -> "unknown"
         }
+
+        // Health Connect's extended device types, by value - see deviceTypeName.
+        private const val DEVICE_TYPE_CONSUMER_MEDICAL_DEVICE = 9
+        private const val DEVICE_TYPE_GLASSES = 10
+        private const val DEVICE_TYPE_HEARABLE = 11
+        private const val DEVICE_TYPE_FITNESS_MACHINE = 12
+        private const val DEVICE_TYPE_FITNESS_EQUIPMENT = 13
+        private const val DEVICE_TYPE_PORTABLE_COMPUTER = 14
+        private const val DEVICE_TYPE_METER = 15
 
         /**
          * The last day a newest-first read did not fully cover, or null when
@@ -1463,6 +2438,7 @@ class HealthConnectManager(
             PERMISSION_BACKGROUND_READ?.let { add(it) }
             PERMISSION_HISTORY_READ?.let { add(it) }
             add(READ_ACTIVE_CALORIES)
+            addAll(VitalType.permissions(VitalType.entries.toSet()))
         }
 
         @Deprecated(

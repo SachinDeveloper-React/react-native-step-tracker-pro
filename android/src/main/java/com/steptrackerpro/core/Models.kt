@@ -115,4 +115,12 @@ object HealthConnectRead {
 
     /** The read failed; the days are this device's own. Call again. */
     const val FAILED = "failed"
+
+    /**
+     * Health Connect refused the read for quota - see
+     * [com.steptrackerpro.health.HealthConnectQuota]. Days it answered
+     * recently keep that answer; the rest are this device's own. Call again
+     * once `HealthConnectStatus.rateLimit` says reads are back.
+     */
+    const val RATE_LIMITED = "rate_limited"
 }

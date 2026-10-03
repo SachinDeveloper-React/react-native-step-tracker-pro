@@ -418,7 +418,7 @@ Remote uploads are signed over the exact body bytes once a key exists.
 
 ## Storage
 
-Six Room tables:
+Seven Room tables:
 
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
@@ -441,9 +441,18 @@ Six Room tables:
 - `integrity_event` — `id`, `at` (indexed), `date`, `type`, `detailJson`
   (schema version 5). Bounded to 2,000 rows and to retention; kept by
   `clearHistory()`.
+- `mirror_minute` — `minuteStart` (PK), `date` (indexed), `steps`, `written`
+  (schema version 6). This device's steps per minute for Health Connect's
+  per-minute records, and what Health Connect holds for each minute - only
+  under `healthConnectWriteGranularity: 'minute'`; see
+  [Per-minute mirror](#per-minute-mirror). Increments add up like
+  `step_minute`'s; `written` is set only after a write lands. Pruned with
+  history; `clearHistory()` zeroes earlier days' `steps` but keeps `written`,
+  since a clear leaves Health Connect alone.
 
 `MIGRATION_4_5` creates the three integrity tables and touches nothing else;
 they start empty rather than being back-filled from history nobody timed.
+`MIGRATION_5_6` creates `mirror_minute`, empty, the same way.
 
 `saveDay()` refuses to lower an existing day's count. A re-anchored counter can
 briefly report fewer steps than were already committed; ignoring that write is
@@ -554,7 +563,7 @@ Three WorkManager jobs:
 
 | Worker | Constraint | Period |
 |---|---|---|
-| `HealthConnectSyncWorker` | none; only when writes are enabled | `healthConnectSyncIntervalMinutes`, floor 15 |
+| `HealthConnectSyncWorker` | battery not low; only when writes are enabled | `healthConnectSyncIntervalMinutes` (default 15), floor 15 |
 | `RemoteSyncWorker` | network connected | 1 hour, exponential backoff |
 | `RetentionWorker` | none | daily |
 | `WatchdogWorker` | none; only while tracking | 15 minutes |
@@ -600,6 +609,62 @@ moment, or an upload is accepted. `remoteSyncHeaders` live sealed in SharedPrefe
 AES-GCM with a Keystore key (`SecretVault`) - and are opened when config is
 read. Under `remoteSyncAuth: 'signature'` none are sent and the request
 authenticates with the `Step-Tracker-Signature` header alone.
+
+### Per-minute mirror
+
+`healthConnectWriteGranularity: 'minute'` (opt-in in 2.5) mirrors a record
+for every minute with steps instead of one per day. The pieces:
+
+- **Recording.** The engine's `onObserved` hands every counted delta to
+  `MirrorMinuteBuffer` as well as to the integrity timeline, while the
+  setting is on. `MinuteAttribution.spread()` places it: like `attribute()`,
+  except a lump after a silence is spread evenly over the window it arrived
+  after rather than parked - for a record of when steps were taken,
+  "somewhere in this window" is the honest answer, where for a cadence check
+  it would invent a steady walk. The buffer drains into `mirror_minute` on
+  every commit, at rollover and before every sync, under `mirrorRowsLock`.
+  A sync reads today's count and today's minutes as of one instant
+  (`liveTodayWithMinutes()`): it drains the buffer under the engine's lock
+  as it reads the count, and holds the lock until the rows are read back,
+  so a step taken mid-sync is in neither rather than in one.
+- **Planning.** `MinuteWritePlan.plan()` is pure. The day's mirrored total is
+  the authority and the minutes say when. Minutes short of the total leave a
+  residual - gap recovery, a reboot, a crash before a flush, the part of the
+  day before the switch - written as one record with the day's id over the
+  longest stretch no minute covers. Minutes past the steps the sensor was
+  seen taking (`steps - recoveredSteps`) hold steps not in the count yet -
+  late ones not credited to their day, say - and give them back from the
+  newest; minutes past the mirrored total after that (exclude mode) are
+  scaled down with cumulative rounding. The records add up to the total
+  exactly and never overlap, which matters because Health Connect counts
+  only one of two overlapping records from the same app. Only minutes whose
+  target differs from `written` are upserted; written minutes left with
+  nothing, or no longer inside the day (the zone moved, the clock went
+  back), are deleted.
+- **Writing.** `writeMinutes()` keeps the records from overlapping at every
+  point of the write, not only at the end: deletes go first, and a day whose
+  deletes failed inserts nothing; each day's residual goes before its
+  minutes, so a full-day record from day mode, or the last pass's residual
+  over a stretch a new minute now falls in, is cut down first; a day whose
+  batch failed sends nothing more that pass. What landed is recorded in
+  `written`, on the write lane, so the next pass carries on from there.
+- **Ids.** Minute records are `stp-<type>-<date>-<epoch minute>`, stable
+  whatever the zone does after the write; the residual keeps the day id.
+- **State.** `StepStateStore.mirrorResiduals` lists days whose day record
+  holds a residual, so a pass that finds none left deletes it rather than
+  deleting on every pass. `minuteWriteDays` - runs of consecutive dates,
+  `DateSpans` - lists days that may hold minute records: deleting one whose
+  rows have aged out lists every minute of it by id, and a day never written
+  per minute costs no such delete. `dayWritesThrough` is the last day day
+  mode wrote, so a day's first per-minute pass deletes a full-day record
+  only where one can exist. `mirrorMetrics` is the distance and calories per
+  step today's minutes were written with; a profile change rewrites them
+  all.
+- **Switching back.** Day mode deletes a day's known minute records before
+  writing its day record (`clearMinuteRecords()`), and does not write a day
+  whose minute records it could not delete. `deleteMirrored()` - behind
+  `deleteHealthConnectData()`, `resetToday()`'s cleanup and an emptied day -
+  takes day and minute records together.
 
 ## Build
 
@@ -767,7 +832,70 @@ The raw reads leave the rule to Health Connect and pass its refusal on as
 2.3.7 took the tracking service for the background, and skipped reads Health
 Connect would have answered. Granted permissions
 are cached for five seconds between the explicit status checks, so the
-sensor path's refresh does not cost an IPC per minute.
+sensor path's refresh does not cost an IPC per minute. A check that fails is
+not a revocation: the last answer stands (2.5). The provider APK refuses even
+that call once the app's quota is used up, and reading the failure as
+"nothing granted" switched Health Connect off on screen.
+
+### Rate limits and the source cache
+
+Health Connect meters every data call - each page of records, each aggregate,
+each changes call, each insert and delete - in a read quota and a write
+quota, over 15 minutes and over a day, tighter in the background than in the
+foreground (AppOps' foreground, as for reads). A used-up quota fails every call
+on it until it refills linearly over the window, so a package that reads on
+every screen focus and every walking minute has to spend it carefully.
+Everything in `HealthConnectManager` that calls Health Connect goes through
+`metered()`:
+
+- `HealthConnectQuota` counts the call against its quota (category × fore- or
+  background) in rolling 15-minute and 24-hour windows of fixed bins.
+- After a refusal - `HealthConnectException.ERROR_RATE_LIMIT_EXCEEDED` on
+  Android 14+, which the Jetpack client hands on wrapped in an
+  `IllegalStateException`, or the provider APK's "Rate limited request quota
+  has been exceeded" `RemoteException` below it; `HealthConnectErrors` walks
+  the cause chain for both - the breaker for that quota opens: no call is made
+  on it for 30 seconds, doubling to 15 minutes, and a call that goes through
+  closes it. A call it holds back throws `HealthConnectRateLimitedException`
+  without reaching Health Connect. The first refusal goes out on the `error`
+  event.
+- Optional work - the refresh the sensor path asks for while walking - checks
+  `hasReadHeadroom()` first and stands down past half of either window.
+
+Spending less is the larger part:
+
+- **Pages of 5,000**, the most Health Connect returns, where the default is
+  1,000: a day of a watch and Health Connect's own count, each a record a
+  minute, is one call per type. An empty page token ends a read
+  (`hasMorePages()`), as Health Connect's guidance asks: Android 12 and 13
+  send the last page's token back empty rather than null.
+- **The source cache** (`StepTrackerCore.SourceCache`) holds each day's
+  origins, with whether the read answered the day in full
+  (`DaySources.detailed`): a range filled from aggregates past its raw window
+  carries no recording-method split, so it serves ranges and never a single
+  day's resolution. Before it is consulted, `confirmCachedSources()` - at most
+  every 15 seconds - asks `changedSinceLastLook()`, a token on Health Connect's
+  changes feed over the types the reads use: an upsertion drops the day it
+  starts on, a deletion (which names no day), a new or expired token or a
+  backlog past 20 pages drops everything, and every other entry is vouched for
+  again. An entry is good for 30 seconds (today) or 10 minutes (a past day)
+  after it was read or last vouched for, and never past an hour (today) or six
+  (a past day) after it was read. When the feed cannot be read, entries
+  expire as before. Health Connect's own guidance is to follow the changes
+  feed rather than re-read.
+- **Ranges read what the cache cannot answer** (`sourcesForRange()`), a run of
+  consecutive days per read, or one span past four runs. `resolvedStats()`,
+  `listSources()`, the sync's ownership check and the `full` upload's
+  prefetch all go through it.
+- **Writes are batched**: `writeDays()` puts every pending day in one insert,
+  up to Health Connect's 1,000 records per call, and a batch that fails costs
+  only its own days. Per-minute writes send only the minutes that changed.
+
+A read refused for quota answers a number on screen from the cache however
+old - an old answer beats none - and evidence (a snapshot's `sources`, a
+`full` upload) with nothing and `'rate_limited'`. A sync refused for quota
+leaves its days pending; one whose ownership read was refused defers those
+days rather than guessing.
 
 Goals follow the displayed number. Under `auto` it is monotonic for the day,
 and `GoalTracker` fires each goal at most once per period regardless.

@@ -22,6 +22,7 @@ import { StepTrackerError } from './errors';
 import type {
   DayRecord,
   HealthConnectDataType,
+  HealthConnectVitalType,
   IntegrityReport,
   RangeStats,
   ResolvedStepSource,
@@ -173,6 +174,21 @@ const healthConnectStatus = {
   undeclaredPermissions: [] as string[],
   denialCount: 0,
   shouldOpenSettings: false,
+  backgroundReadAvailable: false,
+  historyReadAvailable: false,
+  grantedVitals: [] as HealthConnectVitalType[],
+  workProfile: false,
+  deviceStepTracking: { available: false, dataOrigin: null },
+  rateLimit: {
+    readsLimited: false,
+    readsRetryAfterMs: 0,
+    writesLimited: false,
+    writesRetryAfterMs: 0,
+    readsLast15Minutes: 0,
+    readsLast24Hours: 0,
+    writesLast15Minutes: 0,
+    writesLast24Hours: 0,
+  },
 };
 
 const permissions = {
@@ -337,6 +353,15 @@ export const StepTracker = {
     nextToken: 'mock-changes-token',
     hasMore: false,
   }),
+  readHealthConnectVitals: done({
+    vitals: [],
+    notGranted: [] as HealthConnectVitalType[],
+  }),
+  deleteHealthConnectData: fn(async (startDate: string, endDate: string) => ({
+    startDate,
+    endDate,
+    recordTypes: ['steps'] as HealthConnectDataType[],
+  })),
 
   getStepSources: done({ sources: [], hasWearable: false }),
   getCurrentStepSource: fn(async () => ({

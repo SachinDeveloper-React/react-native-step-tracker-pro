@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (172 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads (211 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (185 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits, range reads, features, vitals and per-minute records (265 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,7 +59,7 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Seventy-five cases: forty-one drive the engine, three build the Room
+sensor. Seventy-six cases: forty-one drive the engine, four build the Room
 database as an older version from the exported schema, migrate real rows to
 the current version and check every one survived, twenty-four run the
 integrity layer, sync bookkeeping, Health Connect reads, the notification
@@ -344,6 +344,30 @@ adb shell am start -a android.health.connect.action.HEALTH_HOME_SETTINGS
 - [ ] without `healthConnectBackgroundRead`, tracking on and the app swiped
       away: a watch sync mid-walk reaches the notification within a minute of
       the next step
+- [ ] the records written carry the phone's maker and model (Health Connect
+      app → Data and access → Steps → the entry's source)
+- [ ] `resetToday()` with mirroring on: today's entry disappears from the
+      Health Connect app
+- [ ] `deleteHealthConnectData(start, end)` removes this app's entries for
+      those days and nothing else of yours
+- [ ] with a stats screen (`useStepStats('month')`) open through a 20-minute
+      walk, `getHealthConnectStatus().rateLimit.readsLast15Minutes` stays in
+      the tens, not the thousands
+- [ ] Android 12 or 13 with the Health Connect APK: a range with more than
+      5,000 records returns, and `readsLast15Minutes` grows by a handful per
+      read, not by dozens
+- [ ] with `healthConnectReadVitals: ['heartRate']` declared, listed and
+      granted, and a watch that writes heart rate: `readHealthConnectVitals()`
+      over a walk returns its count, range and latest sample
+- [ ] with `healthConnectWriteGranularity: 'minute'` set mid-morning, walk
+      ten minutes and `syncNow()`: the Health Connect app shows an entry per
+      walking minute plus one for the morning, and the day's total in Health
+      Connect matches the app's
+- [ ] `syncNow()` again with no new steps: no new entries, and
+      `rateLimit.writesLast15Minutes` grows by one at most
+- [ ] back to `'day'` and `syncNow()`: today's minute entries are gone and
+      one entry covers the day, with the same total
+- [ ] in minute mode, `resetToday()`: every one of today's entries goes
 
 ### Offline
 

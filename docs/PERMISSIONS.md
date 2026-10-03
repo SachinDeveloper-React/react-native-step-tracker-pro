@@ -14,6 +14,7 @@ do when they say no. Which of these apply depends on your
 | 6 | `READ_HEALTH_DATA_IN_BACKGROUND` | same sheet | — | optional | optional | config flag |
 | 7 | `READ_HEALTH_DATA_HISTORY` | same sheet | — | optional | optional | config flag |
 | 7a | `READ_ACTIVE_CALORIES_BURNED` | same sheet | — | optional | optional | config flag |
+| 7b | Vitals: `READ_HEART_RATE` and the rest | same sheet | — | optional | optional | `healthConnectReadVitals` |
 | 8 | Battery optimisation exemption | system dialog / settings | recommended on OEM phones | — | recommended on OEM phones | `requestBackgroundPermissions()` |
 | 9 | OEM autostart | OEM settings screen | recommended on OEM phones | — | recommended on OEM phones | `requestBackgroundPermissions()` |
 
@@ -39,6 +40,7 @@ side of the split a permission is on.
 | `READ_HEALTH_DATA_IN_BACKGROUND` | **your app**, with `healthConnectBackgroundRead` | background reads of a watch | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_HEALTH_DATA_HISTORY` | **your app**, with `healthConnectHistoryRead` | reads past 30 days | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_ACTIVE_CALORIES_BURNED` | **your app**, with `healthConnectReadActiveCalories` | `StepSource.activeCalories` | `E_HEALTH_CONNECT_NOT_DECLARED` |
+| Vitals: `READ_HEART_RATE`, `READ_RESTING_HEART_RATE`, `READ_OXYGEN_SATURATION`, `READ_RESPIRATORY_RATE`, `READ_BLOOD_PRESSURE`, `READ_BODY_TEMPERATURE`, `READ_BLOOD_GLUCOSE` | **your app**, each with its name in `healthConnectReadVitals` | `readHealthConnectVitals()` | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | **your app**, only for the direct dialog | one-tap battery exemption | the settings list opens instead; nothing fails |
 
 ### Why the split sits there
@@ -93,6 +95,9 @@ Add the Health Connect entries your config uses to
 <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
 <!-- healthConnectReadActiveCalories -->
 <uses-permission android:name="android.permission.health.READ_ACTIVE_CALORIES_BURNED" />
+<!-- healthConnectReadVitals: one per vital listed, e.g. ['heartRate', 'bloodPressure'] -->
+<uses-permission android:name="android.permission.health.READ_HEART_RATE" />
+<uses-permission android:name="android.permission.health.READ_BLOOD_PRESSURE" />
 ```
 
 And, only if you call `requestDisableBatteryOptimization()` and have an
@@ -115,7 +120,7 @@ eligible Play use case for the direct dialog:
   on, every type in a `healthConnectReadTypes` you set, `WRITE_STEPS` when you
   set `healthConnectWriteEnabled: true`, and the opt-ins -
   `healthConnectBackgroundRead`, `healthConnectHistoryRead`,
-  `healthConnectReadActiveCalories` - make
+  `healthConnectReadActiveCalories`, each vital in `healthConnectReadVitals` - make
   `requestHealthConnectPermissions()` and `enableHealthConnect()` reject with
   `E_HEALTH_CONNECT_NOT_DECLARED`, naming them (2.2.1; 2.2.0 skipped listed
   types and explicit writes quietly). Health Connect itself would
@@ -266,9 +271,16 @@ needs:
 | `healthConnectBackgroundRead: true` | `READ_HEALTH_DATA_IN_BACKGROUND` |
 | `healthConnectHistoryRead: true` | `READ_HEALTH_DATA_HISTORY` |
 | `healthConnectReadActiveCalories: true` | `READ_ACTIVE_CALORIES_BURNED` |
+| `healthConnectReadVitals: ['heartRate', ...]` | `READ_HEART_RATE`, ... - one per vital listed |
 
 Each one has to be declared in your manifest as well - see
 [What the library declares](#what-the-library-declares-and-what-you-add).
+
+Background and history reads are Health Connect *features* (2.5): a provider
+too old for one cannot grant its permission, so the package leaves it off the
+sheet there - asking for a permission the provider does not know can cost the
+whole sheet - and `backgroundReadAvailable` / `historyReadAvailable` in the
+status say so. On Android 14 and later the platform has both.
 
 `getHealthConnectStatus().granted` is true when everything *your config* needs
 is granted; `canRead` / `canWrite` report the capability whether or not
@@ -366,9 +378,37 @@ closed.
 
 ### History (7)
 
-Reads older than 30 days need `READ_HEALTH_DATA_HISTORY`. Only yearly stats
-resolved against Health Connect need it; the phone's own history is local and
-unaffected.
+Health Connect lets an app read back to 30 days before it was first granted
+any permission - on Android 14 and later, its own data without limit - and
+further only with `READ_HEALTH_DATA_HISTORY`. Only yearly stats resolved
+against Health Connect need it; the phone's own history is local and
+unaffected. Uninstalling resets the window: reinstalled, the app reads from
+30 days before the new grant.
+
+### Vitals (2.5)
+
+`readHealthConnectVitals()` reads heart rate, resting heart rate, blood oxygen,
+respiratory rate, blood pressure, body temperature and blood glucose that other
+apps wrote - a watch's heart rate on the same walk, say. Each is one more read
+permission, so none is asked for unless listed:
+
+```ts
+await StepTracker.initialize({ healthConnectReadVitals: ['heartRate', 'restingHeartRate'] });
+```
+
+and declared - `READ_HEART_RATE` and `READ_RESTING_HEART_RATE` here; with the
+Expo plugin, `healthConnect: { vitals: ['heartRate', 'restingHeartRate'] }`.
+Listed vitals join the sheet as optional extras: refusing them is not refusing
+Health Connect, and `grantedVitals` in the status says which the user allowed.
+Play asks you to justify each: say what the app shows them for.
+
+### Work profiles
+
+Health Connect is not supported in a work profile: the sheet can grant there,
+but no call succeeds and nothing is written, and the profile is never taken
+for the foreground. An app running in one gets `availability:
+'not_supported'` and `workProfile: true` (2.5) rather than reads that fail and
+writes that vanish.
 
 ### The rationale screen
 
