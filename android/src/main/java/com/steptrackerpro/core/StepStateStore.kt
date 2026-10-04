@@ -207,6 +207,19 @@ class StepStateStore(context: Context) {
         healthPermissionDenials = if (granted) 0 else healthPermissionDenials + 1
     }
 
+    /**
+     * The Health Connect grants last read, for a check that fails before this
+     * process has read any - see [com.steptrackerpro.health.GrantMemory.failed].
+     * Null when none was ever read.
+     */
+    var lastHealthGrants: Set<String>?
+        get() = decodeGrants(prefs.getString(KEY_HC_GRANTS, null))
+        set(value) {
+            val edit = prefs.edit()
+            if (value == null) edit.remove(KEY_HC_GRANTS) else edit.putString(KEY_HC_GRANTS, encodeGrants(value))
+            edit.apply()
+        }
+
     /** Package name of the origin the user pinned as their step source. */
     var preferredStepSource: String?
         get() = prefs.getString(KEY_PREFERRED_SOURCE, null)?.takeIf { it.isNotEmpty() }
@@ -459,6 +472,16 @@ class StepStateStore(context: Context) {
     }
 
     /**
+     * What the app says the user's other devices counted, by day - see
+     * [StepTrackerCore.setOtherDevicesSteps] - in the same `day=steps` form
+     * as [lateSteps]. Kept apart from this device's counter state, which it
+     * is never part of.
+     */
+    var otherDevicesSteps: Map<String, Int>
+        get() = decodeLateSteps(prefs.getString(KEY_OTHER_DEVICES, null))
+        set(value) = prefs.edit().putString(KEY_OTHER_DEVICES, encodeLateSteps(value)).apply()
+
+    /**
      * The user stopped tracking with `stopTracking()` and has not started it
      * since, so the background jobs that stop cancelled stay cancelled. A
      * tracker that never started - an app that only reads Health Connect, a
@@ -503,6 +526,7 @@ class StepStateStore(context: Context) {
         const val STATE_VERSION = 3
         private const val KEY_STATE_VERSION = "state_version"
         private const val KEY_LATE_STEPS = "late_steps"
+        private const val KEY_OTHER_DEVICES = "other_devices_steps"
         private const val KEY_STOPPED_BY_USER = "stopped_by_user"
 
         /** `2026-09-29=312;2026-09-28=5`. Anything unreadable is dropped rather than guessed at. */
@@ -518,6 +542,32 @@ class StepStateStore(context: Context) {
                 if (day.length == 10 && steps > 0) out[day] = (out[day] ?: 0) + steps
             }
             return out
+        }
+
+        /** Days of other devices' steps kept before today - see [keptOtherDevices]: a week of snapshots. */
+        const val OTHER_DEVICES_DAYS = 7
+
+        /**
+         * [byDate] as it is kept: no day at zero, and only from
+         * [OTHER_DEVICES_DAYS] before [today] to the day after it - a server
+         * a zone ahead may already be on tomorrow. Only today is shown, and a
+         * snapshot of a recent day carries its own.
+         */
+        fun keptOtherDevices(byDate: Map<String, Int>, today: String): Map<String, Int> {
+            val first = DateKeys.minusDays(today, OTHER_DEVICES_DAYS)
+            val last = DateKeys.minusDays(today, -1)
+            return byDate.filter { (date, steps) -> steps > 0 && date in first..last }
+                .toSortedMap()
+                .let { LinkedHashMap(it) }
+        }
+
+        /** Permission names, comma-separated - none has a comma in it. Empty is "none granted". */
+        fun encodeGrants(grants: Set<String>): String = grants.sorted().joinToString(",")
+
+        fun decodeGrants(text: String?): Set<String>? = when {
+            text == null -> null
+            text.isEmpty() -> emptySet()
+            else -> text.split(',').filterTo(LinkedHashSet()) { it.isNotBlank() }
         }
 
         private const val KEY_BOOT_ID = "boot_id"
@@ -540,6 +590,7 @@ class StepStateStore(context: Context) {
         private const val KEY_MIRROR_RESIDUALS = "hc_mirror_residuals"
         private const val KEY_HC_VERSION = "hc_record_version"
         private const val KEY_HC_DENIALS = "hc_permission_denials"
+        private const val KEY_HC_GRANTS = "hc_last_grants"
         private const val KEY_PREFERRED_SOURCE = "preferred_step_source"
         private const val KEY_LAST_RESOLVED_SOURCE = "last_resolved_step_source"
         private const val KEY_CONTINUITY_DATE = "continuity_date"

@@ -274,6 +274,9 @@ doubling is almost always outside it:
 - Under `'auto'` the watch only wins when it counted more. Check `deviceSteps`
   vs `externalSteps` on `getCurrentStepSource()`; if the watch is lower and you
   still want it, use `'wearable'` or pin it with `setPreferredStepSource()`.
+  Before 2.6, a phone-side app with more steps than the watch - Google Fit or
+  Samsung Health on the same phone - could also keep a watch that was ahead
+  off the screen.
 - With tracking off and without `healthConnectBackgroundRead: true`, nothing
   reads Health Connect in the background: background uploads and snapshots
   carry `sourcesStatus: 'not_consulted'`. With tracking on they read it: the
@@ -298,6 +301,10 @@ screen keeps the last answer, so:
   with every Health Connect library the app uses. `rateLimit.readsLast15Minutes`
   is this package's share; if it is low and the refusals keep coming,
   something else spends the rest - a polling loop in your own code, often.
+  On Android 13 and lower it includes the grants checks, which Health
+  Connect meters there (2.6).
+- **A screen that only connects Health Connect** need not read sources at
+  all: `useHealthConnect({ readSources: false })` (2.6).
 - **Do not poll the raw reads.** `getHealthConnectRecords()` in a timer costs a
   call per 5,000 records per type each time; follow
   `getHealthConnectChanges()` instead, which costs one call when nothing moved.
@@ -341,6 +348,16 @@ If listeners vanish in a running app instead, look for a
 `removeListener()` or `removeAllListeners()` call with no argument: it
 removes every listener subscribed through the package, the hooks' included.
 Keep the subscription `addListener` returns and call `remove()` on it.
+
+## The notification shows more than this phone counted
+
+Your app said the user's other devices counted steps today, with
+`setOtherDevicesSteps()`: they are shown on top of this phone's number, in
+the notification and on `getTodaySteps()` and `stepsChanged`, and
+`otherDevicesSteps` says how much. Check what the app passed: it should be
+your server's total less what *this* phone sent it, or the phone's own steps
+are counted twice on screen. `setOtherDevicesSteps(today, 0)` clears it.
+Nothing this phone stores, mirrors or uploads includes them.
 
 ## Numbers do not match Google Fit or Samsung Health
 

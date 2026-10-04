@@ -160,6 +160,7 @@ stopTracking()                getTrackingState()        isTracking()
 getTrackingHealth()
 
 getTodaySteps()               getYesterdaySteps()       getStepsForDate(date)
+setOtherDevicesSteps(date, steps)
 getWeeklyStats(options)       getMonthlyStats(options)  getYearlyStats(options)
 getStatsForRange(from, to)    getHistory(from, to)      getVerificationSnapshot(date, opts)
 getMotionWindows(from, to)    getSignedSnapshot(date, opts)
@@ -279,6 +280,14 @@ bound by the coverage rule like any phone-side app. Pair it with
 `healthConnectIgnoreManualEntries: true` so a typed-in entry never becomes
 the day's number, and verify server-side with `getVerificationSnapshot()`.
 
+**Other devices.** An app whose server adds up a user's phones can show the
+whole day where the package draws it: `setOtherDevicesSteps(today,
+serverTotal - thisPhoneSent)` puts the others on top of this phone's live
+count in the notification, `getTodaySteps()`, `stepsChanged` and the daily
+goal - and into nothing this phone stores, mirrors or uploads; a
+verification snapshot carries it apart. See
+[docs/API.md](docs/API.md#setotherdevicesstepsdate-steps-promisestepsnapshot).
+
 Permission handling, the install and settings fallbacks, and the full source
 API: [docs/API.md](docs/API.md#health-connect).
 
@@ -353,11 +362,12 @@ npm run test:android        # JVM, no device needed
 npm run test:android:device # instrumented engine tests on an emulator
 ```
 
-A hundred and eighty-five Jest tests cover config validation, the flows in
-the JS layer, the typed and legacy event paths, the hook's config handling,
-the shipped Jest mock and the Expo plugin. Two hundred and sixty-five JVM tests
+A hundred and eighty-nine Jest tests cover config validation, the flows in
+the JS layer, the typed and legacy event paths, the hooks' options,
+the shipped Jest mock and the Expo plugin. Two hundred and eighty-seven JVM tests
 cover Health Connect's rate limits - the breaker, the windows, both
-providers' refusals - range reads and vitals summaries, per-minute records -
+providers' refusals, the grants check held back with them - a snapshot's
+records taken from its sources' read, range reads and vitals summaries, per-minute records -
 that they add up to the day and never overlap - step-source resolution, the `auto` merge and its coverage rule,
 manual-entry exclusion and wearable trust, gap splitting under all four
 policies, the accelerometer pedometer against synthetic gait, motion
@@ -368,22 +378,30 @@ and the remote payload — chiefly that a phone and a watch are never added toge
 phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
-with the screen off is not a shake. Seventy-six instrumented tests cover the
+with the screen off is not a shake. Seventy-eight instrumented tests cover the
 reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
 pause and counter-reset paths by feeding samples to the engine directly, the
-Room migrations against real rows, and the integrity layer and sync
-bookkeeping end to end through the real core, database and Keystore, the
-sealed remote-sync headers and the reboot log, so they run on an emulator
-with no step hardware. CI runs all of it on every push, plus the
-compatibility builds above.
+Room migrations against real rows, and the integrity layer, sync
+bookkeeping and other devices' steps end to end through the real core,
+database and Keystore, the sealed remote-sync headers and the reboot log, so
+they run on an emulator with no step hardware; two more run the Health
+Connect reads against the platform's own provider when asked to. CI runs all
+of it on every push, plus the compatibility builds above.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
 Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.5.0** — Health Connect
-checked against Google's guides: the package spends little of Health
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.6.0** — under `'auto'` a
+trusted watch that is ahead no longer loses to an app with more steps that
+may add nothing, the grants check waits out a Health Connect rate-limit
+block on Android 13 and lower instead of asking again on every call, a
+snapshot with raw records reads its day once,
+`useHealthConnect({ readSources: false })` reads the status alone, and
+`setOtherDevicesSteps()` shows the user's other devices on top of this
+phone's live count. **2.5.0** checked Health Connect against Google's
+guides: the package spends little of Health
 Connect's rate limits and backs off when they run out, can write a record
 per walking minute (`healthConnectWriteGranularity: 'minute'`, opt-in),
 deletes what it mirrored (`deleteHealthConnectData()`), reads vitals other

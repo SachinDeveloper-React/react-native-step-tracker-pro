@@ -1,5 +1,24 @@
 # Migrating
 
+## From 2.5 to 2.6
+
+Nothing to change in code.
+
+- **Under `'auto'`, a day with several apps can answer differently.** Each
+  app now competes on the lead its trust allows it, not on its step count,
+  so a watch that is ahead of the phone answers where a phone-side app with
+  more steps - allowed to add nothing - used to leave the phone's count. A
+  day whose number came from the phone can rise to the watch's; with one
+  app, or none ahead of the phone, nothing moves. See
+  [How `'auto'` merges](API.md#how-auto-merges).
+- **Snapshots carry `otherDevicesSteps`**, and so do `StepSnapshot`s: `0`
+  until your app calls `setOtherDevicesSteps()`. A server that validates a
+  snapshot's fields against a fixed list needs one more; `schemaVersion`
+  stays `2`, as for every added field.
+- **On Android 13 and lower, `rateLimit.readsLast15Minutes` counts the
+  grants checks too**, which Health Connect meters there. The numbers run a
+  little higher than 2.5's for the same use.
+
 ## From 2.4 to 2.5
 
 Nothing to change in code for most apps.

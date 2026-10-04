@@ -23,7 +23,8 @@ package com.steptrackerpro.health
  *   [MAX_BACKOFF_MS] while refusals continue, reset by a call that goes
  *   through. Hammering an exhausted quota only keeps it exhausted, and on the
  *   provider APK (Android 13 and lower) an exhausted quota refuses even the
- *   permission check every screen makes.
+ *   permission check every screen makes - which there is counted and held
+ *   back on the read quota like a read.
  * - a count of the calls this process made over both windows, so the work
  *   nobody is waiting for - a refresh the sensor asked for - stands down
  *   once it has used [OPTIONAL_SHARE] of either window, leaving the rest for
@@ -45,6 +46,36 @@ class HealthConnectQuota(private val now: () -> Long) {
     private val backoff = LongArray(QUOTAS)
     private val last15Minutes = Array(QUOTAS) { RollingCounter(MINUTE_MS, 15) }
     private val lastDay = Array(QUOTAS) { RollingCounter(QUARTER_HOUR_MS, 96) }
+
+    /**
+     * Makes one Health Connect call on [category]'s quota - the foreground or
+     * background one, as Health Connect will judge it. While Health Connect
+     * has just refused that quota the call is not made at all: this throws
+     * [HealthConnectRateLimitedException] at once, and the call is not
+     * counted. A call that is made is counted, and Health Connect refusing it
+     * for quota opens the breaker, tells [refused] - once per refusal, never
+     * for the calls held back after it - and throws in place of the refusal.
+     */
+    suspend fun <T> call(
+        category: Category,
+        foreground: Boolean,
+        refused: (HealthConnectRateLimitedException) -> Unit = {},
+        block: suspend () -> T
+    ): T {
+        val wait = retryAfterMs(category, foreground)
+        if (wait > 0L) throw HealthConnectRateLimitedException(category, wait)
+        record(category, foreground)
+        return try {
+            block().also { onAccepted(category, foreground) }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            if (!HealthConnectErrors.isRateLimited(error)) throw error
+            val refusal = HealthConnectRateLimitedException(category, onRefused(category, foreground), error)
+            runCatching { refused(refusal) }
+            throw refusal
+        }
+    }
 
     /** Ms before a call on this quota may be made again; 0 when it may be made now. */
     @Synchronized

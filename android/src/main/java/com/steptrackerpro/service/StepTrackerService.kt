@@ -161,6 +161,12 @@ class StepTrackerService : Service(), SensorEventListener {
         sensorHandler?.post { if (isAlive && core.shouldBeRunning()) pushNotification(force = true) }
     }
 
+    /**
+     * Redraws the shade when the number shown moved with no sample to carry
+     * it - the app set what the user's other devices counted - the same way.
+     */
+    private val shownChanged: () -> Unit = dayEnded
+
     /** Short retries after a failed registration, before the heartbeat takes over. */
     private var registerRetries = 0
 
@@ -229,6 +235,7 @@ class StepTrackerService : Service(), SensorEventListener {
             sensorHandler = Handler(it.looper)
         }
         core.onDayEnded = dayEnded
+        core.onShownChanged = shownChanged
         ContextCompat.registerReceiver(
             this,
             dayBoundary,
@@ -887,6 +894,7 @@ class StepTrackerService : Service(), SensorEventListener {
     override fun onDestroy() {
         isAlive = false
         if (core.onDayEnded === dayEnded) core.onDayEnded = null
+        if (core.onShownChanged === shownChanged) core.onShownChanged = null
         runCatching { unregisterReceiver(dayBoundary) }
         sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()

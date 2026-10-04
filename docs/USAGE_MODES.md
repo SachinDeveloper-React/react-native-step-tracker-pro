@@ -232,12 +232,13 @@ or refused → the numbers are the phone's own, and everything else works.
 The one rule: **origins are never summed.** A user walking with a watch and a
 phone has the same steps recorded twice; adding them shows double.
 
-Under `'auto'`, each Health Connect read works out how far ahead the best
-external source is allowed to be, and that *lead* becomes today's baseline:
-the number shown is `phoneSteps + lead`, the phone's sensor keeps ticking, and
-the user sees **6,001, 6,005, 6,010…** during a walk instead of 6,000 frozen
-until the other app next syncs. What the lead may be depends on what the
-source is:
+Under `'auto'`, each Health Connect read works out how far ahead each
+external source is allowed to be, and the largest such *lead* becomes today's
+baseline: the number shown is `phoneSteps + lead`, the phone's sensor keeps
+ticking, and the user sees **6,001, 6,005, 6,010…** during a walk instead of
+6,000 frozen until the other app next syncs. What the lead may be depends on
+what the source is, so a watch that is ahead wins over a phone-side app with
+more steps that may add nothing (2.6; before, the most steps won the pick):
 
 - **A wearable** (or any source the user pinned) is trusted outright: a watch
   on the wrist sees a walk the phone on the desk did not. Its lead is its

@@ -217,6 +217,13 @@ android {
         // against real rows. Test-only: `android/schemas` is not published.
         androidTest {
             assets.srcDirs += files("$projectDir/schemas")
+            // Health Connect's own provider, on Android 14 and later: the test
+            // APK declares the health permissions only when asked to, since
+            // every other instrumented test runs as an app that declares
+            // none. See docs/TESTING.md.
+            if (project.hasProperty("stpHealthConnectTests")) {
+                manifest.srcFile "src/androidTest/healthconnect/AndroidManifest.xml"
+            }
         }
     }
 

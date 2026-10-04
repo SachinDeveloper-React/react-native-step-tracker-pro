@@ -25,6 +25,7 @@ abstract class StepTrackerProSpec internal constructor(context: ReactApplication
     abstract fun getTrackingHealth(promise: Promise)
 
     abstract fun getTodaySteps(promise: Promise)
+    abstract fun setOtherDevicesSteps(date: String, steps: Double, promise: Promise)
     abstract fun getStepsForDate(date: String, promise: Promise)
     abstract fun getYesterdaySteps(promise: Promise)
     abstract fun getStatsForRange(startDate: String, endDate: String, promise: Promise)

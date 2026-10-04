@@ -1,6 +1,7 @@
 package com.steptrackerpro.health
 
 import com.steptrackerpro.health.HealthConnectQuota.Category
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -149,6 +150,49 @@ class RateLimitTest {
         val refusal = HealthConnectRateLimitedException(Category.WRITE, 29_001L)
         assertTrue(refusal.message!!.contains("write quota"))
         assertTrue(refusal.message!!.contains("30s"))
+    }
+
+    @Test
+    fun `a call refused for quota holds back the calls after it, which are neither made nor counted`() = runBlocking {
+        var made = 0
+        val refusals = ArrayList<HealthConnectRateLimitedException>()
+        val apkRefusal = Exception("Request rejected. Rate limited request quota has been exceeded.")
+        suspend fun check(): Set<String> = quota.call(Category.READ, foreground = false, refused = { refusals += it }) {
+            made++
+            throw apkRefusal
+        }
+
+        val first = runCatching { check() }.exceptionOrNull()
+        assertTrue(first is HealthConnectRateLimitedException)
+        assertEquals(30_000L, (first as HealthConnectRateLimitedException).retryAfterMs)
+        assertEquals(1, made)
+        assertEquals(1, refusals.size)
+        assertEquals(1, quota.callsLast15Minutes(Category.READ))
+
+        // Every caller during the pause: no call into the provider, nothing
+        // counted, no second announcement.
+        repeat(50) { assertTrue(runCatching { check() }.exceptionOrNull() is HealthConnectRateLimitedException) }
+        assertEquals(1, made)
+        assertEquals(1, refusals.size)
+        assertEquals(1, quota.callsLast15Minutes(Category.READ))
+
+        // Past the pause the next call is made; one that goes through closes the breaker.
+        now += 30_000L
+        val answer = quota.call(Category.READ, foreground = false) { made++; setOf("READ_STEPS") }
+        assertEquals(setOf("READ_STEPS"), answer)
+        assertEquals(2, made)
+        assertEquals(0L, quota.retryAfterMs(Category.READ, foreground = false))
+        assertEquals(2, quota.callsLast15Minutes(Category.READ))
+    }
+
+    @Test
+    fun `a call that fails for another reason is counted and leaves the breaker shut`() = runBlocking {
+        val failure = runCatching {
+            quota.call(Category.READ, foreground = true) { throw SecurityException("Caller doesn't hold READ_STEPS") }
+        }.exceptionOrNull()
+        assertTrue(failure is SecurityException)
+        assertEquals(0L, quota.retryAfterMs(Category.READ, foreground = true))
+        assertEquals(1, quota.callsLast15Minutes(Category.READ))
     }
 
     @Test

@@ -1,0 +1,14 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Merged into the test APK only with -PstpHealthConnectTests, for
+      HealthConnectReadsTest - see docs/TESTING.md. Every other instrumented
+      test runs as an app that declares no Health Connect permission, and
+      checks exactly that.
+    -->
+    <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_DISTANCE" />
+    <uses-permission android:name="android.permission.health.WRITE_STEPS" />
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
+
+</manifest>

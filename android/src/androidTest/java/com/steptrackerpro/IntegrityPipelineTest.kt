@@ -677,6 +677,107 @@ class IntegrityPipelineTest {
     }
 
     @Test
+    fun otherDevicesStepsAreShownOnTopAndKeptApartFromThisPhonesFigures() = runBlocking {
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        val now = System.currentTimeMillis()
+        core.engine.onCounterSample(20_000f, now - 60_000L)
+        core.engine.onCounterSample(20_072f, now - 30_000L)
+        val own = core.engine.snapshot().steps
+        val events = java.util.concurrent.CopyOnWriteArrayList<Pair<String, Map<String, Any?>>>()
+        val subscriber = com.steptrackerpro.util.StepEventBus.Subscriber { name, payload -> events += name to payload }
+        com.steptrackerpro.util.StepEventBus.subscribe(subscriber)
+        var redrawn = 0
+        core.onShownChanged = { redrawn++ }
+        try {
+            core.setOtherDevicesSteps(today, 629)
+
+            // On top of this phone's number, as the notification draws it.
+            val shown = core.displaySnapshot()
+            assertEquals(own + 629, shown.steps)
+            assertEquals(629, shown.otherDevicesSteps)
+            assertEquals(core.metrics.distance(own + 629), shown.distance, 0.01)
+            // Told at once, with this phone's own resolution beside it.
+            val changed = events.last { it.first == com.steptrackerpro.util.StepEventBus.Events.STEPS_CHANGED }.second
+            assertEquals(own + 629, changed["steps"])
+            assertEquals(629, changed["otherDevicesSteps"])
+            assertEquals(own, (changed["stepSource"] as Map<*, *>)["steps"])
+            assertEquals(1, redrawn)
+
+            // Live: this phone keeps counting under it.
+            core.engine.onCounterSample(20_100f, now - 1_000L)
+            assertEquals(core.engine.snapshot().steps + 629, core.displaySnapshot().steps)
+            val counted = core.engine.snapshot().steps
+
+            // Never part of this phone's own figures, and apart in a snapshot.
+            assertEquals(counted, core.resolveDay(today).totals.steps)
+            assertEquals(counted, core.dayTotals(today).steps)
+            val snapshot = core.verificationSnapshot(today)
+            assertEquals(counted, snapshot["deviceSteps"])
+            assertEquals(counted, (snapshot["resolved"] as Map<*, *>)["steps"])
+            assertEquals(629, snapshot["otherDevicesSteps"])
+            core.flush()
+            eventually { core.repository.getDay(today).steps == counted }
+
+            // Another day's is kept for its snapshot and never shows today.
+            core.setOtherDevicesSteps(yesterday, 4_000)
+            assertEquals(counted + 629, core.displaySnapshot().steps)
+            assertEquals(4_000, core.verificationSnapshot(yesterday)["otherDevicesSteps"])
+            assertEquals(1, redrawn)
+            // It outlives the process: the service's next start shows it.
+            assertEquals(mapOf(yesterday to 4_000, today to 629), core.state.otherDevicesSteps)
+
+            // Zero clears it.
+            core.setOtherDevicesSteps(today, 0)
+            assertEquals(counted, core.displaySnapshot().steps)
+            assertEquals(0, core.displaySnapshot().otherDevicesSteps)
+            assertEquals(0, core.verificationSnapshot(today)["otherDevicesSteps"])
+        } finally {
+            com.steptrackerpro.util.StepEventBus.unsubscribe(subscriber)
+            core.onShownChanged = null
+            core.setOtherDevicesSteps(today, 0)
+            core.setOtherDevicesSteps(yesterday, 0)
+        }
+    }
+
+    @Test
+    fun otherDevicesStepsCountTowardsTheDailyGoal() = runBlocking {
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        core.engine.onCounterSample(30_000f, now - 60_000L)
+        core.engine.onCounterSample(30_072f, now - 30_000L)
+        val own = core.engine.snapshot().steps
+        val goal = own + 500
+        core.updateConfig(core.config().copy(dailyGoal = goal))
+        core.goals.reset()
+        val reached = java.util.concurrent.CopyOnWriteArrayList<Map<String, Any?>>()
+        val subscriber = com.steptrackerpro.util.StepEventBus.Subscriber { name, payload ->
+            if (name == com.steptrackerpro.util.StepEventBus.Events.GOAL_REACHED) reached += payload
+        }
+        com.steptrackerpro.util.StepEventBus.subscribe(subscriber)
+        try {
+            core.setOtherDevicesSteps(today, 400)
+            assertTrue(reached.isEmpty())
+            assertFalse(core.displaySnapshot().goalReached)
+            // The other phone's walk takes the day past the goal, with no
+            // step on this one.
+            core.setOtherDevicesSteps(today, 600)
+            assertEquals(1, reached.size)
+            assertEquals("daily", reached[0]["type"])
+            assertEquals(goal, reached[0]["goal"])
+            assertEquals(own + 600, reached[0]["steps"])
+            assertTrue(core.displaySnapshot().goalReached)
+            // Once a day, however often it is set again.
+            core.setOtherDevicesSteps(today, 700)
+            assertEquals(1, reached.size)
+        } finally {
+            com.steptrackerpro.util.StepEventBus.unsubscribe(subscriber)
+            core.setOtherDevicesSteps(today, 0)
+            core.goals.reset()
+        }
+    }
+
+    @Test
     fun withDetectionOffNothingIsRecordedOrChanged() = runBlocking {
         core.updateConfig(StepTrackerConfig())
         val today = DateKeys.today()

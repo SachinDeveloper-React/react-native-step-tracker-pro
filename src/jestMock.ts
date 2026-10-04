@@ -79,9 +79,20 @@ export function mockSnapshot(overrides: Partial<StepSnapshot> = {}): StepSnapsho
     timestamp: 0,
     recoveredSteps: 0,
     suspectSteps: 0,
+    otherDevicesSteps: 0,
     stepSource: resolved(),
     ...overrides,
   };
+}
+
+function withOtherDevices(steps: number): StepSnapshot {
+  const goal = DEFAULT_CONFIG.dailyGoal;
+  return mockSnapshot({
+    steps,
+    otherDevicesSteps: steps,
+    goalProgress: Math.min(1, steps / goal),
+    goalReached: steps >= goal,
+  });
 }
 
 function day(date = today()): DayRecord {
@@ -228,6 +239,10 @@ export const StepTracker = {
   })),
 
   getTodaySteps: fn(async () => mockSnapshot()),
+  // Today's snapshot as shown: an empty day here, so the other devices' steps are all of it.
+  setOtherDevicesSteps: fn(async (date: string, steps: number) =>
+    date === today() ? withOtherDevices(steps) : mockSnapshot()
+  ),
   getYesterdaySteps: fn(async () => day()),
   getStepsForDate: fn(async (date: string) => day(date)),
   getWeeklyStats: fn(async (..._args: never[]) => stats()),
@@ -246,6 +261,7 @@ export const StepTracker = {
     sources: [],
     sourcesStatus: 'not_consulted' as const,
     resolved: resolved(date),
+    otherDevicesSteps: 0,
     capabilities: {
       hasStepCounter: true,
       hasStepDetector: true,

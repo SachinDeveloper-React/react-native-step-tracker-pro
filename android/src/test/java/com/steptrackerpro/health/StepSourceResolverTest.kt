@@ -476,9 +476,13 @@ class StepSourceResolverTest {
     @Test
     fun `default arguments reproduce the 1_3_0 resolution for every policy`() {
         // Nothing an existing consumer did not opt into may move a number.
+        // Samsung Health's morning is smaller than the watch's lead, so the
+        // watch answers under auto by either rule - 2.6's, where each source
+        // competes on the lead its trust allows, and the most-steps-first
+        // rule before it; see the tests below for where the two part.
         val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, distance = 6_100.0, manualSteps = 3_000)
         val samsung = source(
-            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 5_990, manualSteps = 100
+            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 150, manualSteps = 100
         )
         val phone = device(7_800)
         for (policy in StepSourcePolicy.entries) {
@@ -495,6 +499,97 @@ class StepSourceResolverTest {
                 assertEquals(policy.name, 6_100.0, result.totals.distance, 0.001)
             }
         }
+    }
+
+    // ---- several sources under auto: trust before steps ----------------------
+
+    @Test
+    fun `a trusted watch is not shut out by an untrusted app with more steps`() {
+        // Google Fit on this phone holds 9,000 - more than the watch - but
+        // reads the same phone this device covered all day, so it may add
+        // nothing. Picked first for its steps and only then checked, it left
+        // the phone's 5,000 on screen and the watch's 8,000 unused.
+        val fit = source("com.google.android.apps.fitness", 9_000, StepSourceKind.APP, stepsBeforeCoverage = 0)
+        val fitbit = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val result = resolve(StepSourcePolicy.AUTO, device(5_000), listOf(fit, fitbit))
+
+        assertEquals(8_000, result.totals.steps)
+        assertTrue(result.usedExternal)
+        assertFalse(result.merged)
+        assertEquals("com.fitbit.FitbitMobile", result.sourcePackage)
+        assertEquals(8_000, result.externalSteps)
+    }
+
+    @Test
+    fun `under catalog trust a relay the catalog knows beats an unlisted watch with more steps`() {
+        // An unlisted package stamping TYPE_WATCH is held to the coverage
+        // rule; Galaxy Wearable relaying the user's watch is not.
+        val faker = source("com.example.faker", 20_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val relay = source("com.samsung.android.app.watchmanager", 7_000, StepSourceKind.WATCH, stepsBeforeCoverage = 0)
+        val result = StepSourceResolver.resolve(
+            StepSourcePolicy.AUTO, device(4_000), listOf(faker, relay), null, metrics,
+            wearableTrust = WearableTrust.CATALOG
+        )
+
+        assertEquals(7_000, result.totals.steps)
+        assertEquals("com.samsung.android.app.watchmanager", result.sourcePackage)
+        assertFalse(result.merged)
+    }
+
+    @Test
+    fun `the source allowed the larger lead answers`() {
+        // Installed at 15:00: Samsung Health counted 5,990 before it, and
+        // this phone 7,800 since. A watch says 8,000 for the day, which it
+        // cannot have been wearing all day. Samsung Health's morning on top
+        // of this phone's afternoon is the larger allowed figure.
+        val watch = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH)
+        val samsung = source(
+            "com.sec.android.app.shealth", 6_000, StepSourceKind.APP, stepsBeforeCoverage = 5_990
+        )
+        val result = resolve(StepSourcePolicy.AUTO, device(7_800), listOf(watch, samsung))
+
+        assertEquals(13_790, result.totals.steps)
+        assertTrue(result.merged)
+        assertEquals(5_990, result.baselineSteps)
+        assertEquals("com.sec.android.app.shealth", result.sourcePackage)
+        // A blend: distance from stride, never Samsung Health's own figure.
+        assertEquals(metrics.distance(13_790), result.totals.distance, 0.001)
+    }
+
+    @Test
+    fun `an equal lead goes to the trusted source, whose number is exact`() {
+        // A past day this device has nothing for: the phone-side app may
+        // supply all of it, and so may the watch.
+        val platform = source("android", 6_000, StepSourceKind.PHONE)
+        val watch = source("com.fitbit.FitbitMobile", 6_000, StepSourceKind.WATCH, distance = 4_400.0)
+        val result = resolve(StepSourcePolicy.AUTO, device(0), listOf(platform, watch))
+
+        assertEquals(6_000, result.totals.steps)
+        assertEquals("com.fitbit.FitbitMobile", result.sourcePackage)
+        assertFalse(result.merged)
+        assertEquals(4_400.0, result.totals.distance, 0.001)
+    }
+
+    @Test
+    fun `with no source allowed ahead the phone answers and the most steps are reported`() {
+        val fit = source("com.google.android.apps.fitness", 12_000, StepSourceKind.APP, stepsBeforeCoverage = 0)
+        val fitbit = source("com.fitbit.FitbitMobile", 3_000, StepSourceKind.WATCH)
+        val result = resolve(StepSourcePolicy.AUTO, device(9_000), listOf(fitbit, fit))
+
+        assertEquals(9_000, result.totals.steps)
+        assertFalse(result.usedExternal)
+        assertEquals(12_000, result.externalSteps)
+    }
+
+    @Test
+    fun `the wearable and health_connect policies still take the most steps`() {
+        val fit = source("com.google.android.apps.fitness", 9_000, StepSourceKind.APP, stepsBeforeCoverage = 0)
+        val fitbit = source("com.fitbit.FitbitMobile", 8_000, StepSourceKind.WATCH)
+        val garmin = source("com.garmin.android.apps.connectmobile", 7_000, StepSourceKind.WATCH)
+        val sources = listOf(fit, fitbit, garmin)
+
+        assertEquals(9_000, resolve(StepSourcePolicy.HEALTH_CONNECT, device(5_000), sources).totals.steps)
+        assertEquals(8_000, resolve(StepSourcePolicy.WEARABLE, device(5_000), sources).totals.steps)
     }
 
     // ---- wearable trust (wearableTrust: metadata | catalog) ------------------

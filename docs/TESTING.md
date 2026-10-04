@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (185 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits, range reads, features, vitals and per-minute records (265 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (189 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records and other devices' days (287 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,13 +59,16 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Seventy-six cases: forty-one drive the engine, four build the Room
+sensor. Seventy-eight cases: forty-one drive the engine, four build the Room
 database as an older version from the exported schema, migrate real rows to
-the current version and check every one survived, twenty-four run the
-integrity layer, sync bookkeeping, Health Connect reads, the notification
-and background work end to end through the real core, database and Keystore, four check that remote-sync headers are
+the current version and check every one survived, twenty-six run the
+integrity layer, sync bookkeeping, Health Connect reads, the notification,
+other devices' steps and background work end to end through the real core,
+database and Keystore, four check that remote-sync headers are
 sealed, read back and migrated from 1.x, and three pin when `goalReached`
-fires. Among them:
+fires. Two more, against Health Connect itself, are opt-in - see
+[Health Connect on a device](#health-connect-on-a-device); without the
+property they are skipped. Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -113,6 +116,26 @@ fires. Among them:
 | `theNotificationFollowsAChangeOfLanguage` | after the phone's language changes, the notification's counts keep the old format |
 | `aDayEndedByASyncJobOrAReadTellsTheService` | a day a sync job ended in the night leaves the notification on the day before's count until the first step |
 | `aBackgroundWriteThatFailsIsLoggedNotACrash` | a save that fails on a full disk takes the app down |
+| `otherDevicesStepsAreShownOnTopAndKeptApartFromThisPhonesFigures` | other devices' steps leak into this phone's count, history or snapshot figures, or never reach the screen |
+| `otherDevicesStepsCountTowardsTheDailyGoal` | a day the other devices take past the goal fires nothing until a step on this phone, or fires twice |
+
+### Health Connect on a device
+
+`HealthConnectReadsTest` runs the package's Health Connect reads against the
+platform's own provider, on an Android 14+ emulator or phone. It needs the
+health permissions declared, which every other instrumented test checks are
+not, so the test APK declares them only when asked, and the class runs on
+its own; it grants them to itself, and the run uninstalls the APK after.
+
+```sh
+cd android && ./gradlew connectedDebugAndroidTest -PstpHealthConnectTests \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.steptrackerpro.HealthConnectReadsTest
+```
+
+| Test | What breaks if it fails |
+|---|---|
+| `aSnapshotWithItsRecordsReadsTheDayOnce` | a snapshot that asks for its raw records reads the day twice against Health Connect's rate limits |
+| `aRecordTypeTheSourcesDoNotReadIsReadOnItsOwn` | records of a type the sources do not read go missing, or everything is read twice |
 
 ### Compatibility builds
 
@@ -325,6 +348,20 @@ Needs a second source — Samsung Health, Google Fit, or a watch.
 - [ ] walk 20 steps: the number rises by ~20 immediately, without waiting for the other app to sync
 - [ ] when the other app syncs, the number does not jump by the same 20 again
 - [ ] leave the phone on a desk and walk with the watch: the number catches up on the next read
+- [ ] with a phone-side app (Google Fit, Samsung Health) holding more steps
+      than a watch that is ahead of the phone: the watch answers -
+      `stepSource.kind` is `'watch'`, not this phone (2.6)
+
+### Other devices
+
+- [ ] `setOtherDevicesSteps(today, 629)`: the notification shows this phone's
+      count plus 629 at once, and keeps counting as you walk
+- [ ] `getTodaySteps()` and `stepsChanged` carry `otherDevicesSteps: 629`;
+      `stepSource.steps` and `getStepsForDate(today)` do not include it
+- [ ] `getVerificationSnapshot(today)`: `deviceSteps` and `resolved.steps`
+      without it, `otherDevicesSteps: 629`
+- [ ] a value that takes the day past the goal fires `goalReached` once
+- [ ] after midnight the notification drops back to this phone's count
 
 ### Health Connect
 
@@ -356,6 +393,15 @@ adb shell am start -a android.health.connect.action.HEALTH_HOME_SETTINGS
 - [ ] Android 12 or 13 with the Health Connect APK: a range with more than
       5,000 records returns, and `readsLast15Minutes` grows by a handful per
       read, not by dozens
+- [ ] Android 12 or 13, once `rateLimit.readsLimited` is true: reopening the
+      app and its Health Connect screen leaves `readsLast15Minutes` where it
+      was, and `granted` stays true (2.6)
+- [ ] `getVerificationSnapshot(today, { include: ['healthConnectRecords'] })`
+      grows `readsLast15Minutes` by what a snapshot without it does (2.6)
+- [ ] a screen with `useHealthConnect({ readSources: false })`: coming back
+      to the app reads no sources - on Android 14 and later
+      `readsLast15Minutes` does not move; below, only the grants checks count
+      (2.6)
 - [ ] with `healthConnectReadVitals: ['heartRate']` declared, listed and
       granted, and a watch that writes heart rate: `readHealthConnectVitals()`
       over a walk returns its count, range and latest sample

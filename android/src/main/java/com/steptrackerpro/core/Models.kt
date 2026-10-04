@@ -42,7 +42,13 @@ data class StepSnapshot(
     /** Of `steps`, how many gap recovery credited in one go. See [DayTotals.recoveredSteps]. */
     val recoveredSteps: Int = 0,
     /** Of this device's count, how many the integrity checks flagged. See [DayTotals.suspectSteps]. */
-    val suspectSteps: Int = 0
+    val suspectSteps: Int = 0,
+    /**
+     * Of `steps`, what the app says the user's other devices counted - see
+     * [StepTrackerCore.setOtherDevicesSteps]. 0 on this device's own
+     * snapshot; only a displayed one carries it.
+     */
+    val otherDevicesSteps: Int = 0
 )
 
 /**

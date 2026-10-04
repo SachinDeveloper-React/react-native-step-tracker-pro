@@ -265,24 +265,11 @@ class HealthConnectManager(
      * Makes one Health Connect data call on [category]'s quota - the
      * foreground or background one, as Health Connect will judge it. Throws
      * [HealthConnectRateLimitedException] without calling while Health
-     * Connect has just refused that quota, and in place of its refusal.
+     * Connect has just refused that quota, and in place of its refusal. See
+     * [HealthConnectQuota.call].
      */
-    private suspend fun <T> metered(category: Category, call: suspend () -> T): T {
-        val foreground = inForegroundNow()
-        val wait = quota.retryAfterMs(category, foreground)
-        if (wait > 0L) throw HealthConnectRateLimitedException(category, wait)
-        quota.record(category, foreground)
-        return try {
-            call().also { quota.onAccepted(category, foreground) }
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            if (!HealthConnectErrors.isRateLimited(error)) throw error
-            val refusal = HealthConnectRateLimitedException(category, quota.onRefused(category, foreground), error)
-            runCatching { onRateLimited?.invoke(refusal) }
-            throw refusal
-        }
-    }
+    private suspend fun <T> metered(category: Category, call: suspend () -> T): T =
+        quota.call(category, inForegroundNow(), refused = { onRateLimited?.invoke(it) }, block = call)
 
     /**
      * Whether Health Connect counts this app as in the foreground right now
@@ -331,12 +318,17 @@ class HealthConnectManager(
 
     // ---- permissions -----------------------------------------------------
 
-    @Volatile
-    private var grantedCache: Pair<Long, Set<String>>? = null
+    /** The grants check's last answer, and how long it may be reused - see [grantedPermissions]. */
+    private val grants = GrantMemory({ android.os.SystemClock.elapsedRealtime() }, GRANT_CACHE_MS)
 
-    /** The last grant set read, kept across cache invalidation so a change is noticed. */
-    @Volatile
-    private var lastGranted: Set<String>? = null
+    /**
+     * Whether the grants check is one of Health Connect's metered calls. On
+     * Android 14 and later the client answers it from the package manager,
+     * which Health Connect does not meter; below, it is a call into the
+     * provider APK, which counts it and refuses it, like any read, once the
+     * app's quota is used up.
+     */
+    private val grantsCheckMetered = Build.VERSION.SDK_INT < 34
 
     /**
      * Called when a fresh read of the grants differs from the last one - the
@@ -351,41 +343,45 @@ class HealthConnectManager(
      * them, the sensor path can trigger one a minute, and each check is a
      * cross-process call. [status] and anything that just changed a grant
      * ask for a fresh answer.
+     *
+     * Where the check is a metered call - Android 13 and lower - it goes
+     * through the read quota like every other: counted, and not made at all
+     * while Health Connect is refusing that quota. A check that fails, or is
+     * held back, keeps the last answer, cached like any other - see
+     * [GrantMemory]: during a block every caller used to ask the provider
+     * again, straight away, a call it would refuse.
      */
     suspend fun grantedPermissions(fresh: Boolean = false): Set<String> {
-        if (!fresh) {
-            // Uptime clock: after the wall clock is set back, "now minus then"
-            // would be negative and the cache would look fresh for hours.
-            grantedCache?.let { (at, set) ->
-                if (android.os.SystemClock.elapsedRealtime() - at < GRANT_CACHE_MS) return set
-            }
-        }
+        if (!fresh) grants.reusable()?.let { return it }
         val hc = client()
         val set = if (hc == null) {
             emptySet()
         } else {
             try {
-                hc.permissionController.getGrantedPermissions()
+                if (grantsCheckMetered) {
+                    metered(Category.READ) { hc.permissionController.getGrantedPermissions() }
+                } else {
+                    hc.permissionController.getGrantedPermissions()
+                }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                // A check that failed is not a revocation. The provider APK
-                // refuses even this call once the app's quota is used up, and
-                // reading that as "nothing granted" told the app - and the
-                // user - that Health Connect had been switched off. The last
-                // answer stands, uncached, so the next call asks again.
-                return lastGranted ?: emptySet()
+                // Not a revocation: the last answer stands - this process's,
+                // or for the first check of one, the last an earlier process
+                // read, which a restart during a block would otherwise lose.
+                return grants.failed(state.lastHealthGrants)
             }
         }
-        grantedCache = android.os.SystemClock.elapsedRealtime() to set
-        val previous = lastGranted
-        lastGranted = set
-        if (previous != null && previous != set) {
+        val first = grants.last == null
+        if (grants.answered(set)) {
             // The token's types may no longer be readable, and the platform
             // answers the device question only with a read grant.
             resetChangesFeed()
             deviceOriginAsked = false
             onGrantsChanged?.invoke()
+            state.lastHealthGrants = set
+        } else if (first && state.lastHealthGrants != set) {
+            state.lastHealthGrants = set
         }
         return set
     }
@@ -403,7 +399,7 @@ class HealthConnectManager(
     )
 
     fun invalidatePermissionCache() {
-        grantedCache = null
+        grants.invalidate()
     }
 
     suspend fun hasAllPermissions(): Boolean = grantedPermissions().containsAll(REQUIRED)
@@ -764,13 +760,19 @@ class HealthConnectManager(
         deadline: Long = Long.MAX_VALUE
     ): Map<String, List<StepSource>> = readSourcesByDay(start, end, coverageStartMs, perDayFill, deadline).byDate
 
-    /** [readDailyStepsBySource], saying which days it answered in full - see [DaySources.detailed]. */
+    /**
+     * [readDailyStepsBySource], saying which days it answered in full - see
+     * [DaySources.detailed]. With a [capture], the raw records of its types
+     * are kept as the read pages through them, so a snapshot that wants the
+     * day's records as well as its sources reads the day once.
+     */
     suspend fun readSourcesByDay(
         start: Instant,
         end: Instant,
         coverageStartMs: Long = 0L,
         perDayFill: Boolean = true,
-        deadline: Long = Long.MAX_VALUE
+        deadline: Long = Long.MAX_VALUE,
+        capture: RecordCapture? = null
     ): DaySources {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val self = context.packageName
@@ -803,7 +805,12 @@ class HealthConnectManager(
         // days lost are the oldest, not today. Whatever the read did not
         // reach is answered from the aggregate API below.
         var oldestRead = Long.MAX_VALUE
-        val stepsOutcome = readAll(hc, StepsRecord::class.java, start, end, newestFirst = true) { record ->
+        val keepSteps = capture?.wants(RecordType.STEPS) == true
+        var stepsFailure: Exception? = null
+        val stepsOutcome = readAll(
+            hc, StepsRecord::class.java, start, end, newestFirst = true, onFailure = { stepsFailure = it }
+        ) { record ->
+            if (keepSteps) capture?.add(RecordType.STEPS, recordMap(record))
             val recordStart = record.startTime.toEpochMilli()
             if (recordStart < oldestRead) oldestRead = recordStart
             val recordEnd = record.endTime.toEpochMilli()
@@ -844,6 +851,7 @@ class HealthConnectManager(
             acc.observe(record.metadata.device?.type, recordEnd)
             HourlySteps.add(acc.hourly, recordStart, recordEnd, count, zone)
         }
+        capture?.finished(RecordType.STEPS, stepsOutcome, stepsFailure)
         // Distance and calories are optional companions: an origin that wrote
         // steps but no distance keeps 0.0 here and has it derived from stride
         // by StepSourceResolver - as does every origin when the app does not
@@ -876,7 +884,12 @@ class HealthConnectManager(
         }
         if (ReadType.DISTANCE in types) {
             var oldest = Long.MAX_VALUE
-            val outcome = readAll(hc, DistanceRecord::class.java, start, end, newestFirst = true) { record ->
+            val keepDistance = capture?.wants(RecordType.DISTANCE) == true
+            var failure: Exception? = null
+            val outcome = readAll(
+                hc, DistanceRecord::class.java, start, end, newestFirst = true, onFailure = { failure = it }
+            ) { record ->
+                if (keepDistance) capture?.add(RecordType.DISTANCE, recordMap(record))
                 val at = record.startTime.toEpochMilli()
                 if (at < oldest) oldest = at
                 buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
@@ -888,6 +901,7 @@ class HealthConnectManager(
                 it.distance = 0.0
                 it.distanceSeen = false
             })
+            capture?.finished(RecordType.DISTANCE, outcome, failure)
         }
         if (ReadType.TOTAL_CALORIES in types) {
             var oldest = Long.MAX_VALUE
@@ -1447,6 +1461,7 @@ class HealthConnectManager(
      * finished carried on - a call that could fail the read, or start it over
      * until the page cap - so empty ends the read too, see [hasMorePages].
      *
+     * @param onFailure told why, when a page fails.
      * @return how the read ended; only [ReadOutcome.COMPLETE] saw every record.
      */
     private suspend fun <T : Record> readAll(
@@ -1455,6 +1470,7 @@ class HealthConnectManager(
         start: Instant,
         end: Instant,
         newestFirst: Boolean = false,
+        onFailure: (Exception) -> Unit = {},
         onRecord: (T) -> Unit
     ): ReadOutcome {
         var token: String? = null
@@ -1475,10 +1491,11 @@ class HealthConnectManager(
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 // A caller's timeout: stop, rather than carry on as a failed read.
                 throw cancelled
-            } catch (_: Exception) {
+            } catch (failure: Exception) {
                 // A refusal for quota too: steps that fail here fall through
                 // to the aggregate fill, whose call then says so; a companion
                 // type is cut, as for any failure.
+                onFailure(failure)
                 return ReadOutcome.FAILED
             }
             response.records.forEach(onRecord)
@@ -2220,6 +2237,9 @@ class HealthConnectManager(
 
         /** Pages [readStepRecords] reads before reporting `truncated`: 10,000 records. */
         private const val MAX_RAW_PAGES = 2
+
+        /** The most records of one type a raw read hands back - see [readRecords] and [RecordCapture]. */
+        const val RAW_RECORDS_LIMIT = MAX_RAW_PAGES * MAX_PAGE_SIZE
 
         /** Health Connect's limit on records in one insert. */
         const val MAX_RECORDS_PER_INSERT = 1_000

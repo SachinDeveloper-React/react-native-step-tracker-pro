@@ -26,6 +26,7 @@ class GoalTracker(context: Context) {
         check(TYPE_MONTHLY, DateKeys.calendarMonth().first, steps, goal)
 
     /** Emits progress only when the whole-percent bucket changes. */
+    @Synchronized
     fun progressBucketChanged(type: String, percent: Int): Boolean {
         val key = "$KEY_BUCKET_PREFIX$type"
         if (prefs.getInt(key, -1) == percent) return false
@@ -42,6 +43,7 @@ class GoalTracker(context: Context) {
      * markers: those are period-scoped, and wiping them when a single day is
      * reset lets both fire a second time inside the same week or month.
      */
+    @Synchronized
     fun reset() {
         prefs.edit()
             .remove("$KEY_FIRED_PREFIX$TYPE_DAILY")
@@ -50,6 +52,10 @@ class GoalTracker(context: Context) {
             .apply()
     }
 
+    // The sensor thread checks on every step, and the app's own calls -
+    // other devices' steps set - check too: one check at a time, or a goal
+    // both cross at once fires twice.
+    @Synchronized
     private fun check(type: String, periodKey: String, steps: Int, goal: Int): Reached? {
         if (goal <= 0 || steps < goal) return null
         val key = "$KEY_FIRED_PREFIX$type"

@@ -28,6 +28,8 @@ enum class StepSourcePolicy(val jsValue: String) {
      * Default. Takes whichever of the phone and the best external source counted
      * more for the day. A phone left on a desk under-counts and a watch worn on
      * a walk does not, so the higher number is the one that saw the whole day.
+     * The best external source is the one its trust lets add the most - see
+     * [StepSourceResolver.resolve].
      */
     AUTO("auto");
 
@@ -237,10 +239,45 @@ object StepSourceResolver {
             if (sources.any { it.isSelf && it.packageName == pinned }) return deviceResolution
         }
 
+        // AUTO. How far ahead a candidate is allowed to be depends on what
+        // it is. A wearable, or a source the user pinned, is trusted outright:
+        // a watch sees a walk the phone on the desk did not. A phone-side
+        // origin - Samsung Health, the platform's own count, an aggregator -
+        // reads the same phone, so for the hours this device was counting it
+        // cannot legitimately have seen more; all it may add is the part of
+        // the day before this device's coverage began (an install at 15:00),
+        // and on a past day, the whole day only if this device has nothing
+        // for it at all. Without that rule an aggregator that sums the
+        // platform's count and ours would double the display, and a
+        // phone-side algorithm that counts 5% high would creep the total up
+        // sync after sync. What makes a candidate "a wearable" here is the
+        // wearableTrust rule: the record's own Device stamp by default, the
+        // catalog and the app's allowlist under `catalog`.
+        fun isTrusted(source: StepSource): Boolean = pinned != null ||
+            StepSourceTrust.isTrustedWearable(source, wearableTrust, wearableAllowlist) ||
+            !deviceCoverageReliable
+        fun leadOf(source: StepSource): Int = when {
+            isTrusted(source) -> source.steps - device.steps
+            source.stepsBeforeCoverage >= 0 -> source.stepsBeforeCoverage
+            device.steps == 0 -> source.steps
+            else -> 0
+        }
+
         val candidate = when {
             pinned != null -> external.firstOrNull { it.packageName == pinned }
             policy == StepSourcePolicy.WEARABLE ->
                 external.filter { it.isWearable }.maxByOrNull { it.steps }
+            // Each source competes on what its trust lets it add, so trust
+            // is checked before a winner is picked. Picking the most steps
+            // first let an untrusted app with more steps - held to its
+            // pre-coverage share, often nothing - shut out a trusted watch
+            // that was ahead. Ties go to a trusted source, whose number is
+            // exact, then to more steps. With no source ahead, the one with
+            // the most steps stays the one reported.
+            policy == StepSourcePolicy.AUTO ->
+                external.filter { leadOf(it) > 0 }
+                    .maxWithOrNull(compareBy<StepSource>({ leadOf(it) }, { isTrusted(it) }, { it.steps }))
+                    ?: external.maxByOrNull { it.steps }
             else -> external.maxByOrNull { it.steps }
         } ?: return deviceResolution.copy(
             externalSteps = external.maxOfOrNull { it.steps } ?: 0
@@ -269,29 +306,9 @@ object StepSourceResolver {
             )
         }
 
-        // AUTO. How far ahead the candidate is allowed to be depends on what
-        // it is. A wearable, or a source the user pinned, is trusted outright:
-        // a watch sees a walk the phone on the desk did not. A phone-side
-        // origin - Samsung Health, the platform's own count, an aggregator -
-        // reads the same phone, so for the hours this device was counting it
-        // cannot legitimately have seen more; all it may add is the part of
-        // the day before this device's coverage began (an install at 15:00),
-        // and on a past day, the whole day only if this device has nothing
-        // for it at all. Without that rule an aggregator that sums the
-        // platform's count and ours would double the display, and a
-        // phone-side algorithm that counts 5% high would creep the total up
-        // sync after sync. What makes a candidate "a wearable" here is the
-        // wearableTrust rule: the record's own Device stamp by default, the
-        // catalog and the app's allowlist under `catalog`.
-        val trusted = pinned != null ||
-            StepSourceTrust.isTrustedWearable(candidate, wearableTrust, wearableAllowlist) ||
-            !deviceCoverageReliable
-        val lead = when {
-            trusted -> externalSteps - device.steps
-            candidate.stepsBeforeCoverage >= 0 -> candidate.stepsBeforeCoverage
-            device.steps == 0 -> externalSteps
-            else -> 0
-        }
+        // AUTO, with the lead the candidate's trust allows - see above.
+        val trusted = isTrusted(candidate)
+        val lead = leadOf(candidate)
         // Ties go to the phone because its total is live rather than whatever
         // the companion app last uploaded.
         if (lead <= 0) {

@@ -329,7 +329,35 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         launchSafely(promise) {
             core.engine.reconcile()
             val resolution = core.resolveToday()
-            promise.resolve(Bridge.snapshot(core.engine.snapshot(), resolution))
+            val shown = core.displaySnapshot(core.engine.snapshot(), resolution)
+            promise.resolve(Bridge.snapshot(shown, resolution))
+        }
+    }
+
+    /**
+     * What the user's other devices counted on [date], from the app's
+     * server, shown on top of this phone's number for today and never
+     * stored with it - see [StepTrackerCore.setOtherDevicesSteps]. Resolves
+     * with today's snapshot as shown. Validated in JS too.
+     */
+    @ReactMethod
+    override fun setOtherDevicesSteps(date: String, steps: Double, promise: Promise) {
+        launchSafely(promise) {
+            val validDate = DATE_KEY.matches(date) && runCatching { DateKeys.parse(date) }.isSuccess
+            if (!validDate) {
+                promise.reject("E_INVALID_CONFIG", "date must be yyyy-MM-dd")
+                return@launchSafely
+            }
+            val max = StepTrackerCore.MAX_OTHER_DEVICES_STEPS
+            if (!(steps >= 0.0 && steps <= max && steps == Math.floor(steps))) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "steps must be a whole number from 0 to $max"
+                )
+                return@launchSafely
+            }
+            core.setOtherDevicesSteps(date, steps.toInt())
+            promise.resolve(cachedSnapshot())
         }
     }
 
@@ -1283,10 +1311,8 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
      * would not.
      */
     private fun cachedSnapshot() = core.engine.snapshot().let { live ->
-        Bridge.snapshot(
-            live,
-            core.resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
-        )
+        val resolution = core.resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+        Bridge.snapshot(core.displaySnapshot(live, resolution), resolution)
     }
 
     private inline fun runSafely(promise: Promise, block: () -> Unit) {
@@ -1534,5 +1560,7 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
 
         /** The longest range `deleteHealthConnectData()` takes: ten years. */
         const val MAX_DELETE_DAYS = 3_660
+
+        private val DATE_KEY = Regex("""\d{4}-\d{2}-\d{2}""")
     }
 }

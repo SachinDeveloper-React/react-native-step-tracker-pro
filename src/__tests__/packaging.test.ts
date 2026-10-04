@@ -173,8 +173,14 @@ describe('Jest mock (react-native-step-tracker-pro/jest)', () => {
       mock.StepTracker.getVerificationSnapshot('2026-09-14')
     ).resolves.toMatchObject({
       schemaVersion: 2,
+      otherDevicesSteps: 0,
       integrity: { enabled: false },
     });
+    // Today as shown: an empty day, so the other devices' steps are all of it.
+    const today = (await mock.StepTracker.getTodaySteps()).date;
+    await expect(
+      mock.StepTracker.setOtherDevicesSteps(today, 629)
+    ).resolves.toMatchObject({ steps: 629, otherDevicesSteps: 629, goalReached: false });
   });
 
   it('fires listeners through __emit and removes them', () => {

@@ -322,6 +322,8 @@ const READ_TYPES = ['steps', 'distance', 'totalCalories'] as const;
 const RECORD_TYPES: readonly HealthConnectRecordType[] = ['steps', 'distance'];
 /** The longest range `deleteHealthConnectData()` takes - the native side's cap too. */
 const MAX_DELETE_DAYS = 3660;
+/** The most `setOtherDevicesSteps()` takes for a day - the native side's bound too. */
+const MAX_OTHER_DEVICES_STEPS = 1_000_000;
 
 const VITAL_TYPES: readonly HealthConnectVitalType[] = [
   'heartRate',
@@ -692,6 +694,34 @@ export const StepTracker = {
 
   async getTodaySteps(): Promise<StepSnapshot> {
     return call(() => getNativeModule().getTodaySteps()) as Promise<StepSnapshot>;
+  },
+
+  /**
+   * What the user's other devices counted on `date` (yyyy-MM-dd), as your
+   * server knows it - its total for the day less what this phone sent it.
+   * Shown on top of this phone's number for today: the notification,
+   * `stepsChanged`, `getTodaySteps()` and the daily goal, still counting
+   * live, with `otherDevicesSteps` saying how much of `steps` it is. Never
+   * part of this phone's own figures - `deviceSteps`, history, stats,
+   * Health Connect writes, uploads - and carried apart in a verification
+   * snapshot, so your server never counts it twice. `0` clears it.
+   * Resolves with today's snapshot as shown.
+   */
+  async setOtherDevicesSteps(date: string, steps: number): Promise<StepSnapshot> {
+    assertDate(date);
+    if (!(
+      Number.isSafeInteger(steps) &&
+      steps >= 0 &&
+      steps <= MAX_OTHER_DEVICES_STEPS
+    )) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        `steps must be a whole number from 0 to ${MAX_OTHER_DEVICES_STEPS}`
+      );
+    }
+    return call(() =>
+      getNativeModule().setOtherDevicesSteps(date, steps)
+    ) as Promise<StepSnapshot>;
   },
 
   async getYesterdaySteps(): Promise<DayRecord> {

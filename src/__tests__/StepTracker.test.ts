@@ -1223,6 +1223,41 @@ describe('reads', () => {
   });
 });
 
+describe('setOtherDevicesSteps()', () => {
+  it("passes the day and the other devices' steps through, and resolves with today as shown", async () => {
+    const shown = { date: '2026-10-04', steps: 701, otherDevicesSteps: 629 };
+    native.when('setOtherDevicesSteps', shown);
+    await expect(StepTracker.setOtherDevicesSteps('2026-10-04', 629)).resolves.toEqual(
+      shown
+    );
+    // Zero clears it.
+    await StepTracker.setOtherDevicesSteps('2026-10-04', 0);
+    expect(native.calledWith('setOtherDevicesSteps')).toEqual([
+      ['2026-10-04', 629],
+      ['2026-10-04', 0],
+    ]);
+  });
+
+  it('refuses a malformed day or a count that is not a whole number before native', async () => {
+    const bad: Array<[string, number, RegExp]> = [
+      ['04-10-2026', 629, /yyyy-MM-dd/],
+      ['2026-10-04', -1, /whole number/],
+      ['2026-10-04', 12.5, /whole number/],
+      ['2026-10-04', Number.NaN, /whole number/],
+      ['2026-10-04', Number.POSITIVE_INFINITY, /whole number/],
+      ['2026-10-04', 1_000_001, /whole number/],
+      ['2026-10-04', '629' as unknown as number, /whole number/],
+    ];
+    for (const [date, steps, message] of bad) {
+      await expect(StepTracker.setOtherDevicesSteps(date, steps)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+        message: expect.stringMatching(message),
+      });
+    }
+    expect(native.calledWith('setOtherDevicesSteps')).toHaveLength(0);
+  });
+});
+
 describe('useStepTracker()', () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1406,6 +1441,67 @@ describe('useHealthConnect()', () => {
     native.when('getHealthConnectStatus', { ...baseStatus, canRead: true });
     await render();
     expect(native.calledWith('getStepSources')).toHaveLength(1);
+  });
+
+  it('reads the status alone with readSources: false', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, canReadSteps: true });
+    let result: UseHealthConnectResult | undefined;
+    function Probe() {
+      result = useHealthConnect({ refreshOnForeground: false, readSources: false });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe));
+    });
+    expect(native.calledWith('getHealthConnectStatus')).toHaveLength(1);
+    expect(native.calledWith('getStepSources')).toHaveLength(0);
+    expect(native.calledWith('getCurrentStepSource')).toHaveLength(0);
+    expect(result!.status?.canReadSteps).toBe(true);
+    expect(result!.sources).toEqual([]);
+    expect(result!.hasWearable).toBe(false);
+    expect(result!.current).toBeNull();
+
+    // A source flipping is not its business, and refresh() stays on the status.
+    expect(__listenerCount('StepTrackerPro:stepSourceChanged')).toBe(0);
+    await TestRenderer.act(async () => {
+      await result!.refresh();
+    });
+    expect(native.calledWith('getHealthConnectStatus')).toHaveLength(2);
+    expect(native.calledWith('getStepSources')).toHaveLength(0);
+    expect(native.calledWith('getCurrentStepSource')).toHaveLength(0);
+    await TestRenderer.act(async () => renderer!.unmount());
+  });
+
+  it('drops the sources when readSources turns off, and reads them when it turns back on', async () => {
+    native.when('getHealthConnectStatus', { ...baseStatus, canReadSteps: true });
+    let result: UseHealthConnectResult | undefined;
+    function Probe({ readSources }: { readSources: boolean }) {
+      result = useHealthConnect({ refreshOnForeground: false, readSources });
+      return null;
+    }
+    let renderer: ReactTestRenderer | undefined;
+    await TestRenderer.act(async () => {
+      renderer = TestRenderer.create(React.createElement(Probe, { readSources: true }));
+    });
+    expect(result!.sources).toEqual([watch]);
+    expect(native.calledWith('getStepSources')).toHaveLength(1);
+
+    await TestRenderer.act(async () => {
+      renderer!.update(React.createElement(Probe, { readSources: false }));
+    });
+    expect(result!.sources).toEqual([]);
+    expect(result!.hasWearable).toBe(false);
+    expect(result!.current).toBeNull();
+    expect(native.calledWith('getStepSources')).toHaveLength(1);
+
+    await TestRenderer.act(async () => {
+      renderer!.update(React.createElement(Probe, { readSources: true }));
+    });
+    expect(native.calledWith('getStepSources')).toHaveLength(2);
+    expect(result!.sources).toEqual([watch]);
+    expect(result!.current).toEqual({ steps: 8000 });
+    await TestRenderer.act(async () => renderer!.unmount());
   });
 });
 

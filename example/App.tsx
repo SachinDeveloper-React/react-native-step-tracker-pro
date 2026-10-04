@@ -256,6 +256,9 @@ export default function App() {
     .reduce((sum, source) => sum + source.manualSteps, 0);
   const recoveredSteps = snapshot?.recoveredSteps ?? 0;
   const suspectSteps = snapshot?.suspectSteps ?? 0;
+  // Set by an app whose server adds up the user's devices - see
+  // setOtherDevicesSteps(). Already in `steps`; never in what is uploaded.
+  const otherDevicesSteps = snapshot?.otherDevicesSteps ?? 0;
   const integrity = verification?.integrity;
   // Hints worth a line: any device signal that is on.
   const deviceHints = integrity
@@ -299,6 +302,11 @@ export default function App() {
           steps this phone credited in one go after a dead period, and steps
           somebody typed into Health Connect by hand.
         */}
+        {otherDevicesSteps > 0 && (
+          <Text style={styles.laneLabel}>
+            {otherDevicesSteps.toLocaleString()} from your other devices
+          </Text>
+        )}
         {suspectSteps > 0 && (
           <Text style={styles.laneLabel}>
             {suspectSteps.toLocaleString()} flagged as suspect

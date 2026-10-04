@@ -47,6 +47,7 @@ export interface Spec extends TurboModule {
 
   // ---- reads -----------------------------------------------------------
   getTodaySteps(): Promise<UnsafeObject>;
+  setOtherDevicesSteps(date: string, steps: number): Promise<UnsafeObject>;
   getStepsForDate(date: string): Promise<UnsafeObject>;
   getYesterdaySteps(): Promise<UnsafeObject>;
   getStatsForRange(startDate: string, endDate: string): Promise<UnsafeObject>;

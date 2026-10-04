@@ -16,6 +16,14 @@ export interface UseHealthConnectOptions extends RequestHealthConnectOptions {
    * app, so coming back is the only moment this can be noticed.
    */
   refreshOnForeground?: boolean;
+  /**
+   * Read the step sources: `sources`, `hasWearable` and `current`. Default
+   * true. Each refresh reads Health Connect for them - the last
+   * `sourceWindowDays` and today - against its rate limits; `false` leaves
+   * them empty and `null`, and the hook reads the status alone, for a
+   * screen that only connects Health Connect. `selectSource()` still pins.
+   */
+  readSources?: boolean;
   /** How far back to look for other step sources. Default 7 days. */
   sourceWindowDays?: number;
 }
@@ -84,6 +92,7 @@ export function useHealthConnect(
 ): UseHealthConnectResult {
   const {
     refreshOnForeground = true,
+    readSources = true,
     sourceWindowDays = 7,
     backgroundRead,
     historyRead,
@@ -101,6 +110,8 @@ export function useHealthConnect(
   requestOptions.current = { backgroundRead, historyRead };
   const windowDays = useRef(sourceWindowDays);
   windowDays.current = sourceWindowDays;
+  const reading = useRef(readSources);
+  reading.current = readSources;
 
   const refresh = useCallback(async () => {
     if (!isSupported()) {
@@ -115,7 +126,7 @@ export function useHealthConnect(
       // round trip and keep whatever the last granted read produced. Steps
       // are the grant that matters: a user who unticked distance still has
       // sources. (`canRead` for a native side older than 2.1.1.)
-      if (next.canReadSteps ?? next.canRead) {
+      if (reading.current && (next.canReadSteps ?? next.canRead)) {
         const list = await StepTracker.getStepSources(
           daysAgo(windowDays.current),
           today()
@@ -123,7 +134,9 @@ export function useHealthConnect(
         // A read that ran out of time, failed or was refused for quota says
         // nothing reliable about the sources - a refused one holds only the
         // days still cached; keep the last list that was actually read.
+        // Nor does one that finished after the sources were turned off.
         if (
+          reading.current &&
           list.healthConnect !== 'timed_out' &&
           list.healthConnect !== 'failed' &&
           list.healthConnect !== 'rate_limited'
@@ -132,7 +145,10 @@ export function useHealthConnect(
           setHasWearable(list.hasWearable);
         }
       }
-      setCurrent(await StepTracker.getCurrentStepSource());
+      if (reading.current) {
+        const answering = await StepTracker.getCurrentStepSource();
+        if (reading.current) setCurrent(answering);
+      }
       setError(null);
     } catch (e) {
       setError(e as Error);
@@ -146,14 +162,29 @@ export function useHealthConnect(
     const sub = StepTracker.addListener('healthConnectStatusChanged', () => {
       void refresh();
     });
-    const sourceSub = StepTracker.addListener('stepSourceChanged', () => {
+    return () => sub.remove();
+  }, [refresh]);
+
+  // The sources' own subscription, and what turning them off or on means.
+  const wasReading = useRef(readSources);
+  useEffect(() => {
+    const was = wasReading.current;
+    wasReading.current = readSources;
+    if (!readSources) {
+      if (was) {
+        setSources([]);
+        setHasWearable(false);
+        setCurrent(null);
+      }
+      return;
+    }
+    if (!was) void refresh();
+    // A source flipping is news only to a screen that shows the sources.
+    const sub = StepTracker.addListener('stepSourceChanged', () => {
       void refresh();
     });
-    return () => {
-      sub.remove();
-      sourceSub.remove();
-    };
-  }, [refresh]);
+    return () => sub.remove();
+  }, [refresh, readSources]);
 
   useEffect(() => {
     if (!refreshOnForeground) return;

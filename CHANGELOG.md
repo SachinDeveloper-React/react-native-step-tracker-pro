@@ -5,6 +5,79 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-10-04
+
+A minor release: it adds `setOtherDevicesSteps()` and
+`useHealthConnect({ readSources })`, and changes which app answers under
+`'auto'` when several have steps for the day.
+
+### Fixed
+
+- **Under `'auto'`, a trusted watch could lose to an untrusted app with more
+  steps.** The app with the most steps was picked first and its trust
+  checked after. An app the coverage rule holds to the part of the day before
+  this phone began counting - Google Fit or Samsung Health on the same phone,
+  or under `wearableTrust: 'catalog'` an unlisted app that stamps a watch -
+  won the pick with its larger total, was then allowed to add nothing, and
+  the phone's own count stood while a trusted watch relay that was ahead
+  went unused. Each app now competes on what its trust lets it add, and the
+  one allowed the most answers; ties go to a trusted one. With one app, or
+  with none ahead of the phone, nothing changes.
+- **On Android 13 and lower, the permission check kept asking during a
+  rate-limit block.** The provider refuses even that check once the app's
+  quota is used up. 2.5 kept the last answer when it failed, but did not
+  keep it for the next caller, did not wait out the pause and did not count
+  the call: every read, every screen and the sensor's refresh asked again
+  straight away for something Health Connect would refuse. There the check
+  now counts on the read quota and waits out the pause like any read, and an
+  answer kept after a failure is reused for five seconds like any other. A
+  process that starts during a block falls back on the grants an earlier one
+  read, rather than on none - which reported Health Connect as switched off.
+- **A verification snapshot with `include: ['healthConnectRecords']` read
+  the day twice**: page by page for `sources`, then again for the records,
+  every page of it a second time against Health Connect's rate limits. The
+  records now come from the sources' own read; only a type that read does
+  not cover - distance, when `healthConnectReadTypes` leaves it out - is read
+  on its own. `status` and `truncated` mean what they did.
+
+### Added
+
+- **`setOtherDevicesSteps(date, steps)`**: what the user's other devices
+  counted on a day, as your server knows it - its total for the day less
+  what this phone sent it. The package draws the notification and only knows
+  this phone's count (and Health Connect's), so an app could not show the
+  user's day across devices there. Now today's figure is shown on top of
+  this phone's number - the notification, `stepsChanged`, `getTodaySteps()`
+  and the daily goal (`goalProgressChanged`, `goalReached`) - and keeps
+  counting live: 72 counted here and 629 set shows 701, then 702 at the next
+  step. `StepSnapshot.otherDevicesSteps` says how much of `steps` it is;
+  distance and calories include its share, from this profile's stride and
+  weight. It never enters this phone's own figures - `deviceSteps`,
+  `stepSource`, `resolved`, history, stats, the weekly and monthly goals,
+  Health Connect writes, uploads - and a verification snapshot carries it
+  apart, as `otherDevicesSteps`, so a server never counts it twice. `0`
+  clears it; each day's is kept for a week.
+- **`useHealthConnect({ readSources: false })`** reads the status alone:
+  no `getStepSources()` and no `getCurrentStepSource()` on every refresh,
+  foreground and source change, each of them Health Connect reads. `sources`,
+  `hasWearable` and `current` stay empty. For a screen that only connects
+  Health Connect.
+
+### Tests
+
+- `HealthConnectReadsTest` runs the package's reads against the platform's
+  own Health Connect on an Android 14+ emulator - the first test here to
+  exercise Health Connect itself - and pins the snapshot's single read.
+  Opt-in: `-PstpHealthConnectTests`, on its own; see
+  [TESTING.md](docs/TESTING.md#health-connect-on-a-device).
+
+### Docs
+
+- API.md has [`setOtherDevicesSteps()`](docs/API.md#setotherdevicesstepsdate-steps-promisestepsnapshot),
+  `readSources`, and how `'auto'` picks among several apps; ARCHITECTURE.md
+  the permission check on the read quota, the snapshot's single read and
+  where other devices' steps are added; MIGRATING.md what moves from 2.5.
+
 ## [2.5.0] - 2026-10-03
 
 Health Connect, checked against Google's guides - availability and

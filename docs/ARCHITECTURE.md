@@ -808,6 +808,17 @@ steps only: `StepSource.excludingManual()` takes the manual-entry bucket out
 of the total and out of the pre-coverage share, and the resolution reports
 what it removed as `manualStepsExcluded`.
 
+With several sources, trust is decided before a winner is picked: each
+source's allowed lead is worked out under the rules above, and the largest
+answers - a trusted source on a tie, then the one with more steps. With none
+ahead of the phone, the source with the most steps is the one reported as
+`externalSteps`. Up to 2.5 the source with the most steps was picked first
+and judged after, so a phone-side app with more steps than a trusted watch
+relay - allowed nothing on a day the phone covered - left the phone's count
+standing while the watch, which was ahead, went unused. `wearable` and
+`health_connect` still take the most steps: they promise a number, not a
+lead.
+
 Only `auto` merges. `wearable` and `health_connect` promise the other app's
 exact number and keep it. The phone's raw count is what is written to Health
 Connect, never the merged one, so other readers never see a blend.
@@ -833,9 +844,16 @@ The raw reads leave the rule to Health Connect and pass its refusal on as
 Connect would have answered. Granted permissions
 are cached for five seconds between the explicit status checks, so the
 sensor path's refresh does not cost an IPC per minute. A check that fails is
-not a revocation: the last answer stands (2.5). The provider APK refuses even
-that call once the app's quota is used up, and reading the failure as
-"nothing granted" switched Health Connect off on screen.
+not a revocation: the last answer stands (2.5), and is reused for those five
+seconds like any other (2.6) - `GrantMemory`. The provider APK on Android 13
+and lower refuses even that call once the app's quota is used up, and
+reading the failure as "nothing granted" switched Health Connect off on
+screen; there the check is a metered call on the read quota, held back with
+the reads (2.6). A process that starts during a block has no answer of its
+own yet, and stands on the grants the last process read
+(`StepStateStore.lastHealthGrants`). On Android 14 and later the client
+answers the check from the package manager, which Health Connect does not
+meter, and it is not counted.
 
 ### Rate limits and the source cache
 
@@ -890,6 +908,13 @@ Spending less is the larger part:
 - **Writes are batched**: `writeDays()` puts every pending day in one insert,
   up to Health Connect's 1,000 records per call, and a batch that fails costs
   only its own days. Per-minute writes send only the minutes that changed.
+- **A snapshot reads its day once** (2.6). With `healthConnectRecords`
+  included, the fresh read behind `sources` carries a `RecordCapture`, and
+  `readSourcesByDay()` keeps the step and distance records it pages through
+  in the raw-record shape - newest first, up to the same 10,000 per type
+  `readRecords()` stops at, then sorted oldest first. Only a type that read
+  does not cover is read on its own, and a read that timed out, failed or
+  was refused gives the records the same status.
 
 A read refused for quota answers a number on screen from the cache however
 old - an old answer beats none - and evidence (a snapshot's `sources`, a
@@ -899,6 +924,24 @@ days rather than guessing.
 
 Goals follow the displayed number. Under `auto` it is monotonic for the day,
 and `GoalTracker` fires each goal at most once per period regardless.
+
+### Other devices' steps
+
+An app whose server adds up a user's devices tells the package what the
+others counted with `setOtherDevicesSteps(date, steps)` (2.6). The core keeps
+it by day - in `StepStateStore`, so the service shows it after a restart,
+and in memory for the paths that run per step - from a week back to the day
+after today. It is added in one place, `displaySnapshot()`, after
+resolution: what the notification draws, `stepsChanged`, `getTodaySteps()`
+and the snapshots the lifecycle calls return, with distance and calories
+for it from this profile's stride and weight, and `otherDevicesSteps` on the
+snapshot saying how much. The daily goal follows that number, so a call
+that takes the day past it fires `goalReached` then and there, and
+`onShownChanged` has the service redraw in-process rather than through a
+command a backgrounded app could be refused. Nothing that is this phone's
+own goes through `displaySnapshot()`: the engine, the resolver, stored days,
+the Health Connect mirror and uploads never see it, and the verification
+snapshot reports it apart from `deviceSteps` and `resolved`.
 
 ## Threading
 

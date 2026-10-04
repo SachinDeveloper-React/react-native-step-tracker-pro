@@ -145,6 +145,7 @@ climbing is the cue to show the OEM battery guidance; see
   timestamp: 1757145600000,
   recoveredSteps: 0,     // of this device's count, credited by gap recovery
   suspectSteps: 0,       // of this device's count, flagged by the integrity checks
+  otherDevicesSteps: 0,  // of steps, what setOtherDevicesSteps() said other devices counted (2.6)
   stepSource: { /* ResolvedStepSource, see Step sources */ }
 }
 ```
@@ -156,7 +157,49 @@ granted, `steps` is the resolved number (see
 where it came from. Every snapshot the package hands out — from
 `initialize()`, the lifecycle calls, the reads and `stepsChanged` — carries
 `stepSource`; the lifecycle calls fill it from the source cache without a
-Health Connect round trip.
+Health Connect round trip. With [other devices' steps](#setotherdevicesstepsdate-steps-promisestepsnapshot)
+set for today, `steps` is this phone's number plus them, and
+`otherDevicesSteps` says how much; `stepSource` is this phone's alone.
+
+### `setOtherDevicesSteps(date, steps): Promise<StepSnapshot>`
+
+What the user's other devices counted on `date` (`yyyy-MM-dd`), as your
+server knows it: its total for the day less what this phone sent it. The
+package draws the notification and only knows this phone's count (and
+Health Connect's); this is how the user's day across devices gets there.
+
+```ts
+// After each sync with your server:
+const shown = await StepTracker.setOtherDevicesSteps(today, serverDay - thisPhoneSent);
+// 72 on this phone, 629 on the other: shown.steps === 701, then 702, 703…
+// shown.otherDevicesSteps === 629
+```
+
+Today's figure is added to:
+
+- the notification;
+- `stepsChanged`, `getTodaySteps()` and the snapshot the lifecycle calls
+  return, with `otherDevicesSteps` saying how much of `steps` it is;
+  `distance` and `calories` include its share, from this profile's stride and
+  weight;
+- the daily goal: `goalProgressChanged` and `goalReached` fire off the
+  total, at once when the call takes the day past the goal.
+
+It keeps counting live: this phone's steps move the total as they come.
+It is never part of this phone's own figures — `deviceSteps`, `stepSource`
+and every `ResolvedStepSource`, `getStepsForDate()`, history and stats, the
+weekly and monthly goals (stored history), Health Connect writes, uploads.
+A [verification snapshot](#getverificationsnapshotdate-string-options-promiseverificationsnapshot)
+carries it apart, as `otherDevicesSteps`, so your server never counts it
+twice.
+
+Pass what this phone's own number does not already hold: if it reported a
+watch's steps (`stepSource.usedExternal`), take what it reported off your
+server's total, not `deviceSteps`. `0` clears it. Each day's value is kept for
+a week, and the day after today too for a server a zone ahead; only today's
+is shown. `resetToday()` leaves it. Rejects with `E_INVALID_CONFIG` for a
+malformed date or a count that is not a whole number from 0 to 1,000,000.
+Resolves with today's snapshot as shown.
 
 ### `getYesterdaySteps(): Promise<DayRecord>`
 ### `getStepsForDate(date: string): Promise<DayRecord>`
@@ -269,6 +312,7 @@ split out.
                               // | 'rate_limited' (2.5)
   resolved: { steps: 8240, kind: 'watch', packageName: 'com.fitbit.FitbitMobile',
               usedExternal: true, merged: false, manualStepsExcluded: 0, ... },
+  otherDevicesSteps: 0,       // setOtherDevicesSteps() for the day, in none of the above (2.6)
   capabilities: { hasStepCounter: true, hasStepDetector: true,
                   manufacturer: 'samsung', model: 'SM-S928B', sdkInt: 35 },
   health: { recoveryCount: 4, lastRecoveryReason: 'watchdog',
@@ -287,6 +331,13 @@ from 1.x: the 1.5 shape if it carries `integrity` (and `suspectSteps`), the
 1.4 shape if not. Neither removed or renamed anything version 2 has, so both
 parse as version 2 with those fields missing.
 `libraryVersion` says which release of this package produced it.
+
+`otherDevicesSteps` (2.6) is what your app set for the day with
+[`setOtherDevicesSteps()`](#setotherdevicesstepsdate-steps-promisestepsnapshot),
+`0` when nothing - the figure the notification and `getTodaySteps()` added
+on top. It is in none of the snapshot's other figures, so a server adding
+up a user's devices takes this phone's from `deviceSteps` or `resolved` and
+never counts the others twice.
 
 The second argument, `{ sign?, nonce?, include?, healthConnectRecordTypes? }`,
 signs the snapshot with the install's Keystore key and echoes a server-issued
@@ -322,7 +373,11 @@ const snapshot = await StepTracker.getVerificationSnapshot(date, {
   `'timeout'`, `'failed'` or `'rate_limited'` (2.5). The snapshot is still
   returned and signed. Unlike
   `sources`, it does not follow the step-source policy: an explicit ask reads
-  whenever the provider and the grant allow.
+  whenever the provider and the grant allow. Where `sources` are read too,
+  the records come from that same read (2.6) - the day is read once - and
+  only a type it does not cover, distance when `healthConnectReadTypes`
+  leaves it out, is read on its own. Up to 10,000 records of a type, the
+  newest when there are more, with `truncated: true`.
 - `include` is echoed in a fixed order, so a server can tell "asked for and
   empty" from "not asked for". Without `include` the snapshot is exactly the
   2.0 shape, and `schemaVersion` stays `2` - these are new fields.
@@ -1273,6 +1328,15 @@ From 2.5 the package spends little of it, and backs off when it runs out:
 - **Headroom.** The refresh the step sensor asks for while walking stands
   down once this process has used half of either window, leaving the rest
   for reads someone is waiting for.
+- **The permission check, on Android 13 and lower** (2.6). There it is a call
+  into the Health Connect app, which refuses it too once the quota is used
+  up, so it counts on the read quota and waits out the breaker like a read.
+  A check that fails or is held back keeps the last answer - never "nothing
+  granted" - and that answer is reused for five seconds like any other. On
+  Android 14 and later the check is answered by the system's package
+  manager, which Health Connect does not meter.
+- **One read per snapshot** (2.6). A verification snapshot that asks for its
+  day's raw records takes them from the read its `sources` make.
 
 `HealthConnectStatus.rateLimit` shows where the app stands: whether reads or
 writes are held back and for how long, and the calls this package made in
@@ -1392,9 +1456,10 @@ allowed reads.
 
 #### How `'auto'` merges
 
-Each Health Connect read works out how far ahead the best external source is
-*allowed* to be — its lead — stores it as today's baseline, and the number
-shown becomes `deviceSteps + lead`; every step the phone counts moves it.
+Each Health Connect read works out how far ahead each external source is
+*allowed* to be — its lead — and the source allowed the most answers. Its
+lead is stored as today's baseline, and the number shown becomes
+`deviceSteps + lead`; every step the phone counts moves it.
 
 | Source | Allowed lead | Why |
 |---|---|---|
@@ -1408,6 +1473,13 @@ shown number is monotonic and goals key off it. The phone's raw count is what
 gets written to Health Connect, never the merged number. An aggregator that
 sums two origins cannot double the display, and a phone-side algorithm that
 counts 5% high cannot creep it upward sync after sync.
+
+With several apps holding steps for the day, the one whose allowed lead is
+largest answers (2.6), a trusted one on a tie; with none ahead of the
+phone, the phone answers and `externalSteps` is the most any app counted.
+Before 2.6 the app with the most steps was picked first and its trust
+checked after, so Google Fit's 9,000 on this phone - allowed to add nothing
+to a day the phone covered - kept a watch relay's 8,000 off a phone's 5,000.
 
 #### What counts as a wearable: `wearableTrust`
 
@@ -1610,6 +1682,12 @@ saying where it came from.
 
 `getHistory()` is the exception: it returns this device's stored rows verbatim,
 because its `synced` / `syncedRemote` flags describe local records.
+
+The user's other devices, as your app reports them with
+[`setOtherDevicesSteps()`](#setotherdevicesstepsdate-steps-promisestepsnapshot),
+are added on top of the resolved number for today only where it is shown:
+`getTodaySteps()`, `stepsChanged`, the notification and the daily goal.
+Every resolved record, and `stepSource` on a snapshot, stays this phone's.
 
 Under `fraudDetection.mode: 'exclude'`, the flagged steps come out of this
 device's count before any source competes, everywhere above and in the
@@ -1828,7 +1906,7 @@ warns once. Use `removeAllListeners()` when that is really what you mean.
 
 | Event | Payload |
 |---|---|
-| `stepsChanged` | `StepSnapshot`. Throttled by `eventThrottleMs` (default 500 ms). |
+| `stepsChanged` | `StepSnapshot`. Throttled by `eventThrottleMs` (default 500 ms); also sent at once when `setOtherDevicesSteps()` moves today's total (2.6). |
 | `goalReached` | `{ type: 'daily' \| 'weekly' \| 'monthly', goal, steps, date, timestamp }`. Fires at most once per period for a goal - again if the goal is raised and the new one reached that period, never for a lower one (2.3.1). |
 | `goalProgressChanged` | `{ type, goal, steps, progress, date }`. Fires when the whole-percent bucket changes. |
 | `trackingStateChanged` | `{ state, source, reason }`. `reason` is `'started'`, `'boot'`, `'restored_sticky'`, `'restored_watchdog'`, `'restored_foreground'`, `'paused'`, `'no_sensor'`, etc. |
@@ -1979,5 +2057,12 @@ Once connected, `sources` lists the apps competing to supply steps and
 Re-reads on `healthConnectStatusChanged`, on `stepSourceChanged`, and on every
 foreground — the user grants permissions and installs the provider in another
 app, so coming back is the only moment it can be noticed. Options:
-`backgroundRead`, `historyRead`, `refreshOnForeground` (default true) and
-`sourceWindowDays` (default 7).
+`backgroundRead`, `historyRead`, `refreshOnForeground` (default true),
+`sourceWindowDays` (default 7) and `readSources` (default true, 2.6).
+
+Every re-read with sources on reads Health Connect for them - the last
+`sourceWindowDays` and today - against its [rate limits](#rate-limits). A
+screen that only connects Health Connect passes `readSources: false`: the
+hook then reads the status alone, `sources`, `hasWearable` and `current`
+stay empty, and a source changing does not make it re-read. The actions,
+`selectSource()` included, work as before.

@@ -132,20 +132,75 @@ class StepTrackerCore private constructor(context: Context) {
     @Volatile
     var onDayEnded: (() -> Unit)? = null
 
+    /**
+     * Told when the number shown for today moved with no sample to carry it:
+     * the app set what the user's other devices counted. The service
+     * redraws its notification from it, in-process - a service command from
+     * an app in the background could be refused. Only posts.
+     */
+    @Volatile
+    var onShownChanged: (() -> Unit)? = null
+
+    /**
+     * What the app says the user's other devices counted, by day - see
+     * [setOtherDevicesSteps]. In memory, for the paths that run per step.
+     */
+    @Volatile
+    private var otherDevices: Map<String, Int> = state.otherDevicesSteps
+
+    private val otherDevicesLock = Any()
+
     init {
         // Exclude mode: a verdict that moved today's flagged total moved the
         // shown number too, and JS hears about it without waiting for a step.
         integrity.onLiveChanged = { emitLiveSteps() }
     }
 
-    /** `stepsChanged` with the live count as shown, for a change no sensor sample carried. */
-    private fun emitLiveSteps() {
+    /**
+     * `stepsChanged` with the live count as shown, for a change no sensor
+     * sample carried. Returns what was shown.
+     */
+    private fun emitLiveSteps(): StepSnapshot {
         val live = engine.snapshot()
         val resolution = resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+        val shown = displaySnapshot(live, resolution)
         StepEventBus.emit(
             StepEventBus.Events.STEPS_CHANGED,
-            com.steptrackerpro.util.Bridge.snapshotMap(displaySnapshot(live, resolution), resolution)
+            com.steptrackerpro.util.Bridge.snapshotMap(shown, resolution)
         )
+        return shown
+    }
+
+    // ---- other devices ---------------------------------------------------
+
+    /** What the app last said the user's other devices counted on [date]; 0 when it said nothing. */
+    fun otherDevicesSteps(date: String): Int = otherDevices[date] ?: 0
+
+    /**
+     * What the user's other devices counted on [date], as the app knows it -
+     * its server's total for the day less what this phone sent it. Shown on
+     * top of this phone's number for today: the notification,
+     * `stepsChanged`, `getTodaySteps()` and the daily goal, live as this
+     * phone keeps counting. Never part of this phone's own figures - its
+     * count and `deviceSteps`, history, stats, Health Connect writes,
+     * uploads - and carried apart in a snapshot, as `otherDevicesSteps`, so
+     * a server never counts it twice. 0 clears it. Kept for a week, so a
+     * snapshot of a recent day carries its own; only today's is shown.
+     */
+    fun setOtherDevicesSteps(date: String, steps: Int) {
+        synchronized(otherDevicesLock) {
+            val next = HashMap(otherDevices)
+            if (steps > 0) next[date] = steps.coerceAtMost(MAX_OTHER_DEVICES_STEPS) else next.remove(date)
+            val kept = StepStateStore.keptOtherDevices(next, DateKeys.today())
+            otherDevices = kept
+            state.otherDevicesSteps = kept
+        }
+        if (date != liveToday().date) return
+        // The number shown moved with nothing else to say so: JS, the daily
+        // goal and the shade hear about it now, not at the next step.
+        val shown = emitLiveSteps()
+        followDailyGoal(shown, config())
+        onShownChanged?.invoke()
     }
 
     // The in-memory intervals below - the event throttle, the source refresh,
@@ -369,10 +424,30 @@ class StepTrackerCore private constructor(context: Context) {
             }
         }
 
-        // Goals follow the number on screen. Under `auto` that number is
-        // monotonic for the day (see StepContinuity), and GoalTracker fires
-        // each goal once per period regardless, so a wearable total that
-        // arrives in jumps cannot make a goal fire twice.
+        followDailyGoal(shown, config)
+
+        refreshTodaySourcesIfStale()
+
+        if (force || engine.shouldCommit(config.persistEveryNSteps)) {
+            val totals = engine.consumeCommit()
+            scope.launch(writeLane) {
+                repository.saveDay(totals)
+                runCatching { integrity.flush() }
+                runCatching { flushMirrorMinutes() }
+                checkPeriodGoals(totals)
+            }
+        }
+        integrity.maybeEvaluate()
+    }
+
+    /**
+     * Goals follow the number on screen. Under `auto` that number is
+     * monotonic for the day (see StepContinuity), and GoalTracker fires
+     * each goal once per period regardless, so a wearable total that
+     * arrives in jumps cannot make a goal fire twice. Other devices' steps
+     * are in it: the user walked them.
+     */
+    private fun followDailyGoal(shown: StepSnapshot, config: StepTrackerConfig) {
         val percent = metrics.goalPercent(shown.steps, config.dailyGoal)
         if (goals.progressBucketChanged(GoalTracker.TYPE_DAILY, percent)) {
             StepEventBus.emit(
@@ -390,19 +465,6 @@ class StepTrackerCore private constructor(context: Context) {
         goals.checkDaily(shown.date, shown.steps, config.dailyGoal)?.let { reached ->
             emitGoalReached(reached, shown.date)
         }
-
-        refreshTodaySourcesIfStale()
-
-        if (force || engine.shouldCommit(config.persistEveryNSteps)) {
-            val totals = engine.consumeCommit()
-            scope.launch(writeLane) {
-                repository.saveDay(totals)
-                runCatching { integrity.flush() }
-                runCatching { flushMirrorMinutes() }
-                checkPeriodGoals(totals)
-            }
-        }
-        integrity.maybeEvaluate()
     }
 
     private fun emitGoalReached(reached: GoalTracker.Reached, date: String) {
@@ -943,7 +1005,15 @@ class StepTrackerCore private constructor(context: Context) {
      * with `trustedWearable` stamped - or nothing, under the same rules that
      * keep every other read off Health Connect when it cannot be consulted.
      */
-    suspend fun unresolvedSources(date: String, fresh: Boolean = false): SourceList {
+    suspend fun unresolvedSources(
+        date: String,
+        fresh: Boolean = false,
+        /**
+         * Keeps the raw records the read pages through - see
+         * [HealthConnectManager.readSourcesByDay]. Only with [fresh].
+         */
+        capture: com.steptrackerpro.health.RecordCapture? = null
+    ): SourceList {
         if (!shouldConsultHealthConnect()) return SourceList(emptyList(), HealthConnectRead.NOT_CONSULTED)
         // Fresh for evidence that gets signed: a cached list may be half a
         // minute old, and a hot-path timeout is too short for a busy day.
@@ -953,7 +1023,8 @@ class StepTrackerCore private constructor(context: Context) {
             date,
             timeoutMs = if (fresh) HC_RANGE_READ_TIMEOUT_MS else HC_READ_TIMEOUT_MS,
             useCache = !fresh,
-            staleIfRefused = false
+            staleIfRefused = false,
+            capture = capture.takeIf { fresh }
         )
         return list.copy(sources = stampTrust(list.sources))
     }
@@ -1006,7 +1077,17 @@ class StepTrackerCore private constructor(context: Context) {
         if (today) engine.reconcile()
         val device = dayTotals(date)
         val report = integrity.report(date)
-        val sourceList = unresolvedSources(date, fresh = true)
+        // Whatever keeps the raw records from being read is known before the
+        // sources are read, so the sources' read can keep the records it
+        // pages through: one read of the day, where there used to be two.
+        val recordsWanted = SnapshotPart.HEALTH_CONNECT_RECORDS in include
+        val recordsBlocked = if (recordsWanted) recordsBlocked(recordTypes) else null
+        val capture = if (recordsWanted && recordsBlocked == null) {
+            com.steptrackerpro.health.RecordCapture(recordTypes)
+        } else {
+            null
+        }
+        val sourceList = unresolvedSources(date, fresh = true, capture = capture)
         val sources = sourceList.sources
         val resolved = resolveDay(date)
         val capabilities = com.steptrackerpro.util.PermissionHelper.capabilities(
@@ -1037,6 +1118,9 @@ class StepTrackerCore private constructor(context: Context) {
             // thing as "no other apps", and signed along with it.
             "sourcesStatus" to sourceList.healthConnect,
             "resolved" to resolved.toMap(),
+            // What the app said the user's other devices counted, apart: in
+            // none of the figures above, so a server never counts it twice.
+            "otherDevicesSteps" to otherDevicesSteps(date),
             "capabilities" to mapOf(
                 "hasStepCounter" to capabilities["hasStepCounter"],
                 "hasStepDetector" to capabilities["hasStepDetector"],
@@ -1084,8 +1168,9 @@ class StepTrackerCore private constructor(context: Context) {
             snapshot["motionWindowsStatus"] = if (config().motionSamplingEnabled) "enabled" else "disabled"
             snapshot["motionWindows"] = motionWindows(date, date).map { it.toMap() }
         }
-        if (SnapshotPart.HEALTH_CONNECT_RECORDS in include) {
-            snapshot["healthConnectRecords"] = snapshotRecords(date, recordTypes)
+        if (recordsWanted) {
+            snapshot["healthConnectRecords"] =
+                snapshotRecords(date, recordTypes, recordsBlocked, capture, sourceList.healthConnect)
         }
         if (nonce != null) snapshot["nonce"] = nonce
         if (!sign) return snapshot
@@ -1094,39 +1179,74 @@ class StepTrackerCore private constructor(context: Context) {
     }
 
     /**
+     * Why a snapshot's raw records cannot be read - its `status` - or null
+     * when they can. An explicit ask, so unlike `sources` it does not follow
+     * the step-source policy: only the provider, the grants for [types] and
+     * `healthConnectEnabled` decide.
+     */
+    private suspend fun recordsBlocked(types: Set<HealthConnectManager.RecordType>): String? = when {
+        !config().healthConnectEnabled -> "disabled"
+        healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE -> "unavailable"
+        // In the background that includes the background grant, without
+        // which the read would be refused.
+        !healthConnect.canReadRecords(types) || !healthConnect.canReadNow() -> "not_granted"
+        else -> null
+    }
+
+    /**
      * One day's raw Health Connect records for a snapshot, and whether they
-     * could be read. An explicit ask, so unlike `sources` it does not follow
-     * the step-source policy - only the provider, the grants for [types] and
-     * `healthConnectEnabled` decide. Never throws: a snapshot is still worth
-     * signing without the records, and `status` says why they are missing.
+     * could be read: [blocked], when [recordsBlocked] said they cannot. Where
+     * the snapshot's sources were read - [sourcesRead] says how that went -
+     * [capture] holds the records that read went through, and only a type it
+     * did not go through is read here; otherwise every type is. Never
+     * throws: a snapshot is still worth signing without the records, and
+     * `status` says why they are missing.
      */
     private suspend fun snapshotRecords(
         date: String,
-        types: Set<HealthConnectManager.RecordType>
+        types: Set<HealthConnectManager.RecordType>,
+        blocked: String?,
+        capture: com.steptrackerpro.health.RecordCapture?,
+        sourcesRead: String
     ): Map<String, Any?> {
         val names = types.map { it.jsValue }
         fun result(status: String, records: Any? = emptyList<Any>(), truncated: Any? = false) =
             linkedMapOf("status" to status, "recordTypes" to names, "records" to records, "truncated" to truncated)
 
-        if (!config().healthConnectEnabled) return result("disabled")
-        if (healthConnect.availability() != HealthConnectManager.Availability.AVAILABLE) return result("unavailable")
-        // In the background that includes the background grant, without
-        // which the read would be refused.
-        if (!healthConnect.canReadRecords(types) || !healthConnect.canReadNow()) return result("not_granted")
+        if (blocked != null) return result(blocked)
         val start = DateKeys.startOfDayInstant(date)
         val end = minOf(DateKeys.endOfDayInstant(date), Instant.now())
         if (!end.isAfter(start)) return result("read")
-        val read = try {
-            withTimeoutOrNull(HC_RECORDS_TIMEOUT_MS) { healthConnect.readRecords(start, end, types) }
-                ?: return result("timeout")
+
+        var failed = "failed"
+        suspend fun readOnItsOwn(only: Set<HealthConnectManager.RecordType>): Map<String, Any?>? = try {
+            withTimeoutOrNull(HC_RECORDS_TIMEOUT_MS) { healthConnect.readRecords(start, end, only) }
+                .also { if (it == null) failed = "timeout" }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (_: com.steptrackerpro.health.HealthConnectRateLimitedException) {
-            return result(HealthConnectRead.RATE_LIMITED)
+            failed = HealthConnectRead.RATE_LIMITED
+            null
         } catch (_: Exception) {
-            return result("failed")
+            null
         }
-        return result("read", read["records"], read["truncated"])
+
+        if (capture == null || sourcesRead == HealthConnectRead.NOT_CONSULTED) {
+            val read = readOnItsOwn(types) ?: return result(failed)
+            return result("read", read["records"], read["truncated"])
+        }
+        // The sources' read went through the day already.
+        if (sourcesRead == HealthConnectRead.TIMED_OUT) return result("timeout")
+        capture.failureStatus?.let { return result(it) }
+        // It failed before reaching the records - no provider, say: a
+        // second try would fail the same way.
+        if (!capture.used && sourcesRead != HealthConnectRead.READ) {
+            return result(if (sourcesRead == HealthConnectRead.RATE_LIMITED) sourcesRead else "failed")
+        }
+        val missing = capture.missing
+        if (missing.isNotEmpty()) capture.include(readOnItsOwn(missing) ?: return result(failed))
+        val (records, truncated) = capture.result()
+        return result("read", records, truncated)
     }
 
     /**
@@ -1545,8 +1665,10 @@ class StepTrackerCore private constructor(context: Context) {
 
     /**
      * The snapshot as it should be shown, with a wearable's numbers swapped in
-     * where one owns the day. `state` and `source` still describe this device's
-     * own sensor, which is a separate question from where the count came from.
+     * where one owns the day, and the steps the app says the user's other
+     * devices counted on top - see [setOtherDevicesSteps]. `state` and
+     * `source` still describe this device's own sensor, which is a separate
+     * question from where the count came from.
      */
     fun displaySnapshot(base: StepSnapshot = engine.snapshot()): StepSnapshot =
         displaySnapshot(
@@ -1561,16 +1683,30 @@ class StepTrackerCore private constructor(context: Context) {
         val totals = resolution.totals
         // Swapped when another source won, and when exclude mode took
         // flagged steps out of this device's own count.
-        if (!resolution.usedExternal && totals.steps == base.steps) {
-            return if (base.suspectSteps == totals.suspectSteps) base else base.copy(suspectSteps = totals.suspectSteps)
+        val resolved = when {
+            resolution.usedExternal || totals.steps != base.steps -> base.copy(
+                steps = totals.steps,
+                distance = totals.distance,
+                calories = totals.calories,
+                goalProgress = metrics.goalProgress(totals.steps, base.dailyGoal),
+                goalReached = base.dailyGoal > 0 && totals.steps >= base.dailyGoal,
+                suspectSteps = totals.suspectSteps
+            )
+            base.suspectSteps == totals.suspectSteps -> base
+            else -> base.copy(suspectSteps = totals.suspectSteps)
         }
-        return base.copy(
-            steps = totals.steps,
-            distance = totals.distance,
-            calories = totals.calories,
-            goalProgress = metrics.goalProgress(totals.steps, base.dailyGoal),
-            goalReached = base.dailyGoal > 0 && totals.steps >= base.dailyGoal,
-            suspectSteps = totals.suspectSteps
+        val other = otherDevicesSteps(base.date)
+        if (other <= 0) return resolved
+        // The same user's walking, so distance and calories follow this
+        // profile's stride and weight.
+        val steps = resolved.steps + other
+        return resolved.copy(
+            steps = steps,
+            distance = resolved.distance + metrics.distance(other),
+            calories = resolved.calories + metrics.calories(other),
+            goalProgress = metrics.goalProgress(steps, base.dailyGoal),
+            goalReached = base.dailyGoal > 0 && steps >= base.dailyGoal,
+            otherDevicesSteps = other
         )
     }
 
@@ -1602,7 +1738,8 @@ class StepTrackerCore private constructor(context: Context) {
         date: String,
         timeoutMs: Long,
         useCache: Boolean,
-        staleIfRefused: Boolean = false
+        staleIfRefused: Boolean = false,
+        capture: com.steptrackerpro.health.RecordCapture? = null
     ): SourceList {
         if (useCache) {
             confirmCachedSources()
@@ -1614,7 +1751,7 @@ class StepTrackerCore private constructor(context: Context) {
         val coverage = if (date == DateKeys.today()) coverageStartForToday() else 0L
         return try {
             val day = withTimeoutOrNull(timeoutMs) {
-                healthConnect.readSourcesByDay(start, end, coverage)
+                healthConnect.readSourcesByDay(start, end, coverage, capture = capture)
             } ?: return SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
             val sources = day.byDate[date].orEmpty()
             sourceCache.put(date, sources, detailed = date in day.detailed)
@@ -2150,6 +2287,9 @@ class StepTrackerCore private constructor(context: Context) {
 
         /** Stands in for "this device" in [StepStateStore.lastResolvedSource]. */
         const val SELF_SOURCE_KEY = "__self__"
+
+        /** The most `setOtherDevicesSteps()` takes for a day - a bound, not a guess at anyone's walking. */
+        const val MAX_OTHER_DEVICES_STEPS = 1_000_000
 
         /** Floor between sensor-triggered Health Connect refreshes of today. */
         private const val SOURCE_REFRESH_MIN_INTERVAL_MS = 60_000L

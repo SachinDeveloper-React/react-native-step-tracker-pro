@@ -1065,7 +1065,15 @@ export interface StepSnapshot {
    * `steps` under `fraudDetection.mode: 'exclude'`.
    */
   suspectSteps: number;
-  /** Which source the numbers above came from. */
+  /**
+   * Of `steps`, what your app said the user's other devices counted - see
+   * `setOtherDevicesSteps()`. `distance` and `calories` include their share,
+   * from this profile's stride and weight; `stepSource` never does. `0`
+   * when nothing was set for the day. Always sent from 2.6, optional in the
+   * type for snapshots built by hand.
+   */
+  otherDevicesSteps?: number;
+  /** Which source the numbers above came from - this phone's resolution, other devices aside. */
   stepSource: ResolvedStepSource;
 }
 
@@ -1178,6 +1186,13 @@ export interface VerificationSnapshot {
   sourcesStatus?: HealthConnectRead;
   /** What the current policy resolved to, for comparison only. */
   resolved: ResolvedStepSource;
+  /**
+   * What your app said the user's other devices counted on the day, with
+   * `setOtherDevicesSteps()` - apart from every figure above, none of which
+   * includes it, so a server never counts it twice. `0` when nothing was
+   * set; kept for a week. From 2.6.
+   */
+  otherDevicesSteps?: number;
   capabilities: Pick<
     DeviceCapabilities,
     'hasStepCounter' | 'hasStepDetector' | 'manufacturer' | 'model' | 'sdkInt'
@@ -1583,7 +1598,11 @@ export interface ResolvedStepSource {
   appName: string;
   /** What this phone's sensor counted, whether or not it won. */
   deviceSteps: number;
-  /** What the best external source counted, whether or not it won. */
+  /**
+   * What the best external source counted, whether or not it won. Under
+   * `'auto'` that is the one its trust lets furthest ahead of this phone
+   * (2.6) - or, with none ahead, the one with the most steps.
+   */
   externalSteps: number;
   /** True when `steps` came from Health Connect rather than this device. */
   usedExternal: boolean;

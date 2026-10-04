@@ -14,58 +14,19 @@ import com.steptrackerpro.health.StepSourceResolver
 /** Conversions between package models and the React Native bridge. */
 object Bridge {
 
-    fun snapshot(snapshot: StepSnapshot): WritableMap = Arguments.createMap().apply {
-        putString("date", snapshot.date)
-        putInt("steps", snapshot.steps)
-        putDouble("distance", round(snapshot.distance, 2))
-        putDouble("calories", round(snapshot.calories, 2))
-        putInt("dailyGoal", snapshot.dailyGoal)
-        putDouble("goalProgress", round(snapshot.goalProgress, 4))
-        putBoolean("goalReached", snapshot.goalReached)
-        putString("state", snapshot.state.jsValue)
-        putString("source", snapshot.source.jsValue)
-        putDouble("timestamp", snapshot.timestamp.toDouble())
-        // This device's own recovered share; a Health Connect winner does not
-        // change it, so it is not touched by the resolution overload below.
-        putInt("recoveredSteps", snapshot.recoveredSteps)
-        putInt("suspectSteps", snapshot.suspectSteps)
-    }
-
     /**
-     * The snapshot as JS sees it once a Health Connect source has been picked.
+     * A snapshot as JS sees it, as
+     * [com.steptrackerpro.core.StepTrackerCore.displaySnapshot] made it - the
+     * picked source's numbers, other devices' steps on top - with the
+     * resolution behind it as `stepSource`.
      *
      * `state` and `source` still describe this device's sensor even when the
      * numbers came from a watch: they answer "is the foreground service
      * running", which stays a real and separate question. Where the count came
      * from is in `stepSource`.
      */
-    fun snapshot(
-        live: StepSnapshot,
-        resolution: StepSourceResolver.Resolution
-    ): WritableMap = snapshot(live).apply {
-        val totals = resolution.totals
-        putInt("suspectSteps", totals.suspectSteps)
-        // Swapped when another source won, and when exclude mode took flagged
-        // steps out of this device's own count.
-        if (!resolution.usedExternal && totals.steps == live.steps) {
-            putMap("stepSource", map(resolution.toMap()))
-            return@apply
-        }
-        putInt("steps", totals.steps)
-        putDouble("distance", round(totals.distance, 2))
-        putDouble("calories", round(totals.calories, 2))
-        // Goal progress has to follow the number being displayed, or a user on
-        // 12,000 watch steps sees a half-full ring driven by the phone's 5,000.
-        val goal = live.dailyGoal
-        val progress = if (goal > 0) {
-            (totals.steps.toDouble() / goal).coerceIn(0.0, 1.0)
-        } else {
-            0.0
-        }
-        putDouble("goalProgress", round(progress, 4))
-        putBoolean("goalReached", goal > 0 && totals.steps >= goal)
-        putMap("stepSource", map(resolution.toMap()))
-    }
+    fun snapshot(shown: StepSnapshot, resolution: StepSourceResolver.Resolution): WritableMap =
+        map(snapshotMap(shown, resolution))
 
     fun resolvedDay(resolution: StepSourceResolver.Resolution): WritableMap =
         day(resolution.totals).apply {
@@ -83,8 +44,12 @@ object Bridge {
         "state" to snapshot.state.jsValue,
         "source" to snapshot.source.jsValue,
         "timestamp" to snapshot.timestamp,
+        // This device's own recovered and flagged shares; a Health Connect
+        // winner does not change them.
         "recoveredSteps" to snapshot.recoveredSteps,
-        "suspectSteps" to snapshot.suspectSteps
+        "suspectSteps" to snapshot.suspectSteps,
+        // Of `steps`, what the app said the user's other devices counted.
+        "otherDevicesSteps" to snapshot.otherDevicesSteps
     )
 
     fun snapshotMap(
