@@ -778,6 +778,84 @@ class IntegrityPipelineTest {
     }
 
     @Test
+    fun resetTodayAndClearHistoryForgetOtherDevicesSteps() = runBlocking {
+        val today = DateKeys.today()
+        val yesterday = DateKeys.yesterday()
+        try {
+            core.setOtherDevicesSteps(today, 629)
+            core.setOtherDevicesSteps(yesterday, 4_000)
+
+            // A reset day starts from nothing - today's figure goes with it.
+            core.resetToday()
+            assertEquals(0, core.otherDevicesSteps(today))
+            assertEquals(0, core.displaySnapshot().otherDevicesSteps)
+            assertEquals(4_000, core.otherDevicesSteps(yesterday))
+
+            // Another account takes the phone: none of the last one's figures stay.
+            core.setOtherDevicesSteps(today, 300)
+            core.clearHistory()
+            assertEquals(0, core.otherDevicesSteps(today))
+            assertEquals(0, core.otherDevicesSteps(yesterday))
+            assertEquals(emptyMap<String, Int>(), core.state.otherDevicesSteps)
+            assertEquals(core.engine.snapshot().steps, core.displaySnapshot().steps)
+        } finally {
+            core.setOtherDevicesSteps(today, 0)
+            core.setOtherDevicesSteps(yesterday, 0)
+        }
+    }
+
+    @Test
+    fun countFromStartsTodayOverAndIsSignedIntoTheSnapshot() = runBlocking {
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        core.engine.onCounterSample(40_000f, now - 60_000L)
+        core.engine.onCounterSample(40_300f, now - 30_000L)
+        assertTrue(core.engine.snapshot().steps > 0)
+        val at = now - 10_000L
+        try {
+            core.setCountFrom(at)
+
+            // This phone cannot tell its steps before [at] from the rest:
+            // today starts over, stored as such.
+            assertEquals(0, core.displaySnapshot().steps)
+            assertEquals(0, core.dayTotals(today).steps)
+            eventually { core.repository.getDay(today).steps == 0 }
+            // The first sample after drops what the counter moved before it,
+            // and counting carries on from there.
+            core.engine.onCounterSample(40_320f, now + 1_000L)
+            assertEquals(0, core.engine.snapshot().steps)
+            core.engine.onCounterSample(40_350f, now + 2_000L)
+            assertEquals(30, core.engine.snapshot().steps)
+
+            val snapshot = core.verificationSnapshot(today)
+            assertEquals(at, snapshot["countFrom"])
+            assertEquals(30, snapshot["deviceSteps"])
+            assertTrue((snapshot["coverageStartAt"] as Long) >= at)
+            val logged = core.integrity.report(today)["events"].let { list ->
+                @Suppress("UNCHECKED_CAST")
+                (list as List<Map<String, Any?>>).filter { it["type"] == IntegrityEvent.COUNT_FROM }
+            }
+            assertEquals(true, (logged.last()["detail"] as Map<*, *>)["restartedToday"])
+
+            // The same instant again - an app setting it on every launch -
+            // changes nothing; nor does an earlier one, which this phone
+            // could not give back what it dropped for.
+            core.setCountFrom(at)
+            assertEquals(30, core.engine.snapshot().steps)
+            core.setCountFrom(at - 3_600_000L)
+            assertEquals(30, core.engine.snapshot().steps)
+            assertEquals(at - 3_600_000L, core.verificationSnapshot(today)["countFrom"])
+
+            // Cleared: counted from the start again, and the snapshot says so.
+            core.setCountFrom(0L)
+            assertEquals(null, core.verificationSnapshot(today)["countFrom"])
+            assertEquals(30, core.engine.snapshot().steps)
+        } finally {
+            core.setCountFrom(0L)
+        }
+    }
+
+    @Test
     fun withDetectionOffNothingIsRecordedOrChanged() = runBlocking {
         core.updateConfig(StepTrackerConfig())
         val today = DateKeys.today()

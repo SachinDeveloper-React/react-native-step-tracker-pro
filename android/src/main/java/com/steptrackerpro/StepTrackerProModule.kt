@@ -220,6 +220,10 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 promise.reject("E_NO_SENSOR", "No step sensor on this device")
                 return@runSafely
             }
+            // Stop means stop: a start after the user stopped tracking counts
+            // nothing the counter moved in between - across midnight or a
+            // reboot too. Only the first sample after this start can do it.
+            if (core.state.stoppedByUser) core.state.dropNextGap = true
             // The user wants tracking, and the background work that comes
             // with it, back; the service schedules it as it starts.
             core.state.stoppedByUser = false
@@ -357,6 +361,29 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@launchSafely
             }
             core.setOtherDevicesSteps(date, steps.toInt())
+            promise.resolve(cachedSnapshot())
+        }
+    }
+
+    /**
+     * Counts nothing before [at] (epoch ms) - not this phone's steps, not any
+     * Health Connect app's; 0 clears it. See [StepTrackerCore.setCountFrom].
+     * Resolves with today's snapshot as shown. Validated in JS too.
+     */
+    @ReactMethod
+    override fun setCountFrom(at: Double, promise: Promise) {
+        launchSafely(promise) {
+            val ms = at.toLong()
+            val latest = System.currentTimeMillis() + MAX_COUNT_FROM_AHEAD_MS
+            val valid = at == 0.0 || (at == Math.floor(at) && ms >= EARLIEST_COUNT_FROM && ms <= latest)
+            if (!valid) {
+                promise.reject(
+                    "E_INVALID_CONFIG",
+                    "at must be epoch milliseconds, no more than a year ahead, or null to clear it"
+                )
+                return@launchSafely
+            }
+            core.setCountFrom(ms)
             promise.resolve(cachedSnapshot())
         }
     }
@@ -1562,5 +1589,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
         const val MAX_DELETE_DAYS = 3_660
 
         private val DATE_KEY = Regex("""\d{4}-\d{2}-\d{2}""")
+
+        /**
+         * 2000-01-01T00:00Z. Anything earlier is a mistake - most likely
+         * seconds passed for milliseconds - and would count everything.
+         */
+        private const val EARLIEST_COUNT_FROM = 946_684_800_000L
+
+        /** How far ahead countFrom may be: a year, past which it is a unit mistake too. */
+        private const val MAX_COUNT_FROM_AHEAD_MS = 366L * 24 * 60 * 60 * 1000
     }
 }

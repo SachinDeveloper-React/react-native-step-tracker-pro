@@ -492,6 +492,26 @@ class StepStateStore(context: Context) {
         get() = prefs.getBoolean(KEY_STOPPED_BY_USER, false)
         set(value) = prefs.edit().putBoolean(KEY_STOPPED_BY_USER, value).apply()
 
+    /**
+     * The first counter sample pins the anchor and counts nothing the counter
+     * moved before it: tracking was started again after the user stopped it,
+     * or `setCountFrom()` started today over. Stored, so a first sample that
+     * comes in a later process still drops the gap; cleared in the write that
+     * pins the anchor.
+     */
+    var dropNextGap: Boolean
+        get() = prefs.getBoolean(KEY_DROP_NEXT_GAP, false)
+        set(value) = prefs.edit().putBoolean(KEY_DROP_NEXT_GAP, value).apply()
+
+    /**
+     * Epoch ms before which nothing is counted - not by this phone, not by
+     * any Health Connect app; 0 when unset. See
+     * [StepTrackerCore.setCountFrom].
+     */
+    var countFromAt: Long
+        get() = prefs.getLong(KEY_COUNT_FROM, 0L)
+        set(value) = prefs.edit().putLong(KEY_COUNT_FROM, value.coerceAtLeast(0L)).apply()
+
     /** One atomic write for the hot path, instead of nine separate commits. */
     fun writeCounterState(
         bootId: Long,
@@ -504,7 +524,9 @@ class StepStateStore(context: Context) {
         lastElapsed: Long,
         recoveredToday: Int,
         /** Replaces [lateSteps] when given; left as it is otherwise. */
-        lateSteps: Map<String, Int>? = null
+        lateSteps: Map<String, Int>? = null,
+        /** Replaces [dropNextGap] when given, in the same write as the anchor. */
+        dropNextGap: Boolean? = null
     ) {
         val edit = prefs.edit()
             .putLong(KEY_BOOT_ID, bootId)
@@ -517,6 +539,7 @@ class StepStateStore(context: Context) {
             .putLong(KEY_LAST_ELAPSED, lastElapsed)
             .putInt(KEY_RECOVERED_TODAY, recoveredToday.coerceAtLeast(0))
         if (lateSteps != null) edit.putString(KEY_LATE_STEPS, encodeLateSteps(lateSteps))
+        if (dropNextGap != null) edit.putBoolean(KEY_DROP_NEXT_GAP, dropNextGap)
         edit.apply()
     }
 
@@ -528,6 +551,8 @@ class StepStateStore(context: Context) {
         private const val KEY_LATE_STEPS = "late_steps"
         private const val KEY_OTHER_DEVICES = "other_devices_steps"
         private const val KEY_STOPPED_BY_USER = "stopped_by_user"
+        private const val KEY_DROP_NEXT_GAP = "drop_next_gap"
+        private const val KEY_COUNT_FROM = "count_from_at"
 
         /** `2026-09-29=312;2026-09-28=5`. Anything unreadable is dropped rather than guessed at. */
         fun encodeLateSteps(owed: Map<String, Int>): String =

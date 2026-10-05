@@ -1258,6 +1258,38 @@ describe('setOtherDevicesSteps()', () => {
   });
 });
 
+describe('setCountFrom()', () => {
+  it('passes the instant through, and null as 0 to count everything again', async () => {
+    const at = Date.parse('2026-10-04T08:30:00Z');
+    native.when('setCountFrom', { date: '2026-10-04', steps: 0 });
+    await expect(StepTracker.setCountFrom(at)).resolves.toEqual({
+      date: '2026-10-04',
+      steps: 0,
+    });
+    await StepTracker.setCountFrom(null);
+    expect(native.calledWith('setCountFrom')).toEqual([[at], [0]]);
+  });
+
+  it('refuses seconds, fractions and far-future instants before native', async () => {
+    const now = Date.now();
+    const bad = [
+      Math.floor(now / 1000), // seconds, not milliseconds
+      now + 0.5,
+      now + 400 * 86_400_000,
+      -1,
+      Number.NaN,
+      '1791100000000' as unknown as number,
+    ];
+    for (const at of bad) {
+      await expect(StepTracker.setCountFrom(at)).rejects.toMatchObject({
+        code: 'E_INVALID_CONFIG',
+        message: expect.stringMatching(/epoch milliseconds/),
+      });
+    }
+    expect(native.calledWith('setCountFrom')).toHaveLength(0);
+  });
+});
+
 describe('useStepTracker()', () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

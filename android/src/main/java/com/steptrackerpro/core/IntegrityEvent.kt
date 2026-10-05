@@ -23,6 +23,12 @@ data class IntegrityEvent(
         const val TIMEZONE_CHANGED = "timezone_changed"
         const val REBOOT = "reboot"
         const val RESET_TODAY = "reset_today"
+        /**
+         * The app set when counting starts; `detail.countFrom` (epoch ms,
+         * null when cleared), `detail.previous`, and `detail.restartedToday`
+         * - whether today's count started over at the call.
+         */
+        const val COUNT_FROM = "count_from"
         const val HISTORY_CLEARED = "history_cleared"
         /** `detail.keys` lists the integrity-relevant config keys that changed. */
         const val CONFIG_CHANGED = "config_changed"

@@ -164,7 +164,11 @@ class StepCounterEngine(
     /** What one blank-anchor sample recovered: the active day's share, and other days'. */
     private class Recovered(val today: Int, val others: Map<String, Int>?)
 
-    private fun recover(steps: Int, fromMillis: Long, nowMillis: Long): Recovered {
+    private fun recover(gapSteps: Int, gapFrom: Long, nowMillis: Long): Recovered {
+        // Nothing before countFrom is counted. Steps whose time is unknown
+        // inside a gap that began before it are placed by time, as across
+        // midnight, and the share before it is dropped.
+        val (steps, fromMillis) = sinceCountFrom(gapSteps, gapFrom, nowMillis)
         if (steps <= 0) return Recovered(0, null)
         // A last reading that is in the future means the wall clock was set
         // back. There is no honest way to place the gap then; keep it on the
@@ -185,6 +189,20 @@ class StepCounterEngine(
         val today = shares[state.activeDate] ?: 0
         val others = shares.filterKeys { it != state.activeDate }.filterValues { it > 0 }
         return Recovered(today, others.takeIf { it.isNotEmpty() })
+    }
+
+    /**
+     * Of [steps] taken somewhere between [fromMillis] and [toMillis], the
+     * share after [StepStateStore.countFromAt], by time - and when that
+     * share starts. All of them when countFrom is unset or not inside the
+     * span; none when the span ends before it.
+     */
+    private fun sinceCountFrom(steps: Int, fromMillis: Long, toMillis: Long): Pair<Int, Long> {
+        val floor = state.countFromAt
+        if (floor <= 0L || floor <= fromMillis || toMillis <= fromMillis) return steps to fromMillis
+        if (floor >= toMillis) return 0 to toMillis
+        val kept = (steps.toLong() * (toMillis - floor) / (toMillis - fromMillis)).toInt()
+        return kept to floor
     }
 
     /**
@@ -292,7 +310,17 @@ class StepCounterEngine(
         // arrival otherwise.
         fun endOfGapSince(start: Long) =
             if (timed && eventAtMillis >= start) eventAtMillis else clockProvider()
-        if (state.anchorValue < 0f || bootIdMoved(currentBoot)) {
+        // The first sample since the user started tracking again after
+        // stopping it, or since countFrom started today over. Whatever the
+        // counter moved meanwhile - however long, across midnight or a
+        // reboot - is not counted: stop means stop. Recovery is for a
+        // tracker something else stopped. The mark is cleared in the same
+        // write that pins the anchor here.
+        val droppingGap = state.dropNextGap
+        if (droppingGap) {
+            anchorValue = rawValue
+            anchorSteps = state.stepsToday
+        } else if (state.anchorValue < 0f || bootIdMoved(currentBoot)) {
             // Steps accumulated between boot and this first sample are only
             // claimable when the counter really did restart - proven by the
             // reading going backwards, or by there being no previous reading at
@@ -309,8 +337,12 @@ class StepCounterEngine(
                 // the day begins, which is what lets a phone-side Health
                 // Connect source fill in the hours before it.
                 !hasLastRaw -> if (bootDate == state.activeDate) {
-                    state.coverageStartAt = currentBoot
-                    Recovered(rawValue.roundToInt(), null)
+                    // Since boot, or since countFrom when it came later.
+                    val (claimed, from) = sinceCountFrom(
+                        rawValue.roundToInt(), currentBoot, endOfGapSince(currentBoot)
+                    )
+                    state.coverageStartAt = from
+                    Recovered(claimed, null)
                 } else {
                     state.coverageStartAt = clockProvider()
                     Recovered(0, null)
@@ -352,10 +384,11 @@ class StepCounterEngine(
         if (total < 0) return null
 
         val previous = state.stepsToday
-        if (paused) {
+        if (paused || eventAtMillis < state.countFromAt) {
             // Absorb the delta into the anchor so paused steps never land in
             // the total, and the counter picks straight back up on resume.
-            // Whatever recover() apportioned is discarded with them.
+            // Whatever recover() apportioned is discarded with them. So are
+            // steps taken before countFrom, while it is still to come.
             state.writeCounterState(
                 bootId = currentBoot,
                 anchorValue = rawValue,
@@ -365,7 +398,8 @@ class StepCounterEngine(
                 stepsToday = previous,
                 lastEventAt = eventAtMillis,
                 lastElapsed = currentElapsed,
-                recoveredToday = state.recoveredToday
+                recoveredToday = state.recoveredToday,
+                dropNextGap = false.takeIf { droppingGap }
             )
             return null
         }
@@ -374,6 +408,19 @@ class StepCounterEngine(
         // what the sensor was seen counting.
         var observed = total - previous - recoveredNow
         var kept = total
+        // The first sample at or after countFrom, the one before it having
+        // come before: its steps were taken somewhere in between, and only
+        // the share after countFrom, by time, counts - a second's worth while
+        // walking, the share of the whole gap after a dead process.
+        val floor = state.countFromAt
+        var observedFrom = previousEventAt
+        if (observed > 0 && floor > 0L && previousEventAt in 1 until floor) {
+            val after = (observed.toLong() * (eventAtMillis - floor) / (eventAtMillis - previousEventAt)).toInt()
+            kept -= observed - after
+            observed = after
+            // And the minute timeline places them from countFrom on.
+            observedFrom = floor
+        }
         var owed: Map<String, Int>? = null
         val closedDay = takenOn?.takeIf { it < state.activeDate && observed > 0 }
         if (closedDay != null) {
@@ -382,24 +429,24 @@ class StepCounterEngine(
             // that day. They are that day's steps, not this one's.
             when (lateHandling()) {
                 LateHandling.OWN_DAY -> {
-                    kept = total - observed
+                    kept -= observed
                     owed = owedWith(closedDay, observed)
                 }
                 LateHandling.ACTIVE_DAY -> {
                     val credited = activeDayShare(observed)
-                    kept = total - (observed - credited)
+                    kept -= observed - credited
                     recoveredNow += credited
                     observed = 0
                 }
                 LateHandling.DROPPED -> {
-                    kept = total - observed
+                    kept -= observed
                     observed = 0
                 }
             }
-            if (kept != total) {
-                anchorValue = rawValue
-                anchorSteps = kept
-            }
+        }
+        if (kept != total) {
+            anchorValue = rawValue
+            anchorSteps = kept
         }
 
         state.writeCounterState(
@@ -414,13 +461,14 @@ class StepCounterEngine(
             // Never more than the day has: kept < previous + recoveredNow
             // only when the arithmetic clamped, and the share cannot exceed it.
             recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(kept),
-            lateSteps = owed
+            lateSteps = owed,
+            dropNextGap = false.takeIf { droppingGap }
         )
 
         backfill?.let { shares -> onBackfill?.invoke(shares, backfillReason) }
         // Late steps kept for their own day are judged there, in the minutes
         // they were taken in.
-        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed, timed)
+        if (observed > 0) onObserved?.invoke(observedFrom, eventAtMillis, observed, timed)
         if (owed != null) onLate?.invoke()
 
         if (kept == previous) return null
@@ -447,7 +495,10 @@ class StepCounterEngine(
         if (state.lastEventAt == 0L && state.lastRawValue < 0f) {
             state.coverageStartAt = eventAtMillis
         }
-        if (paused) return null
+        // A detector reports steps as they happen, so a start after a stop
+        // has no gap to drop; the mark only matters to the counter.
+        if (state.dropNextGap) state.dropNextGap = false
+        if (paused || eventAtMillis < state.countFromAt) return null
 
         val previousEventAt = state.lastEventAt
         // A step taken on a closed day goes where it does on the counter path.

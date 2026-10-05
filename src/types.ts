@@ -455,6 +455,8 @@ export type IntegrityEventType =
   | 'timezone_changed'
   | 'reboot'
   | 'reset_today'
+  /** `setCountFrom()`: `detail.countFrom`, `detail.previous`, `detail.restartedToday` (2.7). */
+  | 'count_from'
   | 'history_cleared'
   | 'config_changed'
   | 'sensor_changed'
@@ -1168,9 +1170,18 @@ export interface VerificationSnapshot {
   sensor: SensorSource;
   /**
    * Epoch ms from which this device covered the day; 0 = whole day. Only
-   * set on an install day, and only known for today — a past day reads 0.
+   * set on an install day - or the day `setCountFrom()` started over - and
+   * only known for today; a past day reads 0.
    */
   coverageStartAt: number;
+  /**
+   * Epoch ms before which nothing is counted, as `setCountFrom()` set it;
+   * `null` when unset. `deviceSteps`, `sources` and `resolved` already leave
+   * out everything before it - Health Connect's records each counted for
+   * their share after it - while `healthConnectRecords` are as stored, for
+   * a server to apply it to itself. From 2.7.
+   */
+  countFrom?: number | null;
   /**
    * Every Health Connect origin for the day, unresolved, including `self`
    * (this app's own mirror). Empty when Health Connect is unavailable,

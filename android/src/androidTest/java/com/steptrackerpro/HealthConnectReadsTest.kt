@@ -110,6 +110,38 @@ class HealthConnectReadsTest {
         assertTrue((records["records"] as List<*>).any { (it as Map<*, *>)["count"] == 1_234L })
     }
 
+    @Test
+    fun recordsBeforeCountFromAreNotCountedButKeptAsEvidence() = runBlocking {
+        core.updateConfig(core.config().copy(healthConnectReadTypes = listOf("steps")))
+        val records = setOf(HealthConnectManager.RecordType.STEPS)
+        val stored = (readsFor(setOf(SnapshotPart.HEALTH_CONNECT_RECORDS), records).second["healthConnectRecords"]
+            as Map<*, *>)["records"] as List<*>
+        val record = stored.map { it as Map<*, *> }.single { it["count"] == 1_234L }
+        val start = record["startTime"] as Long
+        val end = record["endTime"] as Long
+        // Signed in half way through the record.
+        val at = start + (end - start) / 2
+        try {
+            core.setCountFrom(at)
+            val snapshot = readsFor(setOf(SnapshotPart.HEALTH_CONNECT_RECORDS), records).second
+
+            assertEquals(at, snapshot["countFrom"])
+            // Counted for its share after countFrom...
+            val own = (snapshot["sources"] as List<*>).map { it as Map<*, *> }.single { it["isSelf"] == true }
+            assertEquals(com.steptrackerpro.health.CountFrom.shareAfter(1_234, start, end, at), own["steps"])
+            // ...and kept whole as evidence, for a server to apply countFrom to itself.
+            val evidence = (snapshot["healthConnectRecords"] as Map<*, *>)["records"] as List<*>
+            assertTrue(evidence.any { (it as Map<*, *>)["count"] == 1_234L })
+
+            // A countFrom after the record: nothing of it counts.
+            core.setCountFrom(end + 1_000L)
+            val after = readsFor(emptySet(), records).second
+            assertTrue((after["sources"] as List<*>).none { (it as Map<*, *>)["isSelf"] == true })
+        } finally {
+            core.setCountFrom(0L)
+        }
+    }
+
     private companion object {
         val PERMISSIONS = listOf(
             "android.permission.health.READ_STEPS",

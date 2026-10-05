@@ -56,6 +56,23 @@ set, and the app locked in recents. On Samsung, remove the app from "Sleeping
 apps". There is no API for any of it; the per-manufacturer instructions to
 show are in [OEM_BATTERY.md](OEM_BATTERY.md).
 
+## Steps walked while tracking was stopped did not show up
+
+Expected from 2.7: stop means stop. The counter keeps counting while
+tracking is stopped, but a start after `stopTracking()` counts nothing taken
+in between. Use `pauseTracking()` for a break that should not count either,
+and keep tracking on for one that should. A watch's steps in Health
+Connect over the same time are the watch's, and still count under
+`'auto'`.
+
+## The count went to zero after `setCountFrom()`
+
+Expected: this phone cannot tell when the steps it had already counted
+today were taken, so a `countFrom` later than today's start starts today
+over at the call; Health Connect is counted from `countFrom` itself. Set it
+once per session - the same value again changes nothing - rather than to
+`Date.now()` on every launch, which starts today over every time.
+
 ## Steps counted while the app was dead did not show up
 
 They should, on any device with `TYPE_STEP_COUNTER`: the first sample after a

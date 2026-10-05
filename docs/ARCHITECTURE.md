@@ -250,6 +250,36 @@ transition, and a pause the user set before the process died survives it. Arming
 the resume re-anchor on every start would discard exactly the steps this
 paragraph promises to recover.
 
+### Stop, and counting from
+
+Recovery is for a tracker something else stopped. When the user stops it
+with `stopTracking()`, the counter keeps counting all the same, and until
+2.7 the next `startTracking()` credited those steps like a kill's. Now the
+module marks the start - `StepStateStore.dropNextGap`, stored, since the
+first sample may come in a later process - when the last stop was the
+user's (`stoppedByUser`), and the engine's first counter sample takes the
+mark ahead of every other branch: it pins the anchor at its own reading with
+the day's count as it stands, and clears the mark in the same write. A
+rollover in between has already closed the day it ended; a reboot claims
+nothing since boot. Starts that are not the user's - boot, sticky restart,
+watchdog - never come after a user's stop, and recover as before.
+
+`setCountFrom(at)` floors counting at an instant (`countFromAt`). The engine
+drops a sample taken before it as it drops a paused one - absorbed into the
+anchor - and the first sample after it, the one before having come
+earlier, keeps only the share of its steps after it, by time. A gap the
+anchor was blank for is placed by `recover()`, which takes the share before
+the floor off before splitting it across days; an install's since-boot claim
+likewise. The steps already counted today cannot be placed in time, so the
+core starts today over - the `resetToday()` path, with a `count_from` event,
+coverage from the call and `dropNextGap` set - whenever the floor moves past
+both today's start and the floor before it. Health Connect is floored where it
+is read: `readSourcesByDay()` does not read days that ended before the floor,
+reads the floor's own day whole and counts each record for its share after it
+(`CountFrom`), and the aggregate fills ask for that day from the floor on. A
+`RecordCapture` keeps the records as stored: a snapshot's raw records are the
+evidence, and carry `countFrom` for a server to apply.
+
 ### The detector fallback
 
 `TYPE_STEP_DETECTOR` fires once per step and carries no cumulative value, so it
@@ -941,7 +971,10 @@ that takes the day past it fires `goalReached` then and there, and
 command a backgrounded app could be refused. Nothing that is this phone's
 own goes through `displaySnapshot()`: the engine, the resolver, stored days,
 the Health Connect mirror and uploads never see it, and the verification
-snapshot reports it apart from `deviceSteps` and `resolved`.
+snapshot reports it apart from `deviceSteps` and `resolved`. `resetToday()`
+forgets today's figure and `clearHistory()` every day's (2.7), since they are
+how an app hands the phone to the next account; `setCountFrom()` leaves them
+to the app.
 
 ## Threading
 

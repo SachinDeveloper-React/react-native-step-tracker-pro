@@ -5,6 +5,45 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-10-05
+
+A minor release: it adds `setCountFrom()`, and a start after
+`stopTracking()` no longer counts what the phone walked while stopped.
+
+### Fixed
+
+- **Stop did not mean stop.** The hardware counter keeps counting while
+  tracking is stopped, and the next `startTracking()` credited those steps
+  as gap recovery - as if an OEM had killed the service: to today, spread
+  across midnight onto both days, or from boot on after a reboot. A start
+  after the user's own `stopTracking()` now counts nothing taken in between;
+  recovery stays for a tracker something else stopped.
+- **`resetToday()` and `clearHistory()` kept `setOtherDevicesSteps()`.**
+  An app handing the phone to the next account had to clear today's figure
+  itself, and the other days' - kept a week for their snapshots - stayed for
+  the next account's snapshots. `resetToday()` forgets today's now, and
+  `clearHistory()` every day's.
+
+### Added
+
+- **`setCountFrom(at)`**: nothing before `at` is counted - not this phone's
+  steps, not any Health Connect app's, a watch's included - for a session that
+  starts at sign-in, or a phone another account takes over. Health Connect is
+  read from `at` on, every day, a record straddling it counted for its share
+  after it. This phone cannot tell when the steps it already counted today
+  were taken, so an `at` past today's start starts today over at the call,
+  as `resetToday()` does, and steps taken before an `at` still to come are
+  dropped as they arrive. The same `at` again changes nothing, so an app can
+  set it on every launch; `null` clears it. Signed snapshots carry it as
+  `countFrom`, next to Health Connect records left as stored for a server
+  to apply it to, and the integrity log has a `count_from` event.
+
+### Tests
+
+- `HealthConnectReadsTest` has a third device test: a record across
+  countFrom counts its share after it, and stays whole in the snapshot's
+  raw records.
+
 ## [2.6.0] - 2026-10-04
 
 A minor release: it adds `setOtherDevicesSteps()` and

@@ -589,6 +589,113 @@ class StepCounterEngineTest {
         assertEquals(115, engine.onCounterSample(175f, now())!!.steps)
     }
 
+    // ---- stop means stop ---------------------------------------------------
+
+    @Test
+    fun aStartAfterTheUserStoppedCountsNothingTheCounterMovedMeanwhile() {
+        engine.onCounterSample(100f, now())
+        assertEquals(100, state.stepsToday)
+
+        // stopTracking(), an hour's walk with nothing listening, then
+        // startTracking(), which marks the gap to drop.
+        fakeNow += 3_600_000L
+        state.dropNextGap = true
+        assertNull(engine.onCounterSample(600f, now()))
+        assertEquals(100, state.stepsToday)
+        assertFalse(state.dropNextGap)
+        assertTrue(backfills.isEmpty())
+        assertTrue(observed.none { it.third >= 500 })
+
+        // Counting carries on from there.
+        assertEquals(150, engine.onCounterSample(650f, now())!!.steps)
+    }
+
+    @Test
+    fun aStartAfterAStopAcrossMidnightLeavesBothDaysAsTheyWere() {
+        // Stopped at 23:40 with 900 steps; started again at 00:10.
+        lateEvening()
+        state.dropNextGap = true
+
+        assertNull(engine.onCounterSample(5600f, now()))
+        // Yesterday closes with what it had; nothing is spread across midnight.
+        assertEquals(1, rollovers.size)
+        assertEquals(900, rollovers[0].first.steps)
+        assertEquals(0, state.stepsToday)
+        assertTrue(backfills.isEmpty())
+
+        assertEquals(20, engine.onCounterSample(5620f, now())!!.steps)
+    }
+
+    @Test
+    fun aStartAfterAStopAcrossARebootClaimsNothingSinceBoot() {
+        engine.onCounterSample(5000f, now())
+        // Stopped, the phone rebooted at 10:00, tracking started again: the
+        // counter restarted and holds 300 steps since boot.
+        fakeBoot = bootAt(DateKeys.today(), 10)
+        fakeElapsed = 60_000L
+        engine.reconcile()
+        state.dropNextGap = true
+
+        assertNull(engine.onCounterSample(300f, now()))
+        assertEquals(5000, state.stepsToday)
+        assertTrue(backfills.isEmpty())
+        assertEquals(5010, engine.onCounterSample(310f, now())!!.steps)
+    }
+
+    // ---- countFrom -------------------------------------------------------------
+
+    @Test
+    fun stepsBeforeACountFromStillToComeAreDroppedAsTheyArrive() {
+        engine.onCounterSample(100f, now())
+        state.countFromAt = fakeNow + 10 * 60_000L
+
+        fakeNow += 5 * 60_000L
+        assertNull(engine.onCounterSample(300f, now()))
+        assertEquals(100, state.stepsToday)
+        // The first sample after it counts the share of its steps after it,
+        // by time: the last one came five minutes before, half way - and
+        // the minute timeline places them from countFrom on.
+        fakeNow += 10 * 60_000L
+        assertEquals(110, engine.onCounterSample(320f, now())!!.steps)
+        assertEquals(Triple(state.countFromAt, fakeNow, 10), observed.last())
+        assertEquals(140, engine.onCounterSample(350f, now())!!.steps)
+        // A detector step before it is dropped too.
+        state.countFromAt = fakeNow + 60_000L
+        assertNull(engine.onDetectorSample(1, now()))
+        assertEquals(140, state.stepsToday)
+    }
+
+    @Test
+    fun aGapAcrossCountFromCountsOnlyItsShareAfterIt() {
+        // Yesterday evening: 900 steps, last reading 5,000 at 23:40. The
+        // process was dead until 00:10; countFrom is 23:55. Of the 600 steps
+        // the counter moved, those placed before 23:55 are not counted, and
+        // the rest is placed by time on either side of midnight.
+        lateEvening()
+        state.countFromAt = yesterdayAt(23, 55)
+
+        val snapshot = engine.onCounterSample(5600f, now())
+        assertEquals(1, rollovers.size)
+        assertEquals(900, rollovers[0].first.steps)
+        // 600 over 23:40-00:10; 15 of the 30 minutes come after countFrom,
+        // 10 of those after midnight.
+        assertEquals(200, snapshot!!.steps)
+        assertEquals(mapOf(DateKeys.yesterday() to 100), backfills.single())
+    }
+
+    @Test
+    fun anInstallClaimsOnlyItsStepsSinceCountFrom() {
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.today(), 7)
+        // Signed in at 10:30; it is noon, five hours after boot.
+        state.countFromAt = bootAt(DateKeys.today(), 10) + 30 * 60_000L
+
+        assertEquals(900, engine.onCounterSample(3000f, now())!!.steps)
+        assertEquals(state.countFromAt, state.coverageStartAt)
+    }
+
     @Test
     fun detectorFallbackIncrementsDirectly() {
         repeat(5) { engine.onDetectorSample(1, now()) }

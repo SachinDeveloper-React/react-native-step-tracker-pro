@@ -67,7 +67,8 @@ native side uses.
 
 Starts the foreground service. Rejects with `E_PERMISSION_DENIED` if
 `ACTIVITY_RECOGNITION` is missing, `E_NO_SENSOR` if the device has neither step
-sensor.
+sensor. After [`stopTracking()`](#stoptracking-promisestepsnapshot), nothing
+taken while tracking was stopped is counted (2.7) - see below.
 
 ### `pauseTracking()` / `resumeTracking(): Promise<StepSnapshot>`
 
@@ -83,6 +84,16 @@ The decision is recorded at once (2.3): the returned snapshot says `stopped`,
 and neither the next launch nor a reboot starts tracking again - even when the
 app is in the background and Android refuses to deliver the stop to the
 service. A service that misses it stops itself within a minute.
+
+**Stop means stop** (2.7). The hardware counter keeps counting while
+tracking is stopped, and the next `startTracking()` used to credit those
+steps as if the service had been killed: on the day, across midnight onto
+both days, after a reboot from boot on. They are not counted now - the first
+sample after the start pins the count where it stopped. Gap recovery stays
+for a tracker something other than the user stopped: an OEM kill, a crash, a
+reboot while tracking was on. A watch's steps in Health Connect over the same
+time are the watch's own record, and still count under `'auto'`; to leave
+those out too, `setCountFrom()` the start.
 
 The sync, retention and watchdog jobs stay cancelled until `startTracking()`:
 after a stop, `initialize()` and `updateConfig()` do not schedule them (2.3.6);
@@ -197,9 +208,50 @@ Pass what this phone's own number does not already hold: if it reported a
 watch's steps (`stepSource.usedExternal`), take what it reported off your
 server's total, not `deviceSteps`. `0` clears it. Each day's value is kept for
 a week, and the day after today too for a server a zone ahead; only today's
-is shown. `resetToday()` leaves it. Rejects with `E_INVALID_CONFIG` for a
-malformed date or a count that is not a whole number from 0 to 1,000,000.
-Resolves with today's snapshot as shown.
+is shown. `resetToday()` forgets today's and `clearHistory()` every day's
+(2.7): what one account or user left must not show on top of the next one's.
+Rejects with `E_INVALID_CONFIG` for a malformed date or a count that is not a
+whole number from 0 to 1,000,000. Resolves with today's snapshot as shown.
+
+### `setCountFrom(at: number | null): Promise<StepSnapshot>`
+
+Counts nothing before `at`, epoch ms (2.7): not this phone's steps, not any
+Health Connect app's, a watch's included. For a session that starts when the
+user signs in, or a phone another account takes over. `null` counts
+everything again.
+
+```ts
+// Another account signs in on this phone:
+await StepTracker.clearHistory();             // the last account's days
+const shown = await StepTracker.setCountFrom(Date.now());
+// shown.steps === 0, and counting goes on from here
+```
+
+- **Health Connect** is read from `at` on, whatever the day: a record that
+  ends before it counts nothing, one that straddles it counts its share
+  after it, by time. That is every source, resolution, stats, sources list
+  and snapshot `sources`. Explicit raw reads - `getHealthConnectRecords()`,
+  `readHealthConnectSteps()`, the changes feed, vitals - return what Health
+  Connect holds for the window you give them.
+- **This phone** cannot tell when the steps it has already counted today
+  were taken, so an `at` later than today's start - and than the countFrom
+  before it - starts today over at the call, as `resetToday()` does (other
+  devices' steps aside): the count, today's stored row, its minutes and its
+  Health Connect mirror. With `at` a little in the past, the steps between
+  `at` and the call are lost rather than risked; Health Connect still
+  counts them, and a phone-side app may fill them in under `'auto'`, since
+  this phone's coverage now starts at the call. With `at` still to come,
+  today starts over now and steps taken before `at` are dropped as they
+  arrive. Days stored before today are history, which `clearHistory()` drops.
+- **The same `at` again changes nothing**, so it can be set on every launch.
+  An earlier `at` counts Health Connect from it again, but cannot give back
+  what this phone dropped.
+- **Signed snapshots carry it** as [`countFrom`](#getverificationsnapshotdate-string-options-promiseverificationsnapshot),
+  and with the integrity checks on a `count_from` event logs each change.
+
+Rejects with `E_INVALID_CONFIG` for anything but whole epoch milliseconds
+from 2000 on and no more than a year ahead - seconds passed for milliseconds,
+most often. Resolves with today's snapshot as shown.
 
 ### `getYesterdaySteps(): Promise<DayRecord>`
 ### `getStepsForDate(date: string): Promise<DayRecord>`
@@ -300,6 +352,7 @@ split out.
   recoveredSteps: 800,        // of deviceSteps, credited in one go by gap recovery
   sensor: 'step_counter',     // 'step_detector' / 'accelerometer' lose steps while dead
   coverageStartAt: 0,         // epoch ms this device covered the day from; 0 = whole day
+  countFrom: null,            // epoch ms nothing before is counted - setCountFrom() (2.7)
   sources: [                  // every origin, unresolved, self included; [] without a grant
     { packageName: 'com.example.app', kind: 'self', steps: 7431, manualSteps: 0, ... },
     { packageName: 'com.fitbit.FitbitMobile', kind: 'watch', steps: 8240,
@@ -331,6 +384,11 @@ from 1.x: the 1.5 shape if it carries `integrity` (and `suspectSteps`), the
 1.4 shape if not. Neither removed or renamed anything version 2 has, so both
 parse as version 2 with those fields missing.
 `libraryVersion` says which release of this package produced it.
+
+`countFrom` (2.7) is what [`setCountFrom()`](#setcountfromat-number--null-promisestepsnapshot)
+set, `null` when nothing: `deviceSteps`, `sources` and `resolved` count
+nothing before it, while `healthConnectRecords` are as stored - the
+evidence, for a server to apply it to itself.
 
 `otherDevicesSteps` (2.6) is what your app set for the day with
 [`setOtherDevicesSteps()`](#setotherdevicesstepsdate-steps-promisestepsnapshot),
@@ -642,7 +700,8 @@ They are reported even with the checks off. What a server can trust is
 and [Play Integrity](#requestintegritytokenoptions-promiseintegritytoken).
 
 Events logged while the checks are on: `clock_changed` (`detail.jumpMs`),
-`timezone_changed`, `reboot`, `reset_today`, `history_cleared`,
+`timezone_changed`, `reboot`, `reset_today`, `count_from` (`detail.countFrom`,
+`previous`, `restartedToday` - 2.7), `history_cleared`,
 `config_changed` (`detail.keys` — the integrity-relevant settings that
 moved, logged even when the change turns the checks off), `sensor_changed`
 (`from`, `to`), `charging_started`, `charging_stopped`, `activity_changed`,
@@ -872,7 +931,8 @@ fits:
 ### `resetToday(): Promise<boolean>`
 
 Zeroes today's counter and re-arms goal events. History is untouched. Meant for
-QA builds. With the integrity checks on, today's minute buckets and verdict go
+QA builds. Today's [other devices' steps](#setotherdevicesstepsdate-steps-promisestepsnapshot)
+go too (2.7). With the integrity checks on, today's minute buckets and verdict go
 with the count, and a `reset_today` event is logged. While mirroring into
 Health Connect, today's mirrored records are deleted too (2.5) - a day with
 no steps has nothing to write over them, so other apps kept reading the old
@@ -880,7 +940,9 @@ count until the next step's sync.
 
 ### `clearHistory(): Promise<boolean>`
 
-Deletes every stored day, motion window, minute bucket and verdict. The
+Deletes every stored day, motion window, minute bucket and verdict, and every
+day's [other devices' steps](#setotherdevicesstepsdate-steps-promisestepsnapshot)
+(2.7) - the shown number drops by today's at once. `setCountFrom()` stays. The
 integrity event log is kept, and records the clear. What was mirrored into
 Health Connect stays there - it is the user's record now; remove it with
 [`deleteHealthConnectData()`](#deletehealthconnectdatastartdate-enddate-promisehealthconnectdeleteresult).

@@ -243,6 +243,7 @@ export const StepTracker = {
   setOtherDevicesSteps: fn(async (date: string, steps: number) =>
     date === today() ? withOtherDevices(steps) : mockSnapshot()
   ),
+  setCountFrom: fn(async (..._args: never[]) => mockSnapshot()),
   getYesterdaySteps: fn(async () => day()),
   getStepsForDate: fn(async (date: string) => day(date)),
   getWeeklyStats: fn(async (..._args: never[]) => stats()),
@@ -258,6 +259,7 @@ export const StepTracker = {
     recoveredSteps: 0,
     sensor: 'step_counter',
     coverageStartAt: 0,
+    countFrom: null,
     sources: [],
     sourcesStatus: 'not_consulted' as const,
     resolved: resolved(date),

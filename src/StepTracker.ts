@@ -324,6 +324,13 @@ const RECORD_TYPES: readonly HealthConnectRecordType[] = ['steps', 'distance'];
 const MAX_DELETE_DAYS = 3660;
 /** The most `setOtherDevicesSteps()` takes for a day - the native side's bound too. */
 const MAX_OTHER_DEVICES_STEPS = 1_000_000;
+/**
+ * 2000-01-01T00:00Z: an earlier `setCountFrom()` is a unit mistake - seconds
+ * for milliseconds - and would count everything. The native side's bound too.
+ */
+const EARLIEST_COUNT_FROM = 946_684_800_000;
+/** How far ahead `setCountFrom()` may be: a year. The native side's bound too. */
+const MAX_COUNT_FROM_AHEAD_MS = 366 * 24 * 60 * 60 * 1000;
 
 const VITAL_TYPES: readonly HealthConnectVitalType[] = [
   'heartRate',
@@ -650,7 +657,11 @@ export const StepTracker = {
     return call(() => getNativeModule().getConfig()) as Promise<StepTrackerConfig>;
   },
 
-  /** Starts the foreground service. Requires permissions to be granted first. */
+  /**
+   * Starts the foreground service. Requires permissions to be granted first.
+   * After `stopTracking()`, nothing taken while tracking was stopped is
+   * counted - the counter's gap is dropped, not recovered (2.7).
+   */
   async startTracking(): Promise<StepSnapshot> {
     return call(() => getNativeModule().startTracking()) as Promise<StepSnapshot>;
   },
@@ -664,7 +675,11 @@ export const StepTracker = {
     return call(() => getNativeModule().resumeTracking()) as Promise<StepSnapshot>;
   },
 
-  /** Flushes to the database, unregisters sensors and kills the service. */
+  /**
+   * Flushes to the database, unregisters sensors and kills the service. Stop
+   * means stop: steps taken until `startTracking()` are never counted, across
+   * midnight or a reboot too (2.7).
+   */
   async stopTracking(): Promise<StepSnapshot> {
     return call(() => getNativeModule().stopTracking()) as Promise<StepSnapshot>;
   },
@@ -722,6 +737,39 @@ export const StepTracker = {
     return call(() =>
       getNativeModule().setOtherDevicesSteps(date, steps)
     ) as Promise<StepSnapshot>;
+  },
+
+  /**
+   * Counts nothing before `at` (epoch ms): not this phone's steps, not any
+   * Health Connect app's, a watch's included - for a session that starts
+   * when the user signs in, or a phone another account takes over. `null`
+   * counts everything again.
+   *
+   * Health Connect is read from `at` on, whatever the day; a record that
+   * straddles it counts its share after it. This phone cannot tell when the
+   * steps it already counted today were taken, so an `at` later than today's
+   * start - and than the countFrom before it - starts today over at the call,
+   * as `resetToday()` does; steps it takes before an `at` still to come are
+   * dropped as they arrive. Days it stored before today are history, which
+   * `clearHistory()` drops. The same `at` again changes nothing, so it can be
+   * set on every launch. Signed snapshots carry it as `countFrom`. Resolves
+   * with today's snapshot as shown.
+   */
+  async setCountFrom(at: number | null): Promise<StepSnapshot> {
+    if (
+      at !== null &&
+      !(
+        Number.isSafeInteger(at) &&
+        at >= EARLIEST_COUNT_FROM &&
+        at <= Date.now() + MAX_COUNT_FROM_AHEAD_MS
+      )
+    ) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        'at must be epoch milliseconds, no more than a year ahead, or null to clear it'
+      );
+    }
+    return call(() => getNativeModule().setCountFrom(at ?? 0)) as Promise<StepSnapshot>;
   },
 
   async getYesterdaySteps(): Promise<DayRecord> {
@@ -947,11 +995,19 @@ export const StepTracker = {
 
   // ---- writes ----------------------------------------------------------
 
-  /** Zeroes today's counter without touching history. Useful in QA builds. */
+  /**
+   * Zeroes today's counter without touching history, and forgets what
+   * `setOtherDevicesSteps()` said for today (2.7). Useful in QA builds.
+   */
   async resetToday(): Promise<boolean> {
     return call(() => getNativeModule().resetToday());
   },
 
+  /**
+   * Deletes every stored day, and every day's `setOtherDevicesSteps()`
+   * figure (2.7) - what another account or user left is not shown on top
+   * of the next one's.
+   */
   async clearHistory(): Promise<boolean> {
     return call(() => getNativeModule().clearHistory());
   },

@@ -765,6 +765,13 @@ class HealthConnectManager(
      * [DaySources.detailed]. With a [capture], the raw records of its types
      * are kept as the read pages through them, so a snapshot that wants the
      * day's records as well as its sources reads the day once.
+     *
+     * Nothing before [countFromMs] - countFrom, 0 for none - is counted.
+     * Days that ended before it are not read at all, and come back answered
+     * in full with no sources; its own day is read whole, each record
+     * counted for its share after it - see [CountFrom] - while a [capture]
+     * keeps the records as they are, the evidence a server applies
+     * countFrom to itself.
      */
     suspend fun readSourcesByDay(
         start: Instant,
@@ -772,7 +779,29 @@ class HealthConnectManager(
         coverageStartMs: Long = 0L,
         perDayFill: Boolean = true,
         deadline: Long = Long.MAX_VALUE,
-        capture: RecordCapture? = null
+        capture: RecordCapture? = null,
+        countFromMs: Long = 0L
+    ): DaySources {
+        if (countFromMs > 0L) {
+            if (countFromMs >= end.toEpochMilli()) return DaySources(emptyMap(), datesOf(start, end).toHashSet())
+            val readStart = maxOf(start, DateKeys.startOfDayInstant(DateKeys.of(countFromMs)))
+            if (readStart.isAfter(start)) {
+                val read = readSourcesFrom(readStart, end, coverageStartMs, perDayFill, deadline, capture, countFromMs)
+                return DaySources(read.byDate, read.detailed + datesOf(start, readStart))
+            }
+        }
+        return readSourcesFrom(start, end, coverageStartMs, perDayFill, deadline, capture, countFromMs)
+    }
+
+    /** [readSourcesByDay] over a window countFrom has already been applied to. */
+    private suspend fun readSourcesFrom(
+        start: Instant,
+        end: Instant,
+        coverageStartMs: Long,
+        perDayFill: Boolean,
+        deadline: Long,
+        capture: RecordCapture?,
+        floor: Long
     ): DaySources {
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val self = context.packageName
@@ -789,7 +818,7 @@ class HealthConnectManager(
         // costs one query per origin per window rather than one page per
         // five thousand records.
         val days = java.time.Duration.between(start, end).toDays()
-        if (days > RAW_READ_MAX_DAYS) return readSourcesByDayAggregated(start, end, coverageStartMs, deadline)
+        if (days > RAW_READ_MAX_DAYS) return readSourcesByDayAggregated(start, end, coverageStartMs, deadline, floor)
 
         // date -> package -> accumulator
         val buckets = HashMap<String, HashMap<String, Accumulator>>()
@@ -811,14 +840,17 @@ class HealthConnectManager(
             hc, StepsRecord::class.java, start, end, newestFirst = true, onFailure = { stepsFailure = it }
         ) { record ->
             if (keepSteps) capture?.add(RecordType.STEPS, recordMap(record))
-            val recordStart = record.startTime.toEpochMilli()
-            if (recordStart < oldestRead) oldestRead = recordStart
+            val storedStart = record.startTime.toEpochMilli()
+            if (storedStart < oldestRead) oldestRead = storedStart
             val recordEnd = record.endTime.toEpochMilli()
+            // Before countFrom: nothing counted, or what is left after it.
+            if (storedStart < floor && recordEnd <= floor) return@readAll
+            val recordStart = CountFrom.startAfter(storedStart, floor)
             val date = DateKeys.of(recordStart)
             val pkg = record.metadata.dataOrigin.packageName
             val acc = buckets.getOrPut(date) { HashMap() }
                 .getOrPut(pkg) { Accumulator(pkg, self) }
-            val count = record.count.toInt()
+            val count = CountFrom.shareAfter(record.count.toInt(), storedStart, recordEnd, floor)
             acc.steps += count
             // Bucketed by how the writing app says the steps were produced.
             // A manually typed record is the one honest way to put 20,000
@@ -890,12 +922,15 @@ class HealthConnectManager(
                 hc, DistanceRecord::class.java, start, end, newestFirst = true, onFailure = { failure = it }
             ) { record ->
                 if (keepDistance) capture?.add(RecordType.DISTANCE, recordMap(record))
-                val at = record.startTime.toEpochMilli()
-                if (at < oldest) oldest = at
-                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
-                    it.distance += record.distance.inMeters
-                    it.distanceSeen = true
-                }
+                val stored = record.startTime.toEpochMilli()
+                if (stored < oldest) oldest = stored
+                val recordEnd = record.endTime.toEpochMilli()
+                if (stored < floor && recordEnd <= floor) return@readAll
+                buckets[DateKeys.of(CountFrom.startAfter(stored, floor))]
+                    ?.get(record.metadata.dataOrigin.packageName)?.let {
+                        it.distance += CountFrom.shareAfter(record.distance.inMeters, stored, recordEnd, floor)
+                        it.distanceSeen = true
+                    }
             }
             settle(outcome, oldest, whole = { it.distanceRead = true }, cut = {
                 it.distance = 0.0
@@ -906,11 +941,14 @@ class HealthConnectManager(
         if (ReadType.TOTAL_CALORIES in types) {
             var oldest = Long.MAX_VALUE
             val outcome = readAll(hc, TotalCaloriesBurnedRecord::class.java, start, end, newestFirst = true) { record ->
-                val at = record.startTime.toEpochMilli()
-                if (at < oldest) oldest = at
-                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
-                    it.calories += record.energy.inKilocalories
-                }
+                val stored = record.startTime.toEpochMilli()
+                if (stored < oldest) oldest = stored
+                val recordEnd = record.endTime.toEpochMilli()
+                if (stored < floor && recordEnd <= floor) return@readAll
+                buckets[DateKeys.of(CountFrom.startAfter(stored, floor))]
+                    ?.get(record.metadata.dataOrigin.packageName)?.let {
+                        it.calories += CountFrom.shareAfter(record.energy.inKilocalories, stored, recordEnd, floor)
+                    }
             }
             settle(outcome, oldest, whole = {}, cut = { it.calories = 0.0 })
         }
@@ -919,11 +957,14 @@ class HealthConnectManager(
             buckets.values.forEach { byPackage -> byPackage.values.forEach { it.activeCalories = 0.0 } }
             var oldest = Long.MAX_VALUE
             val outcome = readAll(hc, ActiveCaloriesBurnedRecord::class.java, start, end, newestFirst = true) { record ->
-                val at = record.startTime.toEpochMilli()
-                if (at < oldest) oldest = at
-                buckets[DateKeys.of(at)]?.get(record.metadata.dataOrigin.packageName)?.let {
-                    it.activeCalories += record.energy.inKilocalories
-                }
+                val stored = record.startTime.toEpochMilli()
+                if (stored < oldest) oldest = stored
+                val recordEnd = record.endTime.toEpochMilli()
+                if (stored < floor && recordEnd <= floor) return@readAll
+                buckets[DateKeys.of(CountFrom.startAfter(stored, floor))]
+                    ?.get(record.metadata.dataOrigin.packageName)?.let {
+                        it.activeCalories += CountFrom.shareAfter(record.energy.inKilocalories, stored, recordEnd, floor)
+                    }
             }
             // A partial sum is reported as unknown, not as a low figure.
             settle(outcome, oldest, whole = {}, cut = { it.activeCalories = -1.0 })
@@ -953,7 +994,7 @@ class HealthConnectManager(
             if (kinds[source.packageName] == null || source.kind.isWearable) kinds[source.packageName] = source.kind
             names[source.packageName] = source.appName
         }
-        originsWithSteps(hc, start, gapEnd).forEach { pkg ->
+        originsWithSteps(hc, maxOf(start, Instant.ofEpochMilli(floor)), gapEnd).forEach { pkg ->
             kinds.getOrPut(pkg) { StepSourceCatalog.classify(pkg, null, self) }
         }
         // Aggregates carry no recording method, so a day answered from them
@@ -964,7 +1005,7 @@ class HealthConnectManager(
         val budget = perDayBudget(android.os.SystemClock.elapsedRealtime(), deadline)
         var filledInFull: Set<String> = emptySet()
         val filled = if (needsRecordingMethods && perDayFill && budget > 0) {
-            val perDays = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget)
+            val perDays = perDay(DateKeys.of(start.toEpochMilli()), incomplete, gapEnd, coverageStartMs, budget, floor)
             val days = perDays.mapValues { it.value.sources }
             filledInFull = perDays.filterValues { it.detailed }.keys
             // A day the budget ran out on is answered from aggregates - it
@@ -974,10 +1015,10 @@ class HealthConnectManager(
             if (missing.isEmpty()) {
                 days
             } else {
-                days + aggregateBySource(start, gapEnd, kinds, names).filterKeys { it in missing }
+                days + aggregateBySource(start, gapEnd, kinds, names, floor).filterKeys { it in missing }
             }
         } else {
-            aggregateBySource(start, gapEnd, kinds, names)
+            aggregateBySource(start, gapEnd, kinds, names, floor)
         }
         return DaySources(
             byDate = read.filterKeys { it > incomplete } + filled.filterKeys { it <= incomplete },
@@ -1000,7 +1041,8 @@ class HealthConnectManager(
         last: String,
         end: Instant,
         coverageStartMs: Long,
-        budgetMs: Long
+        budgetMs: Long,
+        countFromMs: Long
     ): Map<String, DayRead> = kotlinx.coroutines.coroutineScope {
         val deadline = android.os.SystemClock.elapsedRealtime() + budgetMs
         val permits = kotlinx.coroutines.sync.Semaphore(PER_DAY_PARALLEL)
@@ -1012,7 +1054,8 @@ class HealthConnectManager(
                     val dayEnd = minOf(DateKeys.endOfDayInstant(date), end)
                     kotlinx.coroutines.withTimeoutOrNull(left) {
                         val day = readSourcesByDay(
-                            DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false
+                            DateKeys.startOfDayInstant(date), dayEnd, coverageStartMs, perDayFill = false,
+                            countFromMs = countFromMs
                         )
                         date to DayRead(day.byDate[date].orEmpty(), date in day.detailed)
                     }
@@ -1041,19 +1084,36 @@ class HealthConnectManager(
      * sources without per-record detail: no recording-method split, no hourly
      * profile, no late-write share - the -1 and null every aggregate-answered
      * day carries. Throws when an origin's totals cannot be read.
+     *
+     * [start] is a midnight - aggregates are sliced a day at a time from it -
+     * and the day [countFromMs] falls on, when it is in the window, is asked
+     * for again from countFrom on: aggregates share a record out by time.
      */
     private suspend fun aggregateBySource(
         start: Instant,
         end: Instant,
         kinds: Map<String, StepSourceKind>,
-        names: Map<String, String>
+        names: Map<String, String>,
+        countFromMs: Long
     ): Map<String, List<StepSource>> {
         val self = context.packageName
         // readDailySteps asks for distance only when it is granted.
         val distanceRead = ReadType.DISTANCE in grantedReadTypes()
         val out = HashMap<String, ArrayList<StepSource>>()
+        val floor = Instant.ofEpochMilli(countFromMs)
+        val floorDay = if (countFromMs > 0L && floor.isAfter(start) && floor.isBefore(end)) {
+            DateKeys.of(countFromMs)
+        } else {
+            null
+        }
         for ((pkg, kind) in kinds) {
-            for (day in readDailySteps(start, end, setOf(pkg))) {
+            val totals = readDailySteps(start, end, setOf(pkg)).filter { it.date != floorDay } +
+                if (floorDay == null) {
+                    emptyList()
+                } else {
+                    readDailySteps(floor, minOf(end, DateKeys.endOfDayInstant(floorDay)), setOf(pkg))
+                }
+            for (day in totals) {
                 if (day.steps <= 0) continue
                 out.getOrPut(day.date) { ArrayList() }.add(
                     StepSource(
@@ -1099,11 +1159,12 @@ class HealthConnectManager(
         start: Instant,
         end: Instant,
         coverageStartMs: Long,
-        deadline: Long
+        deadline: Long,
+        countFromMs: Long
     ): DaySources {
         val discoveryStart = maxOf(start, end.minus(java.time.Duration.ofDays(RAW_READ_MAX_DAYS)))
         // With the coverage split, so today reads the same here as on its own.
-        val recent = readSourcesByDay(discoveryStart, end, coverageStartMs, deadline = deadline)
+        val recent = readSourcesByDay(discoveryStart, end, coverageStartMs, deadline = deadline, countFromMs = countFromMs)
         val kinds = HashMap<String, StepSourceKind>()
         val names = HashMap<String, String>()
         recent.byDate.values.flatten().forEach { source ->
@@ -1113,7 +1174,7 @@ class HealthConnectManager(
         }
         if (kinds.isEmpty()) return DaySources(emptyMap(), recent.detailed)
 
-        val out = HashMap<String, List<StepSource>>(aggregateBySource(start, end, kinds, names))
+        val out = HashMap<String, List<StepSource>>(aggregateBySource(start, end, kinds, names, countFromMs))
         // The recent window's raw numbers are exact and carry real timestamps;
         // let them override the aggregate for the days they cover.
         recent.byDate.forEach { (date, sources) -> out[date] = sources }

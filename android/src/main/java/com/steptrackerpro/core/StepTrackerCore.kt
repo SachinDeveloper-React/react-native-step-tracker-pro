@@ -176,6 +176,16 @@ class StepTrackerCore private constructor(context: Context) {
     /** What the app last said the user's other devices counted on [date]; 0 when it said nothing. */
     fun otherDevicesSteps(date: String): Int = otherDevices[date] ?: 0
 
+    /** Forgets what the app said other devices counted on [dates] - on every day when null. */
+    private fun forgetOtherDevices(dates: Collection<String>?) {
+        synchronized(otherDevicesLock) {
+            val kept = if (dates == null) emptyMap() else otherDevices - dates.toSet()
+            if (kept == otherDevices) return
+            otherDevices = kept
+            state.otherDevicesSteps = kept
+        }
+    }
+
     /**
      * What the user's other devices counted on [date], as the app knows it -
      * its server's total for the day less what this phone sent it. Shown on
@@ -668,9 +678,21 @@ class StepTrackerCore private constructor(context: Context) {
 
     /**
      * Zeroes today. Runs on the write lane so a commit already queued for the
-     * old total cannot land after the overwrite and resurrect it.
+     * old total cannot land after the overwrite and resurrect it. What the
+     * app said the user's other devices counted today goes too: a reset day
+     * starts from nothing.
      */
     suspend fun resetToday() = withContext(writeLane) {
+        val today = restartToday { date -> integrity.onReset(date) }
+        forgetOtherDevices(listOf(today.date))
+    }
+
+    /**
+     * Starts today over from zero - [resetToday], and [setCountFrom] when
+     * this phone cannot tell its counted steps apart from the ones before
+     * it. [log] records why, on the write lane, as today's minutes go.
+     */
+    private suspend fun restartToday(log: suspend (String) -> Unit): DayTotals {
         engine.resetToday()
         state.clearContinuity()
         goals.reset()
@@ -680,7 +702,7 @@ class StepTrackerCore private constructor(context: Context) {
         val today = liveToday()
         repository.overwriteDay(today)
         // Logged, and today's minutes go with the count they described.
-        runCatching { integrity.onReset(today.date) }
+        runCatching { log(today.date) }
         // So do the minutes kept for Health Connect's per-minute records -
         // all but what Health Connect holds for each, which the next pass
         // compares against to delete it.
@@ -701,8 +723,14 @@ class StepTrackerCore private constructor(context: Context) {
                 }
             }
         }
+        return today
     }
 
+    /**
+     * Drops every stored day, and every day's figure the app gave for the
+     * user's other devices: what was another account's, or another user's,
+     * is not shown on top of the next one's.
+     */
     suspend fun clearHistory() = withContext(writeLane) {
         // Nothing is owed to days that are gone - nor added back to them by
         // a credit in flight.
@@ -711,6 +739,63 @@ class StepTrackerCore private constructor(context: Context) {
             engine.takeLateSteps()
         }
         integrity.onHistoryCleared()
+        val shownToday = otherDevicesSteps(engine.snapshot().date) > 0
+        forgetOtherDevices(null)
+        if (shownToday) {
+            // Today's number shrank with no sample to say so.
+            emitLiveSteps()
+            onShownChanged?.invoke()
+        }
+    }
+
+    // ---- counting from ----------------------------------------------------
+
+    /** When counting starts - see [setCountFrom]; 0 when nothing was set. */
+    fun countFrom(): Long = state.countFromAt
+
+    /**
+     * Counts nothing before [at], epoch ms: not this phone's steps, not any
+     * Health Connect app's, a watch's included. 0 counts everything again.
+     *
+     * Health Connect is read from [at] on, whatever the day; a record that
+     * straddles it counts its share after it. This phone cannot tell when
+     * the steps it has already counted today were taken, so an [at] later
+     * than today's start - and than the countFrom before it - starts today
+     * over at the call, as [resetToday] does, other devices' steps aside;
+     * steps it takes before an [at] still to come are dropped as they
+     * arrive. Days it stored before today keep what they hold - history,
+     * which [clearHistory] drops. Setting the same [at] again changes
+     * nothing, so an app can set it on every launch.
+     */
+    suspend fun setCountFrom(at: Long) {
+        val previous = state.countFromAt
+        if (at == previous) return
+        val today = liveToday().date
+        val restart = at > maxOf(previous, DateKeys.startOfDayMillis(today))
+        state.countFromAt = at
+        val detail = mapOf("countFrom" to at.takeIf { it > 0L }, "previous" to previous.takeIf { it > 0L })
+        if (restart) {
+            withContext(writeLane) {
+                restartToday { date ->
+                    integrity.onRestarted(date, IntegrityEvent.COUNT_FROM, detail + ("restartedToday" to true))
+                }
+                // This phone covers the day from the call, or from [at] still
+                // to come: a phone-side app may fill in from [at] up to then.
+                state.coverageStartAt = maxOf(at, System.currentTimeMillis())
+                // And the next sample counts nothing the counter moved before
+                // it: the steps since the last reading came before the call.
+                state.dropNextGap = true
+            }
+        } else {
+            // Read again under the new floor; a lead taken without it may be
+            // larger than what is left to count.
+            state.clearContinuity()
+            sourceCache.invalidate()
+            integrity.log(IntegrityEvent.COUNT_FROM, detail + ("restartedToday" to false))
+        }
+        val shown = emitLiveSteps()
+        followDailyGoal(shown, config())
+        onShownChanged?.invoke()
     }
 
     suspend fun pruneHistory(retentionDays: Int): Int = withContext(writeLane) { prune(retentionDays) }
@@ -1112,6 +1197,10 @@ class StepTrackerCore private constructor(context: Context) {
             } else {
                 0L
             },
+            // Before it, nothing is counted - this phone's steps, nor any
+            // Health Connect app's - see setCountFrom(). Null when unset. The
+            // raw records below are as stored, for a server to apply it to.
+            "countFrom" to state.countFromAt.takeIf { it > 0L },
             "sources" to sources.map { it.toMap() },
             // Whether `sources` is what Health Connect holds, or empty because
             // it was not asked, ran out of time or failed - never the same
@@ -1553,7 +1642,9 @@ class StepTrackerCore private constructor(context: Context) {
             }
             try {
                 val days = withTimeoutOrNull(left) {
-                    healthConnect.readSourcesByDay(runStart, runEnd, coverageStartForToday(), deadline = deadline)
+                    healthConnect.readSourcesByDay(
+                        runStart, runEnd, coverageStartForToday(), deadline = deadline, countFromMs = state.countFromAt
+                    )
                 }
                 if (days == null) {
                     read = HealthConnectRead.TIMED_OUT
@@ -1751,7 +1842,7 @@ class StepTrackerCore private constructor(context: Context) {
         val coverage = if (date == DateKeys.today()) coverageStartForToday() else 0L
         return try {
             val day = withTimeoutOrNull(timeoutMs) {
-                healthConnect.readSourcesByDay(start, end, coverage, capture = capture)
+                healthConnect.readSourcesByDay(start, end, coverage, capture = capture, countFromMs = state.countFromAt)
             } ?: return SourceList(emptyList(), HealthConnectRead.TIMED_OUT)
             val sources = day.byDate[date].orEmpty()
             sourceCache.put(date, sources, detailed = date in day.detailed)

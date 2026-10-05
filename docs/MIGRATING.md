@@ -1,5 +1,21 @@
 # Migrating
 
+## From 2.6 to 2.7
+
+Nothing to change in code for most apps; two behaviours move.
+
+- **A start after `stopTracking()` counts nothing taken while stopped.** The
+  hardware counter keeps counting while tracking is stopped, and 2.6 and
+  earlier credited those steps at the next `startTracking()`, as if the
+  service had been killed. An app that stops tracking only to start it again
+  straight away - to apply something, say - loses the steps in between now;
+  use `pauseTracking()` / `resumeTracking()`, or `updateConfig()`, which needs
+  no restart. A tracker that something else stopped - an OEM kill, a reboot
+  while tracking was on - still recovers its gap.
+- **`resetToday()` and `clearHistory()` forget `setOtherDevicesSteps()`**:
+  today's, and every day's. An app that set the figure after a reset or a
+  clear sets it again after, as it would have for a new day.
+
 ## From 2.5 to 2.6
 
 Nothing to change in code.

@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (189 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records and other devices' days (287 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (191 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days and countFrom shares (290 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,14 +59,14 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Seventy-eight cases: forty-one drive the engine, four build the Room
+sensor. Eighty-six cases: forty-seven drive the engine, four build the Room
 database as an older version from the exported schema, migrate real rows to
-the current version and check every one survived, twenty-six run the
+the current version and check every one survived, twenty-eight run the
 integrity layer, sync bookkeeping, Health Connect reads, the notification,
-other devices' steps and background work end to end through the real core,
+other devices' steps, countFrom and background work end to end through the real core,
 database and Keystore, four check that remote-sync headers are
 sealed, read back and migrated from 1.x, and three pin when `goalReached`
-fires. Two more, against Health Connect itself, are opt-in - see
+fires. Three more, against Health Connect itself, are opt-in - see
 [Health Connect on a device](#health-connect-on-a-device); without the
 property they are skipped. Among them:
 
@@ -89,6 +89,8 @@ property they are skipped. Among them:
 | `aLateSampleAfterTheDayClosedIsOwedToTheDayItWasTaken` / `lateStepsForAClosedDayFollowTheGapPolicy` | a late sample after the day closed lands on the wrong day, or changes a closed day under a policy that promises it never will |
 | `lateStepsUnderTodayCappedShareOneCap` | `today_capped` hands the new day an uncapped batch of steps from the day before |
 | `pausedStepsAreDiscardedAndResumeDoesNotBackfill` | pause does nothing, or resume dumps a backlog |
+| `aStartAfterTheUserStoppedCountsNothingTheCounterMovedMeanwhile` / `aStartAfterAStopAcrossMidnightLeavesBothDaysAsTheyWere` / `aStartAfterAStopAcrossARebootClaimsNothingSinceBoot` | steps walked while tracking was stopped are credited at the next start, to today, both sides of midnight, or from boot |
+| `stepsBeforeACountFromStillToComeAreDroppedAsTheyArrive` / `aGapAcrossCountFromCountsOnlyItsShareAfterIt` / `anInstallClaimsOnlyItsStepsSinceCountFrom` | this phone counts steps from before countFrom |
 | `detectorFallbackIncrementsDirectly` | no-step-counter devices count nothing |
 | `commitThresholdControlsDatabaseWrites` | a write per step, or no writes at all |
 | `resetTodayClearsTotalButKeepsCountingAfterwards` | QA reset replays the old count |
@@ -118,6 +120,8 @@ property they are skipped. Among them:
 | `aBackgroundWriteThatFailsIsLoggedNotACrash` | a save that fails on a full disk takes the app down |
 | `otherDevicesStepsAreShownOnTopAndKeptApartFromThisPhonesFigures` | other devices' steps leak into this phone's count, history or snapshot figures, or never reach the screen |
 | `otherDevicesStepsCountTowardsTheDailyGoal` | a day the other devices take past the goal fires nothing until a step on this phone, or fires twice |
+| `resetTodayAndClearHistoryForgetOtherDevicesSteps` | the last account's other devices' steps are shown, or signed, for the next one |
+| `countFromStartsTodayOverAndIsSignedIntoTheSnapshot` | today keeps steps from before countFrom, setting it again on launch starts today over, or snapshots do not carry it |
 
 ### Health Connect on a device
 
@@ -136,6 +140,7 @@ cd android && ./gradlew connectedDebugAndroidTest -PstpHealthConnectTests \
 |---|---|
 | `aSnapshotWithItsRecordsReadsTheDayOnce` | a snapshot that asks for its raw records reads the day twice against Health Connect's rate limits |
 | `aRecordTypeTheSourcesDoNotReadIsReadOnItsOwn` | records of a type the sources do not read go missing, or everything is read twice |
+| `recordsBeforeCountFromAreNotCountedButKeptAsEvidence` | a watch's steps from before countFrom are counted, or the snapshot's raw records lose them |
 
 ### Compatibility builds
 
@@ -362,6 +367,18 @@ Needs a second source — Samsung Health, Google Fit, or a watch.
       without it, `otherDevicesSteps: 629`
 - [ ] a value that takes the day past the goal fires `goalReached` once
 - [ ] after midnight the notification drops back to this phone's count
+- [ ] `resetToday()` clears today's figure, `clearHistory()` every day's (2.7)
+
+### Counting from
+
+- [ ] `setCountFrom(Date.now())` mid-walk: the notification drops to 0 and
+      counts on from there; `getVerificationSnapshot(today).countFrom` is
+      that instant
+- [ ] with a watch that synced a walk earlier today: its steps from before
+      countFrom are gone from `getStepSources()` and `stepSource`, and still
+      in the snapshot's `healthConnectRecords`
+- [ ] `setCountFrom()` with the same value on the next launch: nothing moves
+- [ ] `setCountFrom(null)`: the watch's earlier steps count again
 
 ### Health Connect
 
@@ -441,6 +458,12 @@ adb logcat -d -s WM-DiagnosticsWrkr
       `stp_health_connect_sync` and `stp_remote_sync` are enqueued
 - [ ] after `stopTracking()` and a relaunch that calls `initialize()`: none of
       them are
+- [ ] `stopTracking()`, walk 50 steps, `startTracking()`: the count is where
+      it stopped, and goes on from there (2.7) - the same across midnight and
+      across a reboot
+- [ ] the service killed with `adb shell am kill` while tracking, walk 50
+      steps, reopen: those steps **are** there - recovery is for a stop the
+      user did not ask for
 
 ### Goals
 

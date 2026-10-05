@@ -206,11 +206,18 @@ class IntegrityMonitor(
     }
 
     /** `resetToday()` zeroed the count; the minutes and verdict describing it go too. On the lane. */
-    suspend fun onReset(date: String) {
+    suspend fun onReset(date: String) = onRestarted(date, IntegrityEvent.RESET_TODAY, mapOf("date" to date))
+
+    /**
+     * Today started over from zero - a reset, or a countFrom this phone
+     * could not tell its steps apart from: its minutes and verdict go with
+     * the count they described, and [event] says why.
+     */
+    suspend fun onRestarted(date: String, event: String, detail: Map<String, Any?>) {
         timeline.clear()
         repository.clearIntegrityDay(date)
         if (liveDate == date) liveFlagged = 0
-        log(IntegrityEvent.RESET_TODAY, mapOf("date" to date))
+        log(event, detail)
     }
 
     /** On the lane, after the repository has cleared the day tables. */
