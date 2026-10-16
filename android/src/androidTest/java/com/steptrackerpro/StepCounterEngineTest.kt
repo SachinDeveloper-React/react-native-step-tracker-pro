@@ -212,6 +212,58 @@ class StepCounterEngineTest {
     }
 
     @Test
+    fun aBackwardsDipThatStaysHighIsNotCountedTwice() {
+        engine.onCounterSample(40_000f, now())
+
+        // A hub delivering out of order, or a HAL dipping hundreds of steps
+        // with no reset behind it. The old rule read any dip over three steps
+        // as a restart, re-pinned at the low reading, and counted everything
+        // between it and the previous high a second time.
+        assertNull(engine.onCounterSample(39_700f, now()))
+        assertEquals(40_000, state.stepsToday)
+
+        // 50 steps past the high, not 350 past the dip.
+        assertEquals(40_050, engine.onCounterSample(40_050f, now())!!.steps)
+    }
+
+    @Test
+    fun aCounterThatRestartedHighIsTakenOnTheSecondLowReading() {
+        engine.onCounterSample(40_000f, now())
+
+        // Too high to be a counter starting over, so the first low reading is
+        // read as a wobble and ignored.
+        assertNull(engine.onCounterSample(25_000f, now()))
+        assertEquals(40_000, state.stepsToday)
+
+        // Still below the high, but climbing from the low one: the counter did
+        // restart, and the steps since it are picked up rather than the day
+        // stalling until the reading passes 40,000 again.
+        assertEquals(40_100, engine.onCounterSample(25_100f, now())!!.steps)
+        assertEquals(40_160, engine.onCounterSample(25_160f, now())!!.steps)
+    }
+
+    @Test
+    fun aRebootThatLeftTheCounterRunningClaimsOnlyTheDelta() {
+        // A handful of OEM HALs carry TYPE_STEP_COUNTER across a reboot. Its
+        // reading is then a lifetime total, and claiming it as steps since
+        // boot put half a million of them on the day.
+        state.anchorValue = 499_000f
+        state.anchorSteps = 0
+        state.lastRawValue = 499_200f
+        state.stepsToday = 200
+        state.lastEventAt = fakeNow - 60_000L
+        state.lastElapsedRealtime = fakeElapsed
+
+        // Booted two minutes ago: uptime went backwards, the reading did not.
+        fakeBoot = fakeNow - 120_000L
+        fakeElapsed = 120_000L
+        engine.reconcile()
+
+        assertEquals(250, engine.onCounterSample(499_250f, now())!!.steps)
+        assertTrue(backfills.isEmpty())
+    }
+
+    @Test
     fun rebootOnSameDayClaimsStepsTakenSinceBoot() {
         engine.onCounterSample(1200f, now())
 

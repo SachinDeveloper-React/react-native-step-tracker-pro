@@ -235,10 +235,11 @@ In order of likelihood:
    Health show the same on that device. Compare with the phone's own
    Health Connect count (`getStepSources()` → `isPlatform`), which comes
    from the same sensor: if both climb, it is the sensor.
-2. **A HAL that jitters backwards.** A reading a step below the previous one
-   used to be treated as a restart and the dip added back on the next
-   sample. Fixed in 1.3 (`JITTER_TOLERANCE_STEPS`); if you see it on an
-   older build, upgrade.
+2. **A HAL that jitters backwards.** A reading below the previous one used to
+   be treated as a restart and the dip added back on the next sample. 1.3
+   fixed it for dips of three steps or fewer, and the rule now judges a
+   restart on where the reading landed rather than how far it fell, which
+   covers the rest. If you see it on an older build, upgrade.
 3. **A phone-side app inflating Health Connect.** An aggregator that writes
    the sum of two origins, or an app that counts 10% high. Under `'auto'`
    such a source may only supply steps from before this device started
@@ -375,6 +376,54 @@ the notification and on `getTodaySteps()` and `stepsChanged`, and
 your server's total less what *this* phone sent it, or the phone's own steps
 are counted twice on screen. `setOtherDevicesSteps(today, 0)` clears it.
 Nothing this phone stores, mirrors or uploads includes them.
+
+## Another step app on the same phone shows fewer steps
+
+Expect a few percent between any two step apps, in either direction. When this
+package is consistently the higher one, it is usually not counting steps that
+were not taken — it is keeping steps the other app threw away. In order of how
+much they are worth:
+
+1. **Steps counted while the process was dead.** `TYPE_STEP_COUNTER` counts in
+   the sensor hub whether or not any app is listening, so when an OEM task
+   killer takes the service down the hardware keeps counting and the reading
+   on the way back up contains every step taken meanwhile. The anchor survives
+   the kill, so this package claims them; an app that re-anchors on restart
+   loses them. On a phone that kills services a few times a day it is worth
+   hundreds of steps, and it is the usual answer.
+
+   **There is no setting for this**, and `gapRecovery` is not it: a gap inside
+   one day arrives through plain anchor arithmetic and no policy is consulted.
+   `gapRecovery` only decides what happens to a gap that cannot be placed on
+   the active day — one that crossed midnight, or a reboot on an earlier day.
+   For the same reason those steps count as *observed*, not recovered, so
+   `recoveredSteps` does not measure them: it reports overnight gaps, reboot
+   claims and late batches only.
+2. **Health Connect, under `stepSource: 'auto'`.** A watch, band or ring that
+   published for the day wins outright, and `'auto'`'s baseline never shrinks
+   within a day, so the number carries the wearable's lead to midnight. Check
+   `getCurrentStepSource()`: `usedExternal: true` means the number is not this
+   phone's sensor, and `deviceSteps` is what the phone alone counted. Use
+   `stepSource: 'device'` for the phone only, or `wearableTrust: 'catalog'` to
+   stop an app that merely *stamps* `TYPE_WATCH` from being trusted for its
+   whole margin.
+3. **Other devices your own app reported.** `setOtherDevicesSteps()` is shown
+   on top of this phone in the notification, `getTodaySteps()` and
+   `stepsChanged`, and `otherDevicesSteps` says how much.
+4. **The day it was installed.** A first-ever reading on a device that booted
+   earlier the same day claims the steps the counter had already accumulated
+   since boot — real steps, which an app that starts at zero does not show.
+   One day only; `setCountFrom(Date.now())` opts out.
+
+What is left after those four is the hardware counter itself, which every app
+on the phone reads the same. Compare with the platform’s own count
+(`getStepSources()` → `isPlatform`): it comes from the same sensor, so if the
+two agree, the difference is the other app’s filtering, not this one’s
+counting.
+
+To move this package towards the cautious end deliberately — which knob costs
+what, and how to measure before changing any of them — see
+[Counting conservatively](USAGE_MODES.md#counting-conservatively).
 
 ## Numbers do not match Google Fit or Samsung Health
 

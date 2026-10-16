@@ -402,9 +402,13 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.7.0** —
-`setCountFrom()` counts nothing before an instant, from this phone or any
-Health Connect app, for a session that starts at sign-in; a start after
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.7.1** — two ways the day
+could read higher than the phone walked: a counter reading that dipped but
+stayed high was read as a restart and everything back to the previous high
+counted twice, and a reboot the counter did not join had its lifetime total
+claimed as steps since boot. **2.7.0** added `setCountFrom()`, which counts
+nothing before an instant, from this phone or any Health Connect app, for a
+session that starts at sign-in; a start after
 `stopTracking()` no longer counts what was walked while stopped; and
 `resetToday()` and `clearHistory()` forget other devices' steps, so the next
 account on a phone never sees the last one's. **2.6.0** let a trusted watch

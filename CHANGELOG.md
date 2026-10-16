@@ -5,6 +5,55 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.1] - 2026-10-17
+
+A patch: two ways the day could read higher than the phone actually walked.
+
+### Fixed
+
+- **A counter reading that dipped but stayed high was counted twice.** Some
+  HALs report below the previous reading with no restart behind it - float
+  rounding, or a hub delivering a batch out of order. 1.3 ignored dips of
+  three steps or fewer; anything larger was read as a counter that had
+  restarted, the anchor was re-pinned at the low reading, and every step
+  between it and the previous high was added to the day a second time. On a
+  counter at 40,000 a re-ordered batch dips hundreds of steps, so a day of
+  them crept the total up by hundreds. A restart and a wobble are now told
+  apart by where the reading landed rather than how far it fell: a counter
+  that restarted comes back near zero, or at least below half of what it had
+  reached, and anything higher is ignored with the higher reading kept.
+  Nothing is lost by ignoring it, because the counter is cumulative. A
+  *second* reading below the last one and above the first proves the counter
+  is climbing from a new base, so a counter that restarted at a high value is
+  picked up one sample later instead of stalling the day.
+- **A reboot the counter did not join claimed its whole lifetime total.**
+  `TYPE_STEP_COUNTER` is specified to reset on reboot and a handful of OEM
+  HALs do not. Uptime going backwards proves the device rebooted, never that
+  the counter restarted with it, so the reading - a lifetime total - was
+  claimed as steps since boot and landed on the day. The since-boot claim is
+  now bounded by what there has been time to walk, four steps a second since
+  boot; beyond that the delta since the last reading is claimed instead, as
+  for any other gap. The same bound applies to the claim a fresh install
+  makes on a device booted earlier the same day.
+
+### Docs
+
+- [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) has **Another step app on the
+  same phone shows fewer steps**: what steps counted while the process was
+  dead, `stepSource: 'auto'`, `setOtherDevicesSteps()` and the install-day
+  claim each contribute to the difference, and which of them a knob can turn
+  off. Two of them cannot: a gap inside one day arrives through plain anchor
+  arithmetic, so `gapRecovery` never sees it and `recoveredSteps` does not
+  count it.
+- [USAGE_MODES.md](docs/USAGE_MODES.md) has **Counting conservatively**: a
+  preset for an app that would rather show fewer steps than too many, a table
+  of what each knob costs, and what to measure before changing any of them.
+
+### Tests
+
+- `StepCounterEngineTest` covers a dip that stays high, a counter that
+  restarted at a high value, and a reboot that left the counter running.
+
 ## [2.7.0] - 2026-10-05
 
 A minor release: it adds `setCountFrom()`, and a start after

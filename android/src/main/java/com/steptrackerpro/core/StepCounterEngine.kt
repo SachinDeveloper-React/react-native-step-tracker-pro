@@ -42,10 +42,14 @@ import kotlin.math.roundToInt
  *    that kill services overnight.
  *  - **Counter reset without reboot.** Some OEM sensor HALs restart the counter
  *    when the last listener unregisters. Detected as `rawValue` dropping below
- *    the last reading we saw; the anchor is re-pinned at the current reading so
- *    the running total is preserved and nothing is double counted. Comparing
- *    against the anchor alone is not enough, because the anchor is zero for the
- *    whole of any day the device booted on.
+ *    the last reading we saw *and* landing where a counter starts; the anchor
+ *    is re-pinned at the current reading so the running total is preserved and
+ *    nothing is double counted. Comparing against the anchor alone is not
+ *    enough, because the anchor is zero for the whole of any day the device
+ *    booted on. A reading that drops but stays high is a HAL reporting out of
+ *    order, not a restart: it is ignored and the higher reading kept, because
+ *    re-pinning on one counts the dip again on the next sample. A second low
+ *    reading settles it either way - see [looksRestarted].
  *  - **Midnight.** The previous day is finalised through [onDayRollover] and the
  *    anchor is re-pinned with `anchorSteps = 0` - by the first sample after
  *    it, or by [rollIfNeeded] when none comes.
@@ -121,6 +125,16 @@ class StepCounterEngine(
      */
     @Volatile
     private var reanchorOnNextSample: Boolean = false
+
+    /**
+     * The last reading that came in below the one before it without looking
+     * like a counter that restarted - see [looksRestarted]. -1 when the last
+     * sample was not one of those. Held in memory only: losing it to a
+     * process death costs one more sample before a high restart is taken,
+     * and nothing else.
+     */
+    @Volatile
+    private var lowReading: Float = -1f
 
     /**
      * What to do with steps the hardware counted while nothing was listening
@@ -206,6 +220,36 @@ class StepCounterEngine(
     }
 
     /**
+     * Whether a reading below the one before it is a counter that restarted
+     * rather than a HAL reporting out of order.
+     *
+     * A restarted counter begins again at zero, so the first reading after
+     * one is small - in absolute terms on a device that has only just
+     * restarted it, and against what the counter had reached on one that was
+     * left running for a while before we saw it. A wobble, by contrast,
+     * stays up where the count already was. Judging by the size of the drop
+     * instead got this backwards: on a counter at 40,000 a re-ordered batch
+     * can dip hundreds of steps and a restart drops the lot, so the drop
+     * says nothing the landing place does not say better.
+     *
+     * Deliberately asymmetric. Reading a restart as a wobble costs at most
+     * one sample, because [onCounterSample] takes the next low reading as
+     * proof; reading a wobble as a restart adds the dip to the day twice.
+     */
+    private fun looksRestarted(rawValue: Float, lastRaw: Float): Boolean =
+        rawValue <= RESTART_CEILING_STEPS || rawValue < lastRaw * RESTART_FRACTION
+
+    /**
+     * The most steps anyone could have taken in [millis]. A sprint is about
+     * four steps a second, so a claim beyond this did not happen in the time
+     * available and the reading behind it is not what it was taken for.
+     */
+    private fun plausibleSteps(millis: Long): Int =
+        (millis.coerceAtLeast(0L) / 1000L * MAX_STEPS_PER_SECOND)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+
+    /**
      * Reconciles persisted state against the current boot and date. Call this
      * from `onStartCommand` before registering any listener.
      */
@@ -273,7 +317,8 @@ class StepCounterEngine(
         val lastRaw = state.lastRawValue
         val hasLastRaw = lastRaw >= 0f
         // The counter is cumulative and monotonic within a boot, so a reading
-        // below the last one we saw proves it restarted.
+        // below the last one we saw means it restarted - or that the HAL
+        // reported out of order, which [looksRestarted] tells apart below.
         val counterWentBackwards = hasLastRaw && rawValue < lastRaw
         // So does uptime going backwards, and that one still fires when the
         // first post-boot reading happens to exceed the last pre-reboot one -
@@ -281,18 +326,39 @@ class StepCounterEngine(
         val lastElapsed = state.lastElapsedRealtime
         val elapsedWentBackwards = lastElapsed > 0L && currentElapsed < lastElapsed
 
-        // Some HALs report a reading a step or two *below* the previous one
-        // with no reset behind it - float rounding, or a hub re-ordering a
-        // batch. Re-pinning on every such wobble added the wobble back on the
-        // next sample, so a day of jitter crept upward. A dip this small is
-        // ignored outright and the higher reading kept; a real restart drops
-        // to near zero and is caught below. Uptime going backwards is still a
-        // reboot whatever the reading did.
-        if (hasLastRaw && rawValue < lastRaw && lastRaw - rawValue <= JITTER_TOLERANCE_STEPS &&
-            !elapsedWentBackwards
+        // A reading below the last one is either a counter that restarted or
+        // a HAL reporting out of order - float rounding, a hub re-ordering a
+        // batch, a dip of a few steps with no reset behind it. The two are
+        // told apart by where the reading landed, not by how far it fell: a
+        // counter that restarted begins again at zero, so it comes back near
+        // it, while a wobble stays up where the count already was. Re-pinning
+        // on a wobble counted the dip a second time on the next sample, and a
+        // day of them crept the total upward - the bug 1.3 closed only for
+        // dips of three steps or fewer. Uptime going backwards is a reboot
+        // whatever the reading did, and is left to the branches below.
+        var restartedFrom = -1f
+        if (hasLastRaw && rawValue < lastRaw && !elapsedWentBackwards &&
+            !looksRestarted(rawValue, lastRaw)
         ) {
-            return null
+            val firstLow = lowReading
+            if (firstLow < 0f || rawValue < firstLow) {
+                // The first reading below the last one, or a lower one still.
+                // Ignore it and keep the higher reading: nothing is lost,
+                // because the counter is cumulative and the next reading above
+                // it carries every step taken meanwhile.
+                lowReading = rawValue
+                return null
+            }
+            // A second reading below the last one and above the first: the
+            // counter is climbing from a new, lower base, so it did restart -
+            // high though it restarted, which is what kept it out of
+            // [looksRestarted]. Take the base, and with it the steps taken
+            // since. Without this a counter that restarted at a high value
+            // would be ignored until it climbed past the old reading, which
+            // on a long-running one is never.
+            restartedFrom = firstLow
         }
+        lowReading = -1f
 
         var anchorValue = state.anchorValue
         var anchorSteps = state.anchorSteps
@@ -320,14 +386,36 @@ class StepCounterEngine(
         if (droppingGap) {
             anchorValue = rawValue
             anchorSteps = state.stepsToday
+        } else if (restartedFrom >= 0f) {
+            // A restart only the second low reading proved: pin at the base it
+            // restarted from, so the steps taken since it are counted once and
+            // the reading is not mistaken for a since-boot total below.
+            anchorValue = restartedFrom
+            anchorSteps = state.stepsToday
         } else if (state.anchorValue < 0f || bootIdMoved(currentBoot)) {
             // Steps accumulated between boot and this first sample are only
             // claimable when the counter really did restart - proven by the
-            // reading going backwards, or by there being no previous reading at
-            // all. Without that the reading still contains everything already
-            // in stepsToday, and claiming it would add the day's steps to
-            // themselves.
-            val counterRestarted = !hasLastRaw || counterWentBackwards || elapsedWentBackwards
+            // reading going back to where a counter starts, or by there being
+            // no previous reading at all. Without that the reading still
+            // contains everything already in stepsToday, and claiming it would
+            // add the day's steps to themselves.
+            //
+            // Uptime going backwards proves the *device* rebooted; it does
+            // not prove the counter restarted with it, and a handful of OEM
+            // HALs carry the count across a reboot. The giveaway is the size
+            // of the reading against the time there has been to walk it: a
+            // lifetime total cannot have been taken since a boot minutes ago.
+            // When it fails the test the reading is not steps since boot, and
+            // the honest claim is the delta since the last one, as for any
+            // other gap.
+            val sinceBoot = endOfGapSince(currentBoot)
+            val claimableSinceBoot = !hasLastRaw ||
+                rawValue.roundToInt() <= plausibleSteps(sinceBoot - currentBoot)
+            // The reading going backwards only counts as proof when it went
+            // back to where a counter starts; a wobble is evidence of nothing.
+            val restartProven = counterWentBackwards && looksRestarted(rawValue, lastRaw)
+            val counterRestarted = !hasLastRaw ||
+                ((restartProven || elapsedWentBackwards) && claimableSinceBoot)
             val bootDate = DateKeys.of(currentBoot)
             val recovered: Recovered = when {
                 // Never seen a reading: there is no evidence the app existed
@@ -337,9 +425,15 @@ class StepCounterEngine(
                 // the day begins, which is what lets a phone-side Health
                 // Connect source fill in the hours before it.
                 !hasLastRaw -> if (bootDate == state.activeDate) {
-                    // Since boot, or since countFrom when it came later.
+                    // Since boot, or since countFrom when it came later, and
+                    // never more than there has been time to walk - a counter
+                    // that survived the reboot would otherwise hand an install
+                    // its whole lifetime total.
                     val (claimed, from) = sinceCountFrom(
-                        rawValue.roundToInt(), currentBoot, endOfGapSince(currentBoot)
+                        rawValue.roundToInt()
+                            .coerceAtMost(plausibleSteps(sinceBoot - currentBoot)),
+                        currentBoot,
+                        sinceBoot
                     )
                     state.coverageStartAt = from
                     Recovered(claimed, null)
@@ -352,7 +446,7 @@ class StepCounterEngine(
                 // boot instant to this sample.
                 counterRestarted -> {
                     backfillReason = BackfillReason.REBOOT
-                    recover(rawValue.roundToInt(), currentBoot, endOfGapSince(currentBoot))
+                    recover(rawValue.roundToInt(), currentBoot, sinceBoot)
                 }
                 // The counter did not restart, so the delta since the last
                 // reading is exact. It covers whatever happened while the
@@ -747,10 +841,24 @@ class StepCounterEngine(
 
     companion object {
         /**
-         * A backwards move of at most this many steps is sensor jitter, not a
-         * restart. Restarts land near zero; jitter is a step or two.
+         * A reading at or below this is near enough to zero to be a counter
+         * that restarted, whatever it was before. Generous on purpose: it is
+         * only reached by a reading that already went *backwards*, and the
+         * few hundred steps it may wave through on a freshly booted device
+         * are kept, not counted twice.
          */
-        const val JITTER_TOLERANCE_STEPS = 3f
+        const val RESTART_CEILING_STEPS = 500f
+
+        /**
+         * Above [RESTART_CEILING_STEPS], a reading below this fraction of the
+         * last one is still a restart: a counter left running for a while
+         * before the first sample came in. Anything above it is a wobble - no
+         * HAL re-orders a batch by half the day's count.
+         */
+        const val RESTART_FRACTION = 0.5f
+
+        /** Steps a second beyond which a claim is not walking. See [plausibleSteps]. */
+        const val MAX_STEPS_PER_SECOND = 4L
 
         /**
          * Default cap for [GapRecovery.TODAY_CAPPED]. Twice a very active

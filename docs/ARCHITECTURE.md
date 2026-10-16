@@ -143,21 +143,48 @@ app shows zero" looked like on phones that kill services overnight.
 
 ### Sensor jitter
 
-Some HALs report a reading a step or two *below* the previous one with no
-restart behind it — float rounding, or a hub re-ordering a batch. Treating
-that as a restart re-pinned the anchor at the lower reading, and the next
-sample added the dip back; a day of such wobbles crept the total upward. A
-backwards move of at most `JITTER_TOLERANCE_STEPS` (3) is now ignored
-outright and the higher reading kept. A real restart drops to near zero and
-is still caught by the rule below; uptime going backwards is still a reboot
-whatever the reading did.
+Some HALs report a reading *below* the previous one with no restart behind it
+— float rounding, or a hub re-ordering a batch. Treating that as a restart
+re-pins the anchor at the lower reading, and the next sample adds the dip
+back; a day of such wobbles creeps the total upward.
+
+A wobble and a restart are told apart by **where the reading landed**, not by
+how far it fell: a counter that restarted begins again at zero, so it comes
+back near it (`RESTART_CEILING_STEPS`, 500), or at least well below what it
+had reached (`RESTART_FRACTION`, half). Anything higher is a wobble: it is
+ignored outright and the higher reading kept, which loses nothing, because the
+counter is cumulative and the next reading above it carries every step taken
+meanwhile. Uptime going backwards is still a reboot whatever the reading did.
+
+Judging by the size of the drop — what 1.3–2.7 did, with a tolerance of three
+steps — got this backwards: on a counter at 40,000 a re-ordered batch can dip
+hundreds of steps, and those hundreds were then counted a second time.
+
+The asymmetry is deliberate. Reading a restart as a wobble costs one sample,
+because a *second* reading below the last one and above the first proves the
+counter is climbing from a new base; the anchor is then pinned at that base, so
+the steps since it are counted once and a counter that restarted at a high
+value does not stall the day. Reading a wobble as a restart adds the dip to the
+day twice.
 
 ### Counter reset without a reboot
 
 Some OEM sensor HALs restart the counter when the last listener unregisters.
-Detected as `rawValue` dropping below `lastRawValue`, the previous reading; the
-anchor is re-pinned at the current reading with `anchorSteps = stepsToday`, so
-the running total is preserved and nothing is double counted.
+Detected as `rawValue` dropping below `lastRawValue`, the previous reading,
+*and* landing where a counter starts (see above); the anchor is re-pinned at
+the current reading with `anchorSteps = stepsToday`, so the running total is
+preserved and nothing is double counted.
+
+### A reboot the counter did not join
+
+`TYPE_STEP_COUNTER` is specified to reset on reboot, and a handful of OEM HALs
+do not: the reading carries on from a lifetime total. Uptime going backwards
+proves the *device* rebooted, never that the counter restarted with it, so the
+since-boot claim is bounded by what there has been time to walk —
+`MAX_STEPS_PER_SECOND` (4) times the seconds since boot. A reading beyond that
+is not steps since boot, and the delta since the last reading is claimed
+instead, exactly as for any other gap. The same bound applies to the
+since-boot claim a fresh install makes on a device booted today.
 
 Comparing against `anchorValue` instead would miss it entirely for the whole of
 any day the device booted on, because the anchor is `0` for that day and no

@@ -16,6 +16,10 @@ syncs. It degrades to Mode A on a phone with no Health Connect; on a phone
 with no step sensor it counts over the accelerometer, and with that fallback
 disabled it behaves as Mode B.
 
+On top of whichever you pick, [Counting
+conservatively](#counting-conservatively) is the set of knobs for an app that
+would rather show fewer steps than too many.
+
 ---
 
 ## Mode A: Native sensor only
@@ -357,6 +361,133 @@ The full list, with what each is for, is in
 - Health apps declaration for every `android.permission.health.*` left in the
   merged manifest.
 - Privacy policy naming the read and written data types.
+
+---
+
+## Counting conservatively
+
+Not a fourth mode — a set of knobs on top of A or C, for an app that would
+rather show fewer steps than too many: one that pays per step, or one whose
+users compare it against a conservative step app on the same phone and ask why
+it counts more.
+
+Two apps reading the same `TYPE_STEP_COUNTER` land a few percent apart in
+either direction. The difference is policy, not arithmetic — which steps each
+app keeps — and this is how to move this package’s policy towards the
+cautious end.
+
+### The preset
+
+```ts
+await StepTracker.initialize({
+  height: 175,
+  weight: 75,
+  dailyGoal: 10000,
+
+  // The phone's own sensor answers. Health Connect is still written to and
+  // still asks for its permissions, but it is not read at all - no read
+  // quota is spent, and `getStepSources()` comes back 'not_consulted'.
+  stepSource: 'device',
+  privacyPolicyUrl: 'https://example.com/privacy', // while writing is on
+  // On Mode A, drop the line above and add healthConnectEnabled: false.
+
+  // Keep this instead if a real watch has to be able to win. 'catalog' stops
+  // an app that merely *stamps* TYPE_WATCH on its records from being trusted
+  // for its whole margin over the phone.
+  // stepSource: 'auto',
+  // wearableTrust: 'catalog',
+  // wearableAllowlist: ['com.example.theirband'],
+  // healthConnectIgnoreManualEntries: true,
+
+  // A gap that crossed midnight is kept only when it provably started today;
+  // nothing is backfilled onto a closed day.
+  gapRecovery: 'drop',
+
+  // On a phone with no step sensor, count nothing rather than count over the
+  // accelerometer, which false-counts in a vehicle.
+  accelerometerFallback: false,
+
+  // The real filter: take flagged steps out of every number instead of only
+  // reporting them. Tune the thresholds on your own users before they cost
+  // anybody anything.
+  fraudDetection: {
+    enabled: true,
+    mode: 'exclude',
+    activityRecognition: true, // needs play-services-location in the host app
+  },
+});
+
+// The day it is installed, a first-ever reading on a device that booted
+// earlier the same day claims the steps already on the counter. To opt out,
+// pin the start once and re-apply the *same* instant on every launch - the
+// same value changes nothing, while a fresh `Date.now()` each time would
+// restart today at every launch.
+const pinned = (await store.get('stepsStartAt')) ?? String(Date.now());
+await store.set('stepsStartAt', pinned);
+await StepTracker.setCountFrom(Number(pinned));
+```
+
+And do not call `setOtherDevicesSteps()`: whatever it is given is shown on
+top of this phone’s own count.
+
+### What each knob gives up
+
+| Knob | Default | Conservative | What it stops counting | What it costs |
+|---|---|---|---|---|
+| `stepSource` | `'auto'` | `'device'` | a watch’s or another app’s number ever answering | a walk the phone was not on is invisible, and `getStepSources()` stops reporting |
+| `wearableTrust` | `'metadata'` | `'catalog'` | an unlisted app that stamps `TYPE_WATCH` being trusted for its whole margin | a genuine band the catalog has not got yet is held to the coverage rule |
+| `healthConnectIgnoreManualEntries` | `false` | `true` | hand-typed entries in an external source | a user who logs a treadmill walk by hand loses it |
+| `gapRecovery` | `'split'` | `'drop'` | the share of an overnight gap that belongs to today | a phone killed overnight shows nothing for the walk before it woke |
+| `accelerometerFallback` | `true` | `false` | the accelerometer counting on a phone with no step sensor | those phones count nothing at all |
+| `fraudDetection.mode` | `'flag'` | `'exclude'` | flagged steps — shaking, a car, a charger, impossible cadence | a false positive takes real steps off a real user, and the shown number can go **down** |
+
+`fraudDetection.mode: 'exclude'` is the only one that removes steps the
+hardware genuinely counted while the user was holding the phone. It is also
+the one that moves the number most. Run it as `'flag'` first and watch
+`suspectSteps` on your own users for a week before switching.
+
+### What no setting changes
+
+**Steps the hardware counted while the process was dead, within one day.**
+`TYPE_STEP_COUNTER` counts in the sensor hub whether or not anything is
+listening, so when an OEM task killer takes the service down, the reading on
+the way back up already contains every step taken meanwhile. The anchor
+survives the kill, so those steps arrive through plain arithmetic
+(`anchorSteps + (rawValue - anchorValue)`) and no policy is consulted:
+`gapRecovery` only decides what happens to a gap that **cannot** be placed on
+the active day — one that crossed midnight, or a reboot on an earlier day.
+
+This is the usual reason this package reads higher than an app that re-anchors
+on restart, and there is no knob for it, because losing those steps is a bug,
+not a setting. On a phone that kills services a few times a day it is worth
+hundreds of steps.
+
+### Measuring before you change anything
+
+Flip nothing until you know which of the above you are actually looking at:
+
+```ts
+// Every snapshot already carries the resolution that produced it, so this
+// needs no second call.
+const today = await StepTracker.getTodaySteps();
+
+console.log({
+  shown: today.steps,                     // what the notification draws
+  otherDevices: today.otherDevicesSteps,  // what *you* added on top
+  apportioned: today.recoveredSteps,      // overnight gaps, reboots, late batches
+  suspect: today.suspectSteps,            // what 'exclude' would remove
+  phoneOnly: today.stepSource.deviceSteps, // this phone's sensor, alone
+  answeredBy: today.stepSource.usedExternal
+    ? today.stepSource.packageName
+    : 'this phone',
+});
+```
+
+`usedExternal: true` means the number on screen is not this phone’s sensor at
+all, and `stepSource` is the knob. `recoveredSteps` large on a morning means
+overnight gaps, and `gapRecovery` is the knob. Both small, `deviceSteps` close
+to `steps`, and the gap to the other app is the hardware counter plus that
+app’s own filtering — which only `fraudDetection` can answer.
 
 ---
 
