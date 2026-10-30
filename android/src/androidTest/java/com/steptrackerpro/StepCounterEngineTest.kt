@@ -230,16 +230,61 @@ class StepCounterEngineTest {
     fun aCounterThatRestartedHighIsTakenOnTheSecondLowReading() {
         engine.onCounterSample(40_000f, now())
 
-        // Too high to be a counter starting over, so the first low reading is
-        // read as a wobble and ignored.
+        // An OEM kill: nothing listening for half an hour, and the HAL
+        // restarted the counter when the last listener detached. Too high to
+        // be a counter starting over, so the first low reading is read as a
+        // wobble and ignored.
+        fakeNow += 30 * 60_000L
         assertNull(engine.onCounterSample(25_000f, now()))
         assertEquals(40_000, state.stepsToday)
 
-        // Still below the high, but climbing from the low one: the counter did
-        // restart, and the steps since it are picked up rather than the day
-        // stalling until the reading passes 40,000 again.
+        // Still below the high, but climbing from the low one, and the reading
+        // is new: the counter did restart, and the steps since it are picked
+        // up rather than the day stalling until the reading passes 40,000
+        // again.
+        fakeNow += 60_000L
         assertEquals(40_100, engine.onCounterSample(25_100f, now())!!.steps)
+        fakeNow += 60_000L
         assertEquals(40_160, engine.onCounterSample(25_160f, now())!!.steps)
+    }
+
+    @Test
+    fun aReplayedBatchIsNotTakenAsARestart() {
+        engine.onCounterSample(40_000f, now())
+
+        // The hub delivers a batch it has already delivered, or delivers one
+        // out of order: readings below the last one that climb, exactly like a
+        // counter would after restarting at a high base. Their event times
+        // give them away - they were taken before the reading already in hand.
+        // Taking 39,700 as a restart base here counted the whole dip twice,
+        // and a phone doing this through the day crept a couple of percent
+        // above every other step app on it.
+        assertNull(engine.onCounterSample(39_700f, now() - 3_000L))
+        assertNull(engine.onCounterSample(39_800f, now() - 2_000L))
+        assertNull(engine.onCounterSample(39_900f, now() - 1_000L))
+        assertEquals(40_000, state.stepsToday)
+
+        // 50 steps past the high, not 350 past the dip.
+        fakeNow += 1_000L
+        assertEquals(40_050, engine.onCounterSample(40_050f, now())!!.steps)
+    }
+
+    @Test
+    fun aDipThatClimbsFasterThanAnyoneWalksIsNotTakenAsARestart() {
+        engine.onCounterSample(40_000f, now())
+
+        // The same batch arriving with timestamps that look new - a hub that
+        // stamps delivery time, or a sample whose own time was unusable. What
+        // settles it then is the pace: 290 steps between two readings two
+        // seconds apart is nobody walking, so the base is not a base.
+        fakeNow += 1_000L
+        assertNull(engine.onCounterSample(39_700f, now()))
+        fakeNow += 1_000L
+        assertNull(engine.onCounterSample(39_990f, now()))
+        assertEquals(40_000, state.stepsToday)
+
+        fakeNow += 1_000L
+        assertEquals(40_050, engine.onCounterSample(40_050f, now())!!.steps)
     }
 
     @Test

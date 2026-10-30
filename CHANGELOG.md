@@ -5,6 +5,38 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.2] - 2026-10-30
+
+A patch: the dip 2.7.1 stopped counting twice was still counted twice when it
+arrived over more than one sample.
+
+### Fixed
+
+- **A batch the sensor hub replays, or delivers out of order, was read as a
+  counter that had restarted.** 2.7.1 ignores one reading below the last one
+  as a HAL wobble, and takes a *second* one, above the first, as proof the
+  counter is climbing from a new, lower base. A hub re-delivering readings it
+  has already delivered looks exactly like that: 40,000 then 39,700, 39,800,
+  39,900 pinned the anchor at 39,700, and the next genuine reading of 40,050
+  put the day at 40,350 - the whole dip counted a second time, which is the
+  bug 2.7.1 was written to close, left open for every dip that takes more
+  than one sample to come back up. A phone whose hub does this through the
+  day read a couple of percent above every other step app on it.
+
+  A second low reading is now taken as a restart base only when it is a *new*
+  reading: its event time is later than that of the reading already in hand -
+  a re-ordered or replayed sample carries the earlier time it was really
+  taken - and the steps the base would credit fit the time since that
+  reading, at four steps a second. A counter that restarted while an OEM had
+  the process dead passes both and is still picked up one sample later; a
+  replayed batch passes neither and is ignored, which loses nothing, because
+  the counter is cumulative and the next reading above the last one carries
+  every step taken meanwhile. A sample whose own timestamp was unusable
+  arrives stamped with the time it arrived, so it leans on the pace test
+  alone.
+
+  Only ever lowers a day's count, never raises it.
+
 ## [2.7.1] - 2026-10-17
 
 A patch: two ways the day could read higher than the phone actually walked.

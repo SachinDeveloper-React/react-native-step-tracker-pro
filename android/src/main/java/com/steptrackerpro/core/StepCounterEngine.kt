@@ -49,7 +49,9 @@ import kotlin.math.roundToInt
  *    booted on. A reading that drops but stays high is a HAL reporting out of
  *    order, not a restart: it is ignored and the higher reading kept, because
  *    re-pinning on one counts the dip again on the next sample. A second low
- *    reading settles it either way - see [looksRestarted].
+ *    reading settles it either way - see [looksRestarted] for where it
+ *    landed, and [restartBaseIsFresh] for whether it is a new reading at all
+ *    or one more from a batch the hub is replaying.
  *  - **Midnight.** The previous day is finalised through [onDayRollover] and the
  *    anchor is re-pinned with `anchorSteps = 0` - by the first sample after
  *    it, or by [rollIfNeeded] when none comes.
@@ -240,6 +242,38 @@ class StepCounterEngine(
         rawValue <= RESTART_CEILING_STEPS || rawValue < lastRaw * RESTART_FRACTION
 
     /**
+     * Whether a second low reading can be taken as the base a counter
+     * restarted at, rather than one more sample from a batch the hub is
+     * replaying or delivering out of order.
+     *
+     * Two things tell a restart from a re-ordered batch, and it has to pass
+     * both. A restart's readings are *new*: they were taken after the high
+     * reading they are being judged against, so their event time is later
+     * than it, while a re-ordered or replayed sample carries the time it was
+     * really taken, which is earlier. And the steps the base would credit -
+     * everything between it and this reading - have to fit in the time since
+     * that high reading: across a batch arriving a second later they do not,
+     * while a counter that restarted while an OEM had the process dead for
+     * hours has all the room it needs. A sample whose own timestamp was
+     * unusable arrives stamped with the time it arrived, so it always looks
+     * new and leans on the second test alone.
+     *
+     * Failing either, the reading is ignored with [lowReading] left standing
+     * and the higher reading kept, which loses nothing: the counter is
+     * cumulative, so the next reading above it carries every step taken
+     * meanwhile. A real restart costs one more sample and is taken on the
+     * next reading that is genuinely new.
+     */
+    private fun restartBaseIsFresh(base: Float, rawValue: Float, eventAtMillis: Long): Boolean {
+        val lastAt = state.lastEventAt
+        // No reading has a time to compare against: there is nothing to tell
+        // the two apart with, and the base is the better guess.
+        if (lastAt <= 0L) return true
+        if (eventAtMillis <= lastAt) return false
+        return (rawValue - base).roundToInt() <= plausibleSteps(eventAtMillis - lastAt)
+    }
+
+    /**
      * The most steps anyone could have taken in [millis]. A sprint is about
      * four steps a second, so a claim beyond this did not happen in the time
      * available and the reading behind it is not what it was taken for.
@@ -350,12 +384,20 @@ class StepCounterEngine(
                 return null
             }
             // A second reading below the last one and above the first: the
-            // counter is climbing from a new, lower base, so it did restart -
-            // high though it restarted, which is what kept it out of
-            // [looksRestarted]. Take the base, and with it the steps taken
+            // counter may be climbing from a new, lower base, so it did
+            // restart - high though it restarted, which is what kept it out
+            // of [looksRestarted]. Take the base, and with it the steps taken
             // since. Without this a counter that restarted at a high value
             // would be ignored until it climbed past the old reading, which
             // on a long-running one is never.
+            //
+            // Only when the reading is new, though: a hub replaying a batch
+            // it has already delivered, or delivering one out of order, walks
+            // up from a low value exactly like a counter climbing from a
+            // restart, and re-pinning on it counts the whole dip twice - the
+            // bug this rule was written to close, for every dip that takes
+            // more than one sample to come back up. See [restartBaseIsFresh].
+            if (!restartBaseIsFresh(firstLow, rawValue, eventAtMillis)) return null
             restartedFrom = firstLow
         }
         lowReading = -1f

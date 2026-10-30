@@ -402,11 +402,13 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.7.1** — two ways the day
-could read higher than the phone walked: a counter reading that dipped but
-stayed high was read as a restart and everything back to the previous high
-counted twice, and a reboot the counter did not join had its lifetime total
-claimed as steps since boot. **2.7.0** added `setCountFrom()`, which counts
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.7.2** — a batch the sensor
+hub replays, or delivers out of order, is no longer read as a counter that
+restarted at a high value, which counted the whole dip a second time and read
+a couple of percent high all day. **2.7.1** closed two other ways the day
+could read higher than the phone walked: a dip that stayed high was read as a
+restart, and a reboot the counter did not join had its lifetime total claimed
+as steps since boot. **2.7.0** added `setCountFrom()`, which counts
 nothing before an instant, from this phone or any Health Connect app, for a
 session that starts at sign-in; a start after
 `stopTracking()` no longer counts what was walked while stopped; and

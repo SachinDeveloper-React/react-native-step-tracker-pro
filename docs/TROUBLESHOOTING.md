@@ -379,6 +379,14 @@ Nothing this phone stores, mirrors or uploads includes them.
 
 ## Another step app on the same phone shows fewer steps
 
+**First check the version the app is actually running**, from
+`getVerificationSnapshot(date).libraryVersion`. Before 2.7.2, a sensor hub
+that replayed a batch of readings it had already delivered had the whole dip
+counted twice, every time it happened — worth a couple of percent a day on a
+phone whose hub does it. 2.7.1 fixed two more of its own: a dip that stayed
+high read as a restart, and a reboot the counter did not join claiming its
+lifetime total.
+
 Expect a few percent between any two step apps, in either direction. When this
 package is consistently the higher one, it is usually not counting steps that
 were not taken — it is keeping steps the other app threw away. In order of how
