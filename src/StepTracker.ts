@@ -243,6 +243,57 @@ function assertFraudDetection(config: StepTrackerConfig): void {
   assertThreshold('maxDailySteps', fraud.maxDailySteps, 1000);
 }
 
+/** A gate threshold the native side would silently move is a mistake worth reporting. */
+function assertMotionGate(config: StepTrackerConfig): void {
+  const gate = config.motionGate;
+  if (gate == null) return;
+  const range = (
+    name: string,
+    value: number | undefined,
+    min: number,
+    max: number
+  ): void => {
+    if (value == null) return;
+    if (!(Number.isFinite(value) && value >= min && value <= max)) {
+      throw new StepTrackerError(
+        'E_INVALID_CONFIG',
+        `motionGate.${name} must be ${min}–${max}`
+      );
+    }
+  };
+  if (
+    gate.windowSeconds != null &&
+    !(
+      Number.isInteger(gate.windowSeconds) &&
+      gate.windowSeconds >= 1 &&
+      gate.windowSeconds <= 15
+    )
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'motionGate.windowSeconds must be an integer 1–15'
+    );
+  }
+  if (
+    gate.engageSeconds != null &&
+    !(
+      Number.isInteger(gate.engageSeconds) &&
+      gate.engageSeconds >= 0 &&
+      gate.engageSeconds <= 120
+    )
+  ) {
+    throw new StepTrackerError(
+      'E_INVALID_CONFIG',
+      'motionGate.engageSeconds must be an integer 0–120'
+    );
+  }
+  // A still floor high enough to call a sprint still would gate nothing; a
+  // peak share of 1 wants a pure tone and would gate every walk.
+  range('stillVariance', gate.stillVariance, 0, 1);
+  range('minPeakRatio', gate.minPeakRatio, 0, 0.9);
+  range('maxZeroCrossingRate', gate.maxZeroCrossingRate, 1, 100);
+}
+
 /** UTF-8 byte length without TextEncoder, which older Hermes builds lack. */
 function utf8Length(value: string): number {
   return encodeURIComponent(value).replace(/%[0-9A-F]{2}/gi, 'x').length;
@@ -596,6 +647,7 @@ function normaliseConfig(
     throw new StepTrackerError('E_INVALID_CONFIG', 'motionWindowRetention must be >= 1');
   }
   assertFraudDetection(config);
+  assertMotionGate(config);
   if (
     config.remoteSyncAuth != null &&
     config.remoteSyncAuth !== 'headers' &&

@@ -81,6 +81,17 @@ class StepStateStore(context: Context) {
         get() = prefs.getInt(KEY_RECOVERED_TODAY, 0)
         set(value) = prefs.edit().putInt(KEY_RECOVERED_TODAY, value.coerceAtLeast(0)).apply()
 
+    /**
+     * Of [stepsToday], how many the motion gate held back as a machine's
+     * vibration - see [GaitGate]. They are in the raw total, which is what
+     * `deviceSteps` reports, and out of every number shown. Written with the
+     * counter state so the two cannot drift, zeroed with it at rollover and
+     * reset, and stored into `daily_summary.gatedSteps` with every commit.
+     */
+    var gatedToday: Int
+        get() = prefs.getInt(KEY_GATED_TODAY, 0)
+        set(value) = prefs.edit().putInt(KEY_GATED_TODAY, value.coerceAtLeast(0)).apply()
+
     var trackingState: TrackingState
         get() = TrackingState.from(prefs.getString(KEY_STATE, null))
         set(value) = prefs.edit().putString(KEY_STATE, value.jsValue).apply()
@@ -523,6 +534,7 @@ class StepStateStore(context: Context) {
         lastEventAt: Long,
         lastElapsed: Long,
         recoveredToday: Int,
+        gatedToday: Int,
         /** Replaces [lateSteps] when given; left as it is otherwise. */
         lateSteps: Map<String, Int>? = null,
         /** Replaces [dropNextGap] when given, in the same write as the anchor. */
@@ -538,6 +550,7 @@ class StepStateStore(context: Context) {
             .putLong(KEY_LAST_EVENT_AT, lastEventAt)
             .putLong(KEY_LAST_ELAPSED, lastElapsed)
             .putInt(KEY_RECOVERED_TODAY, recoveredToday.coerceAtLeast(0))
+            .putInt(KEY_GATED_TODAY, gatedToday.coerceAtLeast(0))
         if (lateSteps != null) edit.putString(KEY_LATE_STEPS, encodeLateSteps(lateSteps))
         if (dropNextGap != null) edit.putBoolean(KEY_DROP_NEXT_GAP, dropNextGap)
         edit.apply()
@@ -603,6 +616,7 @@ class StepStateStore(context: Context) {
         private const val KEY_ACTIVE_DATE = "active_date"
         private const val KEY_STEPS_TODAY = "steps_today"
         private const val KEY_RECOVERED_TODAY = "recovered_today"
+        private const val KEY_GATED_TODAY = "gated_today"
         private const val KEY_COVERAGE_START = "coverage_start_at"
         private const val KEY_STATE = "tracking_state"
         private const val KEY_SOURCE = "sensor_source"

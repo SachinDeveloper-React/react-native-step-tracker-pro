@@ -88,9 +88,9 @@ class StepCounterEngine(
      * were taken in: from the previous sample's event time to this one's.
      * `timed` is false when this sample's own timestamp was unusable and
      * `toMillis` is only when it arrived. Never called for steps gap
-     * recovery credited in one go, nor for paused samples. Feeds the
-     * per-minute integrity timeline; the callee must be cheap, because it
-     * runs under this engine's lock on the sensor thread.
+     * recovery credited in one go, for paused samples, or for what [gate]
+     * held back. Feeds the per-minute integrity timeline; the callee must be
+     * cheap, because it runs under this engine's lock on the sensor thread.
      */
     var onObserved: ((fromMillis: Long, toMillis: Long, steps: Int, timed: Boolean) -> Unit)? = null
 
@@ -101,6 +101,17 @@ class StepCounterEngine(
      * with [takeLateSteps]. Runs under this engine's lock; keep it cheap.
      */
     var onLate: (() -> Unit)? = null
+
+    /**
+     * Asked how many of the steps this sample watched being taken are a
+     * machine's vibration rather than walking - see [MotionGate]. What it
+     * returns stays in the day's raw total, which is what `deviceSteps`
+     * reports, and is added to [StepStateStore.gatedToday] so every number
+     * shown goes without it. Runs under this engine's lock on the sensor
+     * thread; keep it cheap. Null counts every step, which is what
+     * `motionGate.enabled` off means.
+     */
+    var gate: ((fromMillis: Long, toMillis: Long, steps: Int, timed: Boolean) -> Int)? = null
 
     /** Why a past day is being credited after the fact. Values match the JS event. */
     enum class BackfillReason(val jsValue: String) {
@@ -535,6 +546,7 @@ class StepCounterEngine(
                 lastEventAt = eventAtMillis,
                 lastElapsed = currentElapsed,
                 recoveredToday = state.recoveredToday,
+                gatedToday = state.gatedToday,
                 dropNextGap = false.takeIf { droppingGap }
             )
             return null
@@ -580,6 +592,14 @@ class StepCounterEngine(
                 }
             }
         }
+        // The gate judges only what stayed on the active day: steps handed
+        // to a day that has closed are counted there, and a verdict about
+        // what is moving the phone now says nothing about a day that ended.
+        val gatedNow = if (closedDay == null) {
+            (gate?.invoke(observedFrom, eventAtMillis, observed, timed) ?: 0).coerceIn(0, observed)
+        } else {
+            0
+        }
         if (kept != total) {
             anchorValue = rawValue
             anchorSteps = kept
@@ -597,14 +617,20 @@ class StepCounterEngine(
             // Never more than the day has: kept < previous + recoveredNow
             // only when the arithmetic clamped, and the share cannot exceed it.
             recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(kept),
+            gatedToday = (state.gatedToday + gatedNow).coerceIn(0, kept),
             lateSteps = owed,
             dropNextGap = false.takeIf { droppingGap }
         )
 
         backfill?.let { shares -> onBackfill?.invoke(shares, backfillReason) }
         // Late steps kept for their own day are judged there, in the minutes
-        // they were taken in.
-        if (observed > 0) onObserved?.invoke(observedFrom, eventAtMillis, observed, timed)
+        // they were taken in. What the gate held back is in none of it: the
+        // integrity minutes are steps this device counted *as steps*, and
+        // the per-minute Health Connect mirror must not hand a bus ride's
+        // vibration to every other app on the phone.
+        if (observed > gatedNow) {
+            onObserved?.invoke(observedFrom, eventAtMillis, observed - gatedNow, timed)
+        }
         if (owed != null) onLate?.invoke()
 
         if (kept == previous) return null
@@ -660,6 +686,11 @@ class StepCounterEngine(
                 }
             }
         }
+        val gatedNow = if (closedDay == null) {
+            (gate?.invoke(previousEventAt, eventAtMillis, observed, timed) ?: 0).coerceIn(0, observed)
+        } else {
+            0
+        }
         val total = state.stepsToday + counted
         // The counter fields are left exactly as they were. Blanking them here
         // would send the first counter sample on a dual-sensor device that fell
@@ -675,12 +706,15 @@ class StepCounterEngine(
             lastEventAt = eventAtMillis,
             lastElapsed = elapsedProvider(),
             recoveredToday = (state.recoveredToday + recoveredNow).coerceAtMost(total),
+            gatedToday = (state.gatedToday + gatedNow).coerceIn(0, total),
             lateSteps = owed
         )
         // The counter total no longer matches the anchor arithmetic, so make the
         // next counter sample re-pin instead of recomputing from a stale anchor.
         reanchorOnNextSample = true
-        if (observed > 0) onObserved?.invoke(previousEventAt, eventAtMillis, observed, timed)
+        if (observed > gatedNow) {
+            onObserved?.invoke(previousEventAt, eventAtMillis, observed - gatedNow, timed)
+        }
         if (owed != null) onLate?.invoke()
         if (counted == 0) return null
         pendingCommit += counted
@@ -748,7 +782,9 @@ class StepCounterEngine(
     fun consumeCommit(): DayTotals {
         pendingCommit = 0
         return metrics.totals(
-            state.activeDate, state.stepsToday, recoveredSteps = state.recoveredToday
+            state.activeDate, state.stepsToday,
+            recoveredSteps = state.recoveredToday,
+            gatedSteps = state.gatedToday
         )
     }
 
@@ -767,7 +803,8 @@ class StepCounterEngine(
             state = state.trackingState,
             source = state.source,
             timestamp = state.lastEventAt.takeIf { it > 0 } ?: clockProvider(),
-            recoveredSteps = state.recoveredToday.coerceIn(0, steps)
+            recoveredSteps = state.recoveredToday.coerceIn(0, steps),
+            gatedSteps = state.gatedToday.coerceIn(0, steps)
         )
     }
 
@@ -793,7 +830,8 @@ class StepCounterEngine(
             stepsToday = 0,
             lastEventAt = clockProvider(),
             lastElapsed = elapsedProvider(),
-            recoveredToday = 0
+            recoveredToday = 0,
+            gatedToday = 0
         )
     }
 
@@ -804,9 +842,11 @@ class StepCounterEngine(
      *
      * @param recoveredSteps the stored row's recovered share, restored with
      *   the total so the day does not read as fully observed afterwards.
+     * @param gatedSteps the stored row's gated share, restored for the same
+     *   reason: the day's shown total has to stay where the row left it.
      */
     @Synchronized
-    fun seedActiveDay(date: String, steps: Int, recoveredSteps: Int = 0) {
+    fun seedActiveDay(date: String, steps: Int, recoveredSteps: Int = 0, gatedSteps: Int = 0) {
         if (date != state.activeDate || steps <= state.stepsToday) return
         state.writeCounterState(
             bootId = bootIdProvider(),
@@ -817,7 +857,8 @@ class StepCounterEngine(
             stepsToday = steps,
             lastEventAt = clockProvider(),
             lastElapsed = elapsedProvider(),
-            recoveredToday = recoveredSteps.coerceIn(0, steps)
+            recoveredToday = recoveredSteps.coerceIn(0, steps),
+            gatedToday = gatedSteps.coerceIn(0, steps)
         )
     }
 
@@ -843,7 +884,9 @@ class StepCounterEngine(
         // through [seedActiveDay] rather than letting the counter report zero
         // in the middle of a day the user has already been walking through.
         val closing = metrics.totals(
-            active, state.stepsToday, recoveredSteps = state.recoveredToday
+            active, state.stepsToday,
+            recoveredSteps = state.recoveredToday,
+            gatedSteps = state.gatedToday
         )
         pendingCommit = 0
         lateCredited = 0
@@ -864,7 +907,8 @@ class StepCounterEngine(
             // every overnight step into the new day.
             lastEventAt = state.lastEventAt,
             lastElapsed = elapsedProvider(),
-            recoveredToday = 0
+            recoveredToday = 0,
+            gatedToday = 0
         )
         onDayRollover?.invoke(closing, today)
     }

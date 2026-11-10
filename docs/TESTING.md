@@ -502,6 +502,40 @@ adb shell dumpsys battery reset
 - [ ] `attestDevice('test-challenge')` returns a chain; `getVerificationSnapshot(today, { sign: true, nonce: 'n' })` carries a `signature` that verifies against its `publicKey`
 - [ ] with `play-services-location` in the app and `activityRecognition: true`, 10 minutes as a car passenger: an `in_vehicle` flag
 
+### The motion gate
+
+Turn on `motionGate: { enabled: true }` and put
+`getIntegrityReport(today).motionGate.verdict` on screen - the example app
+does, in the integrity card. This one needs a real vehicle; an emulator's
+synthetic accelerometer cannot produce road buzz.
+
+- [ ] walk 5 minutes: the verdict reads `gait` within a second or two, and
+      `gatedSteps` stays 0 - **this is the test that matters**, because a
+      gate that eats real steps is worse than no gate
+- [ ] hold the phone dead still for a minute: `still`, and `gatedSteps`
+      stays 0. Not gated on purpose
+- [ ] sit in a bus or a car for 10 minutes with the phone in hand or pocket:
+      the verdict settles on `vibration` within about five seconds, the
+      step count on screen stops moving, and `gatedSteps` climbs by what the
+      hardware counter was reporting. Compare with Google Fit on the same
+      phone, which has no gate: it should be the one climbing
+- [ ] ride a bicycle for 10 minutes with the phone in a pocket: `vibration`,
+      same as above
+- [ ] get off the bus and walk: the verdict is `gait` within a second or
+      two, and the count moves again with no further delay
+- [ ] walk down the aisle of a moving bus: `gait`, and the steps count. The
+      gait peak outweighs the ride
+- [ ] with the screen off for 10 minutes of a ride, then on: on a phone whose
+      accelerometer is a wake-up sensor (`getIntegrityReport().device
+      .stepCounter` aside, most modern phones) the ride is still gated; on
+      one where it is not, with `accelerometerWakeLock: false`, the steps are
+      counted - the gate goes blind with the CPU asleep, and counts rather
+      than guesses
+- [ ] `getHistory()` for the day: `steps` excludes `gatedSteps`, and
+      `getVerificationSnapshot(today).deviceSteps` still has them in
+- [ ] turn the gate off again: `getIntegrityEvents()` carries `motion_gate`
+      with `enabled: false`, and the day keeps the `gatedSteps` it already had
+
 ### Retention
 
 Set `historyRetentionDays: 2`, then `pruneHistory()`.

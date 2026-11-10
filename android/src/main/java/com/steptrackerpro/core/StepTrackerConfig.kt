@@ -233,13 +233,56 @@ data class StepTrackerConfig(
      * `com.google.android.gms:play-services-location`; this package declares
      * it compile-only so an app that does not want Play Services never gets it.
      */
-    val fraudActivityRecognition: Boolean = false
+    val fraudActivityRecognition: Boolean = false,
+    /**
+     * Keep steps the hardware counter reports while the accelerometer says
+     * the phone is being shaken by a machine - a bus, a car, a train, a
+     * bicycle's frame - out of every number this package shows, syncs and
+     * resolves. The raw reading is kept and reported as `deviceSteps`, with
+     * what was held back as `gatedSteps`; see [GaitGate].
+     *
+     * Off by default: it registers the accelerometer for as long as tracking
+     * runs, which costs battery, and it is a judgement about the user's
+     * steps that an app should opt into rather than inherit. With
+     * `fraudDetection.activityRecognition` also on, Activity Recognition's
+     * own "in a vehicle" and "on a bicycle" are taken as proof and skip the
+     * accelerometer's verdict. JS presents these as `motionGate`.
+     */
+    val motionGateEnabled: Boolean = false,
+    /** How many seconds of accelerometer one verdict is formed from. */
+    val motionGateWindowSeconds: Int = GateDefaults.WINDOW_SECONDS,
+    /** Variance of the mean-removed magnitude, (m/s²)², below which the phone is still. */
+    val motionGateStillVariance: Double = GaitGateRules.DEFAULT_STILL_VARIANCE,
+    /** Share of the gait band's energy a rhythm must hold to be gait, 0..1. */
+    val motionGateMinPeakRatio: Double = GaitGateRules.DEFAULT_MIN_PEAK_RATIO,
+    /** Mean crossings a second above which the signal is buzz, not gait. */
+    val motionGateMaxZeroCrossingRate: Double = GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE,
+    /** Seconds of unbroken vibration before the gate starts holding steps back. */
+    val motionGateEngageSeconds: Int = GateDefaults.ENGAGE_SECONDS
 ) {
 
     val integrityMode: IntegrityMode get() = IntegrityMode.from(fraudMode)
 
     /** True when flagged steps come out of every number shown, synced and resolved. */
     val excludeSuspect: Boolean get() = fraudDetectionEnabled && integrityMode == IntegrityMode.EXCLUDE
+
+    /**
+     * The gate's thresholds, with the stale horizon derived from the window:
+     * a verdict stays usable for one window past the samples it was formed
+     * from, and never less than [GaitGateRules.DEFAULT_STALE_MS], so a
+     * one-second window does not expire between two step samples.
+     */
+    fun motionGateRules(): GaitGateRules {
+        val windowMs = motionGateWindowSeconds * 1_000L
+        return GaitGateRules(
+            windowMs = windowMs,
+            stillVariance = motionGateStillVariance,
+            minPeakRatio = motionGateMinPeakRatio,
+            maxZeroCrossingRate = motionGateMaxZeroCrossingRate,
+            engageMs = motionGateEngageSeconds * 1_000L,
+            staleMs = maxOf(GaitGateRules.DEFAULT_STALE_MS, windowMs + 1_000L)
+        )
+    }
 
     fun integrityRules(): IntegrityRules = IntegrityRules(
         maxCadenceSpm = fraudMaxCadenceSpm,
@@ -316,10 +359,37 @@ data class StepTrackerConfig(
         fraudMaxCadenceSpm = offOr(fraudMaxCadenceSpm) { it.coerceIn(100, 400) },
         fraudSteadyCadenceMinutes = offOr(fraudSteadyCadenceMinutes) { it.coerceIn(5, 24 * 60) },
         fraudMaxContinuousMinutes = offOr(fraudMaxContinuousMinutes) { it.coerceIn(30, 24 * 60) },
-        fraudMaxDailySteps = offOr(fraudMaxDailySteps) { it.coerceAtLeast(1_000) }
+        fraudMaxDailySteps = offOr(fraudMaxDailySteps) { it.coerceAtLeast(1_000) },
+        // Every gate threshold is held inside a range where the verdict
+        // still means something. A still variance of 100 would call a sprint
+        // still and gate nothing; a peak ratio of 1 wants a pure tone and
+        // would gate every walk.
+        motionGateWindowSeconds = motionGateWindowSeconds.coerceIn(
+            GateDefaults.MIN_WINDOW_SECONDS, GateDefaults.MAX_WINDOW_SECONDS
+        ),
+        motionGateStillVariance = finiteOr(
+            motionGateStillVariance, GaitGateRules.DEFAULT_STILL_VARIANCE
+        ) { it.coerceIn(0.0, 1.0) },
+        motionGateMinPeakRatio = finiteOr(
+            motionGateMinPeakRatio, GaitGateRules.DEFAULT_MIN_PEAK_RATIO
+        ) { it.coerceIn(0.0, 0.9) },
+        motionGateMaxZeroCrossingRate = finiteOr(
+            motionGateMaxZeroCrossingRate, GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE
+        ) { it.coerceIn(1.0, 100.0) },
+        motionGateEngageSeconds = motionGateEngageSeconds.coerceIn(
+            0, GateDefaults.MAX_ENGAGE_SECONDS
+        )
     )
 
     private inline fun offOr(value: Int, clamp: (Int) -> Int): Int = if (value <= 0) 0 else clamp(value)
+
+    /**
+     * [value] clamped, or [fallback] when it is not a number at all. A NaN
+     * threshold compares false against everything, which would silently turn
+     * a gate check off rather than clamp it.
+     */
+    private inline fun finiteOr(value: Double, fallback: Double, clamp: (Double) -> Double): Double =
+        if (value.isFinite()) clamp(value) else fallback
 
     /**
      * @param includeHeaders false for what [ConfigStore] persists, where the
@@ -387,6 +457,12 @@ data class StepTrackerConfig(
         put("fraudMaxDailySteps", fraudMaxDailySteps)
         put("fraudFlagWhileCharging", fraudFlagWhileCharging)
         put("fraudActivityRecognition", fraudActivityRecognition)
+        put("motionGateEnabled", motionGateEnabled)
+        put("motionGateWindowSeconds", motionGateWindowSeconds)
+        put("motionGateStillVariance", motionGateStillVariance)
+        put("motionGateMinPeakRatio", motionGateMinPeakRatio)
+        put("motionGateMaxZeroCrossingRate", motionGateMaxZeroCrossingRate)
+        put("motionGateEngageSeconds", motionGateEngageSeconds)
     }
 
     companion object {
@@ -533,6 +609,24 @@ data class StepTrackerConfig(
                 ),
                 fraudActivityRecognition = json.optBoolean(
                     "fraudActivityRecognition", fallback.fraudActivityRecognition
+                ),
+                motionGateEnabled = json.optBoolean(
+                    "motionGateEnabled", fallback.motionGateEnabled
+                ),
+                motionGateWindowSeconds = json.optInt(
+                    "motionGateWindowSeconds", fallback.motionGateWindowSeconds
+                ),
+                motionGateStillVariance = json.optDouble(
+                    "motionGateStillVariance", fallback.motionGateStillVariance
+                ),
+                motionGateMinPeakRatio = json.optDouble(
+                    "motionGateMinPeakRatio", fallback.motionGateMinPeakRatio
+                ),
+                motionGateMaxZeroCrossingRate = json.optDouble(
+                    "motionGateMaxZeroCrossingRate", fallback.motionGateMaxZeroCrossingRate
+                ),
+                motionGateEngageSeconds = json.optInt(
+                    "motionGateEngageSeconds", fallback.motionGateEngageSeconds
                 )
             )
         }
@@ -630,6 +724,22 @@ object RemoteSyncAuth {
 }
 
 /** Defaults for motion signature windows, shared by config and the TypeScript layer's docs. */
+/** The motion gate's shape, as [StepTrackerConfig.sanitised] holds it. */
+object GateDefaults {
+    const val WINDOW_SECONDS = 3
+
+    /** A window under a second holds too little of a stride to find one. */
+    const val MIN_WINDOW_SECONDS = 1
+
+    /** Past this the verdict lags the ride it is meant to catch. */
+    const val MAX_WINDOW_SECONDS = 15
+
+    const val ENGAGE_SECONDS = 2
+
+    /** Longer than this and a whole bus ride is over before the gate engages. */
+    const val MAX_ENGAGE_SECONDS = 120
+}
+
 object MotionDefaults {
     const val WINDOW_SECONDS = 10
     const val INTERVAL_MINUTES = 5

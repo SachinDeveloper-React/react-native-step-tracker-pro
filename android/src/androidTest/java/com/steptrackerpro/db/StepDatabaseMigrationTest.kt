@@ -65,20 +65,25 @@ class StepDatabaseMigrationTest {
         val db = helper.runMigrationsAndValidate(
             NAME, StepDatabase.VERSION, true,
             StepDatabase.MIGRATION_2_3, StepDatabase.MIGRATION_3_4, StepDatabase.MIGRATION_4_5,
-            StepDatabase.MIGRATION_5_6
+            StepDatabase.MIGRATION_5_6, StepDatabase.MIGRATION_6_7
         )
 
-        db.query("SELECT date, totalSteps, recoveredSteps FROM daily_summary ORDER BY date").use { cursor ->
+        db.query(
+            "SELECT date, totalSteps, recoveredSteps, gatedSteps FROM daily_summary ORDER BY date"
+        ).use { cursor ->
             assertEquals(2, cursor.count)
             assertTrue(cursor.moveToFirst())
             assertEquals("2026-09-01", cursor.getString(0))
             assertEquals(8123, cursor.getInt(1))
-            // A day whose split was never recorded reads as fully observed.
+            // A day whose split was never recorded reads as fully observed,
+            // with nothing held back.
             assertEquals(0, cursor.getInt(2))
+            assertEquals(0, cursor.getInt(3))
             assertTrue(cursor.moveToNext())
             assertEquals("2026-09-02", cursor.getString(0))
             assertEquals(11204, cursor.getInt(1))
             assertEquals(0, cursor.getInt(2))
+            assertEquals(0, cursor.getInt(3))
         }
         db.query("SELECT COUNT(*) FROM step_history").use { cursor ->
             assertTrue(cursor.moveToFirst())
@@ -158,6 +163,36 @@ class StepDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate6To7KeepsEveryDayAndReadsGatedAsZero() {
+        // Version 6 as it shipped in 2.5 through 2.7.
+        helper.createDatabase(NAME, 6).apply {
+            execSQL(
+                "INSERT INTO step_history (date, steps, distance, calories, synced, syncedRemote, createdAt, updatedAt) " +
+                    "VALUES ('2026-10-20', 7421, 5300.0, 210.0, 1, 1, 1, 1)"
+            )
+            execSQL(
+                "INSERT INTO daily_summary (date, totalSteps, totalDistance, totalCalories, recoveredSteps, updatedAt) " +
+                    "VALUES ('2026-10-20', 7421, 5300.0, 210.0, 120, 1)"
+            )
+            close()
+        }
+        val db = helper.runMigrationsAndValidate(NAME, 7, true, StepDatabase.MIGRATION_6_7)
+        db.query("SELECT totalSteps, recoveredSteps, gatedSteps FROM daily_summary").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(7421, cursor.getInt(0))
+            assertEquals(120, cursor.getInt(1))
+            // Nothing was held back on a day the gate did not run, so the day
+            // keeps showing exactly the total it showed before the upgrade.
+            assertEquals(0, cursor.getInt(2))
+        }
+        db.query("SELECT steps FROM step_history").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(7421, cursor.getInt(0))
+        }
+        db.close()
+    }
+
+    @Test
     fun migratedDatabaseOpensThroughRoomAndReadsThroughTheDao() = runBlocking {
         helper.createDatabase(NAME, 2).apply {
             execSQL(
@@ -181,9 +216,18 @@ class StepDatabaseMigrationTest {
             val summary = room.dailySummaryDao().findByDate("2026-09-03")!!
             assertEquals(5000, summary.totalSteps)
             assertEquals(0, summary.recoveredSteps)
-            // And the new column takes writes.
-            room.dailySummaryDao().upsert(summary.copy(recoveredSteps = 300))
-            assertEquals(300, room.dailySummaryDao().findByDate("2026-09-03")!!.recoveredSteps)
+            assertEquals(0, summary.gatedSteps)
+            // And the new columns take writes.
+            room.dailySummaryDao().upsert(summary.copy(recoveredSteps = 300, gatedSteps = 40))
+            val written = room.dailySummaryDao().findByDate("2026-09-03")!!
+            assertEquals(300, written.recoveredSteps)
+            assertEquals(40, written.gatedSteps)
+            // Neither share goes backwards: a snapshot of the live day racing
+            // a backfill must not undo the backfill's increment.
+            room.dailySummaryDao().upsertKeepingRecovered(written.copy(recoveredSteps = 10, gatedSteps = 5))
+            val held = room.dailySummaryDao().findByDate("2026-09-03")!!
+            assertEquals(300, held.recoveredSteps)
+            assertEquals(40, held.gatedSteps)
             // The motion table takes a row and prunes to the bound.
             val dao = room.motionWindowDao()
             repeat(5) { i ->

@@ -79,6 +79,7 @@ export function mockSnapshot(overrides: Partial<StepSnapshot> = {}): StepSnapsho
     timestamp: 0,
     recoveredSteps: 0,
     suspectSteps: 0,
+    gatedSteps: 0,
     otherDevicesSteps: 0,
     stepSource: resolved(),
     ...overrides,
@@ -105,6 +106,7 @@ function day(date = today()): DayRecord {
     syncedRemote: false,
     recoveredSteps: 0,
     suspectSteps: 0,
+    gatedSteps: 0,
     stepSource: resolved(date),
   };
 }
@@ -151,6 +153,18 @@ function integrityReport(date = today()): IntegrityReport {
     },
     charging: false,
     activityRecognition: { requested: false, available: false, current: 'unknown' },
+    motionGate: {
+      enabled: false,
+      verdict: 'unknown',
+      gatedSteps: 0,
+      rules: {
+        windowSeconds: 3,
+        stillVariance: 0.02,
+        minPeakRatio: 0.12,
+        maxZeroCrossingRate: 9,
+        engageSeconds: 2,
+      },
+    },
     device: {
       emulator: false,
       testKeysBuild: false,
@@ -257,6 +271,7 @@ export const StepTracker = {
     date,
     deviceSteps: 0,
     recoveredSteps: 0,
+    gatedSteps: 0,
     sensor: 'step_counter',
     coverageStartAt: 0,
     countFrom: null,

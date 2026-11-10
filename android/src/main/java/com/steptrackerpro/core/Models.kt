@@ -43,6 +43,8 @@ data class StepSnapshot(
     val recoveredSteps: Int = 0,
     /** Of this device's count, how many the integrity checks flagged. See [DayTotals.suspectSteps]. */
     val suspectSteps: Int = 0,
+    /** Of this device's count, how many the motion gate held back. See [DayTotals.gatedSteps]. */
+    val gatedSteps: Int = 0,
     /**
      * Of `steps`, what the app says the user's other devices counted - see
      * [StepTrackerCore.setOtherDevicesSteps]. 0 on this device's own
@@ -83,7 +85,17 @@ data class DayTotals(
      * `fraudDetection.mode: 'exclude'` a resolved day has already had them
      * taken out of `steps`; everywhere else they are still in it.
      */
-    val suspectSteps: Int = 0
+    val suspectSteps: Int = 0,
+    /**
+     * Of this device's raw count, how many the motion gate held back as a
+     * machine's vibration rather than steps - a bus, a car, a bicycle. 0
+     * unless `motionGate.enabled`. Already out of `steps`, always and
+     * whatever `fraudDetection.mode` says: unlike a flag, which is evidence
+     * for a policy to weigh, this is the device saying it did not see a
+     * step. `steps + gatedSteps` is what the hardware counter reported, and
+     * is what `deviceSteps` carries. See [GaitGate].
+     */
+    val gatedSteps: Int = 0
 )
 
 data class RangeStats(

@@ -50,6 +50,7 @@ Permissions in one place: [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 | Health Connect | availability and features, permissions scoped to config, read, write - per day, or per minute as Health Connect's guidance asks (opt-in) - idempotent batched sync, deletes, opt-in vitals; spends little of Health Connect's rate limits and backs off when they run out |
 | Watches        | reads a paired watch through Health Connect and never double-counts |
 | Continuity     | Health Connect says 6,000 → the phone keeps it moving: 6,001, 6,005, 6,010 |
+| Vehicles       | opt-in `motionGate`: watches the accelerometer and keeps steps the hardware counter reports while a bus, car or bicycle shakes the phone out of every number |
 | Fraud checks   | opt-in: flags shaken phones, swing gadgets, charging, vehicles and implausible totals; event log; Keystore attestation and signed snapshots |
 | Offline        | everything works with no network; remote sync is queued           |
 | Bridge         | Turbo Module with an old-architecture shim, full TypeScript types |
@@ -143,6 +144,34 @@ const snapshot = await StepTracker.getVerificationSnapshot(date, {
 
 The default `"flag"` mode changes no number; the verdict is evidence for your
 server. See [docs/API.md](docs/API.md#integrity-checks).
+
+### Steps counted in a bus
+
+Android's hardware step counter is a pedometer inside the sensor hub, and on
+most phones a bus seat, a car's floor or a bicycle's frame feeds it a rhythm
+it reports as walking. The integrity checks above can *flag* that, but only
+with Play Services and only after the fact. `motionGate` stops it being
+counted in the first place:
+
+```ts
+await StepTracker.initialize({ motionGate: { enabled: true } });
+// snapshot.steps excludes it; snapshot.gatedSteps says how much
+// getIntegrityReport().motionGate.verdict — "gait" | "vibration" | "still"
+```
+
+On, the accelerometer is watched for as long as tracking runs and judged
+once a second: gait is a 1–3.3 Hz peak that holds a real share of the band's
+energy, with a crossing rate consistent with it. Steps arriving during
+vibration stay in the raw count — `deviceSteps`, the verification snapshot —
+and come out of everything shown, synced and uploaded, as `gatedSteps`.
+
+It is built to leak rather than eat: a still phone is never gated, vibration
+has to hold two seconds before a step is, a single walking verdict counts
+again at once, and nothing untimed or batched is judged at all. The cost is
+the accelerometer registered for the whole session (and a wake lock on phones
+whose accelerometer is not a wake-up sensor), which is why it is off by
+default. Every threshold is tunable; see
+[docs/API.md](docs/API.md#the-motion-gate).
 
 Stride length defaults to `height × 0.415` (male) / `0.413` (female) /
 `0.414` (unspecified); pass `strideLength` in metres to override. Calories use
@@ -402,8 +431,13 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.7.2** — a batch the sensor
-hub replays, or delivers out of order, is no longer read as a counter that
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.0** — `motionGate` keeps
+steps the hardware counter reports while a bus, a car or a bicycle shakes the
+phone out of every number, by watching the accelerometer and telling a
+walking rhythm from a machine's vibration; opt-in, because it costs the
+accelerometer for the whole session. It also fixes a bicycle being tagged
+nowhere at all, so no flag could ever cover a ride. **2.7.2** stopped a batch
+the sensor hub replays, or delivers out of order, being read as a counter that
 restarted at a high value, which counted the whole dip a second time and read
 a couple of percent high all day. **2.7.1** closed two other ways the day
 could read higher than the phone walked: a dip that stayed high was read as a

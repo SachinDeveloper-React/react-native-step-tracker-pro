@@ -380,6 +380,67 @@ transaction, and out on `motionWindow`. JVM tests feed synthetic walking at
 1.8 Hz and shaking at 4 Hz and assert the two separate on frequency,
 variance, crossing rate and purity, at 20 and 50 Hz alike.
 
+The band scan itself lives in `MotionBand.peak`, shared with the motion gate:
+a direct Fourier evaluation at the samples' own timestamps, one bin at a
+time across a band, returning the strongest frequency and its share of that
+band's energy.
+
+### The motion gate
+
+Opt-in (`motionGate.enabled`), and the only thing in this package that takes
+steps out of a count without a server or a mode saying so. What it catches is
+not a user cheating but the sensor being wrong: `TYPE_STEP_COUNTER` is a
+pedometer inside the sensor hub, and on a great many phones a bus seat, a
+car's floor or a bicycle's frame feeds it a rhythm it reports as walking.
+By the time a step reaches this package the evidence is gone - the counter
+hands over a number, not a waveform - so the only way to tell those steps
+apart is to be watching the accelerometer at the time.
+
+`GaitGate` is a sliding window: `windowSeconds` of accelerometer magnitude,
+re-judged at most once a second, with samples older than the window dropped
+from a ring buffer sized for 100 Hz. Per verdict, from the mean-removed
+magnitude (so gravity and orientation drop out):
+
+- variance under `stillVariance` → `still`;
+- crossing rate over `maxZeroCrossingRate` → `vibration`;
+- otherwise `MotionBand.peak` over 0.3-6 Hz, deliberately wider than the
+  gait band: scanned only across 1-3.3 Hz, a coach's half-hertz sway leaks
+  over the band's edge and reports as a strong 1 Hz peak, which read as a
+  slow walk. Scanned wide, the peak lands where it is. A peak outside
+  1-3.3 Hz, or holding less than `minPeakRatio` of the band, is `vibration`;
+  anything else is `gait`.
+
+The service feeds it in `onSensorChanged`, stamped with
+`SensorEventTime.resolve` rather than the sensor's own base, so a verdict can
+be matched to the step samples it covers. On a phone counting over the
+accelerometer the gate rides along on samples already arriving; otherwise the
+accelerometer is registered for as long as tracking runs - `gateListening`
+tracks who owns the registration, so a signature window closing does not take
+it down - with a wake lock on a non-wake-up sensor under the same
+`accelerometerWakeLock` policy. Paused, stopped or unregistered, the gate is
+reset.
+
+`StepCounterEngine` asks through `MotionGate.gated`, under its own lock, for
+the steps one sample *observed* - never for a recovered share, a paused
+sample, or steps handed to a day that has closed. What comes back is added to
+`StepStateStore.gatedToday`, written in the same atomic write as the counter
+state, zeroed with it at rollover and reset, and stored in
+`daily_summary.gatedSteps` (schema version 7). `stepsToday` keeps the raw
+reading, which is what `deviceSteps` reports; `adjusted()` takes the gated
+share out of every number on the way out, alongside the flagged share under
+exclude mode. The two cannot overlap: the engine passes `observed - gated` to
+`onObserved`, so what the gate held back reaches neither the integrity
+minutes nor the per-minute Health Connect mirror, and no flag can cover it.
+
+Every uncertainty counts the steps: an untimed sample, a delta spanning more
+than one verdict's reach, a verdict older than a window, a window that never
+filled, a still phone. Vibration must hold for `engageSeconds` before
+anything is held back, and one `gait` verdict ends it at once. JVM tests feed
+synthetic walks (brisk, gentle, strolling, running, with noise, and down the
+aisle of a moving bus) against bus seats, car floors, bicycles, a coach's
+sway, a train and broadband hiss, and assert each rule catches the case it
+exists for.
+
 ### Integrity checks
 
 Opt-in (`fraudDetection.enabled`). Four parts, each small, and none of them
@@ -480,10 +541,13 @@ Seven Room tables:
 - `step_history` — `id`, `date` (unique), `steps`, `distance`, `calories`,
   `synced`, `createdAt`, `updatedAt`. Hot write path.
 - `daily_summary` — `date` (PK), `totalSteps`, `totalDistance`,
-  `totalCalories`, `recoveredSteps`, `updatedAt`. Rolled-up mirror of the
-  same values, written in the same transaction as `step_history`, plus the
-  recovered share (schema version 3; earlier rows migrate with `0`). Reads
-  join it back onto the history row.
+  `totalCalories`, `recoveredSteps`, `gatedSteps`, `updatedAt`. Rolled-up
+  mirror of the same values, written in the same transaction as
+  `step_history`, plus the recovered share (schema version 3) and what the
+  motion gate held back (schema version 7); earlier rows migrate with `0` in
+  both, which is the only honest value for a day neither was recorded for.
+  Neither share is ever lowered by an upsert. Reads join it back onto the
+  history row.
 - `motion_window` — `id`, `date`, `startedAt` (indexed), `durationMs`,
   `sampleCount`, `dominantFrequencyHz`, `variance`, `zeroCrossingRate`,
   `peakRatio`, `stepsDuringWindow` (schema version 4). Bounded to

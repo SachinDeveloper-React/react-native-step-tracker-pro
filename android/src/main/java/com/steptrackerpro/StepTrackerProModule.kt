@@ -1505,7 +1505,25 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 ?: current.fraudFlagWhileCharging,
             fraudActivityRecognition = fraud(patch)
                 ?.optBoolean("activityRecognition", current.fraudActivityRecognition)
-                ?: current.fraudActivityRecognition
+                ?: current.fraudActivityRecognition,
+            // JS groups these under `motionGate`, patched key by key as well.
+            motionGateEnabled = gate(patch)?.optBoolean("enabled", current.motionGateEnabled)
+                ?: current.motionGateEnabled,
+            motionGateWindowSeconds = gate(patch)
+                ?.optInt("windowSeconds", current.motionGateWindowSeconds)
+                ?: current.motionGateWindowSeconds,
+            motionGateStillVariance = gate(patch)
+                ?.optDouble("stillVariance", current.motionGateStillVariance)
+                ?: current.motionGateStillVariance,
+            motionGateMinPeakRatio = gate(patch)
+                ?.optDouble("minPeakRatio", current.motionGateMinPeakRatio)
+                ?: current.motionGateMinPeakRatio,
+            motionGateMaxZeroCrossingRate = gate(patch)
+                ?.optDouble("maxZeroCrossingRate", current.motionGateMaxZeroCrossingRate)
+                ?: current.motionGateMaxZeroCrossingRate,
+            motionGateEngageSeconds = gate(patch)
+                ?.optInt("engageSeconds", current.motionGateEngageSeconds)
+                ?: current.motionGateEngageSeconds
         )
 
     private fun fraud(patch: ReadableMap): ReadableMap? =
@@ -1518,6 +1536,13 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
     private fun motion(patch: ReadableMap): ReadableMap? =
         if (patch.hasKey("motionSampling") && !patch.isNull("motionSampling")) {
             patch.getMap("motionSampling")
+        } else {
+            null
+        }
+
+    private fun gate(patch: ReadableMap): ReadableMap? =
+        if (patch.hasKey("motionGate") && !patch.isNull("motionGate")) {
+            patch.getMap("motionGate")
         } else {
             null
         }
@@ -1577,6 +1602,14 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
             "maxDailySteps" to config.fraudMaxDailySteps,
             "flagWhileCharging" to config.fraudFlagWhileCharging,
             "activityRecognition" to config.fraudActivityRecognition
+        ),
+        "motionGate" to mapOf(
+            "enabled" to config.motionGateEnabled,
+            "windowSeconds" to config.motionGateWindowSeconds,
+            "stillVariance" to config.motionGateStillVariance,
+            "minPeakRatio" to config.motionGateMinPeakRatio,
+            "maxZeroCrossingRate" to config.motionGateMaxZeroCrossingRate,
+            "engageSeconds" to config.motionGateEngageSeconds
         )
     )
 

@@ -101,9 +101,26 @@ class StepTrackerCore private constructor(context: Context) {
             if (writesMinutes()) mirrorMinutes.record(from, to, steps, timed)
         }
         onLate = { scheduleLateSteps() }
+        gate = { from, to, steps, timed ->
+            val gate = motionGate
+            if (gate == null) 0 else MotionGate.gated(gate, inVehicle(), from, to, steps, timed)
+        }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
         gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
     }
+
+    /**
+     * Tells a walk from a vehicle's vibration, while `motionGate.enabled`;
+     * null when it is off, which is what leaves every step counted. Replaced
+     * rather than reconfigured when the thresholds change, so a verdict is
+     * never half from one set of rules and half from another.
+     */
+    @Volatile
+    private var motionGate: GaitGate? = null
+
+    /** The verdict last logged, so the event log gets one row per change. */
+    @Volatile
+    private var lastMotionVerdict: MotionVerdict = MotionVerdict.UNKNOWN
 
     /** A late-steps write is queued; one covers a whole batch. */
     private val lateStepsQueued = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -162,13 +179,79 @@ class StepTrackerCore private constructor(context: Context) {
      */
     private fun emitLiveSteps(): StepSnapshot {
         val live = engine.snapshot()
-        val resolution = resolveFromCache(DayTotals(live.date, live.steps, live.distance, live.calories))
+        val resolution = resolveFromCache(totalsOf(live))
         val shown = displaySnapshot(live, resolution)
         StepEventBus.emit(
             StepEventBus.Events.STEPS_CHANGED,
             com.steptrackerpro.util.Bridge.snapshotMap(shown, resolution)
         )
         return shown
+    }
+
+    // ---- motion gate -----------------------------------------------------
+
+    /**
+     * Builds, rebuilds or drops the gate to match the config. Called when
+     * tracking starts and whenever config changes; the service decides
+     * separately whether it has an accelerometer to feed it with.
+     */
+    fun syncMotionGate() {
+        val config = config()
+        if (!config.motionGateEnabled) {
+            if (motionGate != null) {
+                motionGate = null
+                lastMotionVerdict = MotionVerdict.UNKNOWN
+                integrity.log(IntegrityEvent.MOTION_GATE, mapOf("enabled" to false))
+            }
+            return
+        }
+        // Rebuilt only when the thresholds actually moved, so a config change
+        // about something else does not throw away the seconds of window a
+        // verdict rests on - and so no verdict is ever half from one set of
+        // rules and half from another.
+        val rules = config.motionGateRules()
+        if (motionGate?.rules == rules) return
+        motionGate = GaitGate(rules)
+        lastMotionVerdict = MotionVerdict.UNKNOWN
+        integrity.log(IntegrityEvent.MOTION_GATE, mapOf("enabled" to true))
+    }
+
+    /** True while the gate is on, for the service's sensor bookkeeping. */
+    fun motionGateRunning(): Boolean = motionGate != null
+
+    /** The gate's current verdict, for the integrity report. */
+    fun motionVerdict(): MotionVerdict =
+        motionGate?.verdictFor(System.currentTimeMillis()) ?: MotionVerdict.UNKNOWN
+
+    /**
+     * One accelerometer sample from the service, on the sensor thread.
+     *
+     * @param atMillis when the sample was taken, epoch ms - the same base
+     *   the step samples carry, so a verdict can be matched to the steps it
+     *   covers.
+     */
+    fun onMotionSample(x: Float, y: Float, z: Float, atMillis: Long) {
+        val fresh = motionGate?.onSample(x, y, z, atMillis) ?: return
+        if (fresh == lastMotionVerdict) return
+        lastMotionVerdict = fresh
+        integrity.log(IntegrityEvent.MOTION_GATE, mapOf("verdict" to fresh.jsValue))
+    }
+
+    /** Forgets the window and verdict: a pause or a stop makes both moot. */
+    fun resetMotionGate() {
+        motionGate?.reset()
+        lastMotionVerdict = MotionVerdict.UNKNOWN
+    }
+
+    /**
+     * True when Activity Recognition says the phone is being carried by a
+     * machine. Proof enough on its own - it watches minutes of movement,
+     * where the gate sees seconds - and silent unless the host app ships
+     * Play Services and `fraudDetection.activityRecognition` is on.
+     */
+    private fun inVehicle(): Boolean = when (integrity.activity) {
+        ActivityState.IN_VEHICLE, ActivityState.ON_BICYCLE -> true
+        else -> false
     }
 
     // ---- other devices ---------------------------------------------------
@@ -403,9 +486,7 @@ class StepTrackerCore private constructor(context: Context) {
         val config = config()
         state.lastHeartbeatAt = System.currentTimeMillis()
 
-        val resolution = resolveFromCache(
-            DayTotals(snapshot.date, snapshot.steps, snapshot.distance, snapshot.calories)
-        )
+        val resolution = resolveFromCache(totalsOf(snapshot))
         val shown = displaySnapshot(snapshot, resolution)
 
         val now = android.os.SystemClock.elapsedRealtime()
@@ -423,9 +504,7 @@ class StepTrackerCore private constructor(context: Context) {
                 delay(config.eventThrottleMs - (now - previous))
                 trailingEventQueued.set(false)
                 val live = engine.snapshot()
-                val res = resolveFromCache(
-                    DayTotals(live.date, live.steps, live.distance, live.calories)
-                )
+                val res = resolveFromCache(totalsOf(live))
                 lastEventAt.set(android.os.SystemClock.elapsedRealtime())
                 StepEventBus.emit(
                     StepEventBus.Events.STEPS_CHANGED,
@@ -634,7 +713,7 @@ class StepTrackerCore private constructor(context: Context) {
             // land to a counter reading zero halfway through their day.
             if (newDate < closing.date) {
                 val stored = repository.getDay(newDate)
-                engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps)
+                engine.seedActiveDay(newDate, stored.steps, stored.recoveredSteps, stored.gatedSteps)
             }
             StepEventBus.emit(
                 StepEventBus.Events.DAY_CHANGED,
@@ -883,7 +962,8 @@ class StepTrackerCore private constructor(context: Context) {
         snapshot.distance,
         snapshot.calories,
         false,
-        recoveredSteps = snapshot.recoveredSteps
+        recoveredSteps = snapshot.recoveredSteps,
+        gatedSteps = snapshot.gatedSteps
     )
 
     /**
@@ -917,19 +997,51 @@ class StepTrackerCore private constructor(context: Context) {
         return repository.getDay(date)
     }
 
-    /** Stored rows for a range, as they are, with each day's suspect steps stamped on. */
+    /**
+     * Stored rows for a range, with each day's suspect steps stamped on and
+     * what the motion gate held back taken out. The flagged share is only
+     * taken out under exclude mode, which [resolveDay] and [resolvedStats]
+     * apply; the gated share is out of every number, always.
+     */
     suspend fun history(start: String, end: String): List<DayTotals> {
         awaitClosedDay()
         val days = repository.getRange(start, end)
         val suspects = integrity.suspects(days)
-        if (suspects.isEmpty()) return days
-        return days.map { it.copy(suspectSteps = suspects[it.date] ?: 0) }
+        if (suspects.isEmpty() && days.none { it.gatedSteps > 0 }) return days
+        return days.map { day ->
+            val suspect = suspects[day.date] ?: 0
+            if (day.gatedSteps > 0) adjusted(day, suspect, 0) else day.copy(suspectSteps = suspect)
+        }
     }
 
     /** [IntegrityMonitor.report], once any close of the day - its final verdict - has landed. */
     suspend fun integrityReport(date: String): Map<String, Any?> {
         awaitClosedDay()
-        return integrity.report(date)
+        return integrity.report(date) + ("motionGate" to motionGateReport(date))
+    }
+
+    /**
+     * What the gate is doing and what it has held back on [date]. Reported
+     * whether or not `fraudDetection.enabled`: the gate stands on its own,
+     * and an app that turned it on needs to see what it did without having
+     * to turn the detector on as well.
+     */
+    private suspend fun motionGateReport(date: String): Map<String, Any?> {
+        val config = config()
+        return mapOf(
+            "enabled" to config.motionGateEnabled,
+            "verdict" to motionVerdict().jsValue,
+            "gatedSteps" to dayTotals(date).gatedSteps,
+            "rules" to config.motionGateRules().let { rules ->
+                mapOf(
+                    "windowSeconds" to config.motionGateWindowSeconds,
+                    "stillVariance" to rules.stillVariance,
+                    "minPeakRatio" to rules.minPeakRatio,
+                    "maxZeroCrossingRate" to rules.maxZeroCrossingRate,
+                    "engageSeconds" to config.motionGateEngageSeconds
+                )
+            }
+        )
     }
 
     /** Minutes with steps between the two days, inclusive, those still in memory included. */
@@ -947,14 +1059,21 @@ class StepTrackerCore private constructor(context: Context) {
      * stamped either way so every record can report it.
      */
     private fun adjusted(day: DayTotals, suspect: Int, excluded: Int): DayTotals {
-        if (excluded <= 0) return if (day.suspectSteps == suspect) day else day.copy(suspectSteps = suspect)
-        val kept = (day.steps - excluded).coerceAtLeast(0)
+        // The gate's steps come out whatever `fraudDetection.mode` says: a
+        // flag is evidence for a policy to weigh, this is the device saying
+        // it never saw a step. The two cannot overlap - what the gate held
+        // back reaches no minute, so no flag can cover it - so they add.
+        val gated = day.gatedSteps.coerceIn(0, day.steps)
+        val out = (excluded.coerceAtLeast(0) + gated).coerceAtMost(day.steps)
+        if (out <= 0) return if (day.suspectSteps == suspect) day else day.copy(suspectSteps = suspect)
+        val kept = day.steps - out
         return day.copy(
             steps = kept,
             distance = metrics.distance(kept),
             calories = metrics.calories(kept),
             recoveredSteps = day.recoveredSteps.coerceAtMost(kept),
-            suspectSteps = suspect
+            suspectSteps = suspect,
+            gatedSteps = gated
         )
     }
 
@@ -979,7 +1098,9 @@ class StepTrackerCore private constructor(context: Context) {
     suspend fun mirrorTotals(day: DayTotals): DayTotals {
         val suspect = integrity.suspect(day.date, day.steps)
         val excluded = integrity.excluded(suspect)
-        return if (excluded > 0) adjusted(day, suspect, excluded) else day
+        // A vehicle's vibration is not handed on to every other app reading
+        // Health Connect, mode or no mode.
+        return if (excluded > 0 || day.gatedSteps > 0) adjusted(day, suspect, excluded) else day
     }
 
     // ---- step source resolution -----------------------------------------
@@ -1189,6 +1310,11 @@ class StepTrackerCore private constructor(context: Context) {
             // This phone's own sensor, before any policy. Never Health Connect.
             "deviceSteps" to device.steps,
             "recoveredSteps" to device.recoveredSteps,
+            // Of `deviceSteps`, what the motion gate held back as a machine's
+            // vibration - already out of `resolved`, and signed with it, so a
+            // server can see the device's own judgement rather than guess at
+            // the difference. See GaitGate.
+            "gatedSteps" to device.gatedSteps,
             "sensor" to state.source.jsValue,
             // Only today's coverage is known; a past day reads 0, which is
             // also what a day covered from midnight reads.
@@ -1471,7 +1597,10 @@ class StepTrackerCore private constructor(context: Context) {
         // Each day's suspect figure stamped on, and under exclude mode taken
         // out before any source competes - the same order resolveDay() uses.
         val suspects = integrity.suspects(stored.days)
-        val base = if (suspects.isEmpty()) {
+        // A day the gate held steps back on has to be re-derived too, even
+        // with the detector off and nothing flagged: the aggregates the
+        // repository summed include what the gate took out.
+        val base = if (suspects.isEmpty() && stored.days.none { it.gatedSteps > 0 }) {
             stored
         } else {
             stored.copy(days = stored.days.map { day ->
@@ -1764,7 +1893,7 @@ class StepTrackerCore private constructor(context: Context) {
     fun displaySnapshot(base: StepSnapshot = engine.snapshot()): StepSnapshot =
         displaySnapshot(
             base,
-            resolveFromCache(DayTotals(base.date, base.steps, base.distance, base.calories))
+            resolveFromCache(totalsOf(base))
         )
 
     fun displaySnapshot(
@@ -2156,7 +2285,10 @@ class StepTrackerCore private constructor(context: Context) {
             val dayEnd = minOf(DateKeys.endOfDayInstant(mirror.date), now)
             val plan = MinuteWritePlan.plan(
                 minutes, mirror.steps, DateKeys.startOfDayMillis(mirror.date), dayEnd.toEpochMilli(), rewrite,
-                observed = own?.let { it.steps - it.recoveredSteps } ?: mirror.steps
+                // What the sensor was seen taking: the day's own count less
+                // what recovery credited in one go and what the motion gate
+                // held back, neither of which any minute holds.
+                observed = own?.let { it.steps - it.recoveredSteps - it.gatedSteps } ?: mirror.steps
             )
             HealthConnectManager.MinuteDay(
                 totals = mirror,
@@ -2373,7 +2505,9 @@ class StepTrackerCore private constructor(context: Context) {
             "fraudActivityRecognition", "gapRecovery", "gapRecoveryMaxSteps", "stepSource",
             "preferredStepSourcePackage", "healthConnectIgnoreManualEntries", "wearableTrust",
             "wearableAllowlist", "accelerometerFallback", "accelerometerThreshold",
-            "motionSamplingEnabled"
+            "motionSamplingEnabled", "motionGateEnabled", "motionGateWindowSeconds",
+            "motionGateStillVariance", "motionGateMinPeakRatio",
+            "motionGateMaxZeroCrossingRate", "motionGateEngageSeconds"
         )
 
         /** Stands in for "this device" in [StepStateStore.lastResolvedSource]. */

@@ -33,7 +33,7 @@ abstract class StepDatabase : RoomDatabase() {
         private const val NAME = "step_tracker_pro.db"
 
         /** Kept next to the `@Database` annotation; the migration test targets it. */
-        const val VERSION = 6
+        const val VERSION = 7
 
         /**
          * Health Connect and the remote endpoint used to share the `synced`
@@ -162,9 +162,28 @@ abstract class StepDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * `daily_summary.gatedSteps`: how many of a day's steps the motion
+         * gate held back as a vehicle's vibration. Existing rows get 0 -
+         * nothing was held back on a day the gate did not run - so every
+         * stored day keeps showing exactly the total it showed before the
+         * upgrade. Same ALTER as version 3, and for the same reason: this
+         * table is the only place a user's history lives.
+         */
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE daily_summary ADD COLUMN gatedSteps INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
         /** Every migration, in order, for the builder and the migration test. */
         internal val MIGRATIONS: Array<Migration> =
-            arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            arrayOf(
+                MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
+                MIGRATION_6_7
+            )
 
         @Volatile
         private var instance: StepDatabase? = null

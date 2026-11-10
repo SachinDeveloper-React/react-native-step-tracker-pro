@@ -1,5 +1,36 @@
 # Migrating
 
+## From 2.7 to 2.8
+
+Nothing to change in code, and no number moves until you opt in.
+
+- **The database is at version 7.** One `ALTER TABLE` adds
+  `daily_summary.gatedSteps` with a default of 0, so every stored day keeps
+  showing exactly the total it showed before the upgrade. As always there is
+  no destructive fallback, and a downgrade to a build expecting version 6
+  will refuse to open the database - see
+  [History is gone after installing an older build](TROUBLESHOOTING.md#history-is-gone-after-installing-an-older-build).
+- **`motionGate` is new and off.** Turn it on and steps the hardware counter
+  reports while a bus, a car or a bicycle shakes the phone stop being
+  counted: they stay in `deviceSteps`, come out of `steps`, and are reported
+  as `gatedSteps`. Expect users' daily numbers to come down, by whatever
+  their commute was adding - which is the point, so roll it out as a change
+  users will notice. It costs the accelerometer registered for the whole
+  session. See [the motion gate](API.md#the-motion-gate).
+- **`gatedSteps` is on `StepSnapshot`, `DayRecord` and the verification
+  snapshot**, `0` while the gate is off. A server that validates a snapshot's
+  fields against a fixed list needs one more; `schemaVersion` stays `2`, as
+  for every added field. A server crediting
+  `deviceSteps - recoveredSteps - suspectSteps` should subtract `gatedSteps`
+  too, or it will credit the bus ride the device already refused.
+- **`getIntegrityReport()` carries a `motionGate` block**, reported whether or
+  not `fraudDetection.enabled`.
+- **A bicycle now counts towards `vehicleSteps` and the `in_vehicle` flag.**
+  It was tagged nowhere at all before, so apps that ship
+  `play-services-location` with `activityRecognition: true` will see
+  `in_vehicle` flags, and under `mode: 'exclude'` lower numbers, for rides
+  that previously passed unflagged.
+
 ## From 2.6 to 2.7
 
 Nothing to change in code for most apps; two behaviours move.

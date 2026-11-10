@@ -46,7 +46,12 @@ data class MinuteSample(
     val chargingSteps: Int = 0,
     /** Of [totalSteps], how many arrived while Activity Recognition said still. */
     val stillSteps: Int = 0,
-    /** Of [totalSteps], how many arrived while Activity Recognition said in a vehicle. */
+    /**
+     * Of [totalSteps], how many arrived while Activity Recognition said the
+     * phone was in a vehicle or on a bicycle. Both are one count: a bicycle
+     * is a machine carrying the phone, and its frame feeds the step counter
+     * the same false rhythm a bus does.
+     */
     val vehicleSteps: Int = 0
 ) {
     val totalSteps: Int get() = steps + untimedSteps
@@ -211,8 +216,14 @@ class StepTimeline {
             if (charging) entry.charging += total
             when (activity) {
                 ActivityState.STILL -> entry.still += total
-                ActivityState.IN_VEHICLE -> entry.vehicle += total
-                else -> Unit
+                // A bicycle counts as a vehicle here: it is a machine
+                // carrying the phone, its frame buzzes the counter the same
+                // way, and before 2.8.0 these steps were tagged nowhere at
+                // all - the transition was requested from Play Services and
+                // then dropped on the floor, so no flag could ever cover a
+                // ride.
+                ActivityState.IN_VEHICLE, ActivityState.ON_BICYCLE -> entry.vehicle += total
+                ActivityState.UNKNOWN, ActivityState.WALKING, ActivityState.RUNNING -> Unit
             }
         }
         while (pending.size > MAX_PENDING_MINUTES) pending.pollFirstEntry()

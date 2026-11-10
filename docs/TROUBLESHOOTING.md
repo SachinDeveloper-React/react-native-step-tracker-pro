@@ -26,12 +26,54 @@ all on that hardware. Options, in order of how much they give up:
 - `accelerometerFallback: false` — no counting on that phone; Health Connect
   reads still work if another app supplies steps.
 
-## Steps counted in a car or on a bus
+## Steps counted in a car, on a bus or on a bicycle
 
-Only the accelerometer fallback is affected; the hardware counter has its own
-vehicle rejection. The detector ignores vibration above 3 Hz and rocking
-below 0.8 Hz, but a rough road at walking cadence looks like walking. Raise
-`accelerometerThreshold` (default 0.9 m/s²) toward 1.5 if users report it;
+This affects the hardware counter too, not only the accelerometer fallback.
+`TYPE_STEP_COUNTER` is a pedometer inside the sensor hub, and whatever
+vehicle rejection its vendor implemented is the vendor's business: on a great
+many phones a bus seat, a car's floor or a bicycle's frame feeds it a rhythm
+it reports as walking, hundreds of steps an hour. Google Fit and Samsung
+Health on the same phone show it too, which is how to confirm it is the
+sensor and not this package.
+
+Turn the motion gate on (2.8.0):
+
+```ts
+await StepTracker.initialize({ motionGate: { enabled: true } });
+```
+
+The accelerometer is then watched for as long as tracking runs and judged
+once a second, and steps that arrive while the phone is being shaken by a
+machine rather than walked with are held back: still in `deviceSteps`, out of
+`steps`, reported as `gatedSteps`. See
+[API.md](API.md#the-motion-gate) for every threshold.
+
+To check it on a device, put `getIntegrityReport().motionGate.verdict` on
+screen - the example app does - and watch it:
+
+- sitting in a bus it should read `vibration` within about five seconds of
+  the ride settling, and `gatedSteps` should stop rising;
+- walking it should read `gait` within a second or two;
+- holding the phone dead still it reads `still`, which is **not** gated on
+  purpose: a steady phone gives the counter no vibration to mistake for a
+  step, and an accelerometer that stopped delivering looks identical.
+
+If a ride still leaks steps, it is a smooth one whose vibration lands at a
+walking cadence. Lower `stillVariance` toward 0.005 if the phone barely
+moves, or `maxZeroCrossingRate` toward 6 if the road is smooth; both gate
+more, and eventually start gating gentle walks, so change one at a time and
+check `gatedSteps` against a day you walked normally. If the app ships
+`play-services-location`, also set
+`fraudDetection: { enabled: true, activityRecognition: true }`: Activity
+Recognition's "in a vehicle" and "on a bicycle" are then taken as proof and
+skip the accelerometer's verdict.
+
+On a phone with **no** step sensor, counting over the accelerometer
+(`getDeviceCapabilities().bestSensor === 'accelerometer'`), the software
+pedometer ignores vibration above 3 Hz and rocking below 0.8 Hz, but a rough
+road at walking cadence looks like walking there too. The gate applies to it
+as well, for free - the samples are already arriving - and raising
+`accelerometerThreshold` (default 0.9 m/s²) toward 1.5 is the other lever;
 gentle walks with the phone in a bag start being missed above that.
 
 ## Counting stops when the screen goes off
@@ -234,7 +276,9 @@ In order of likelihood:
    moving vehicle and when the phone is shaken; Google Fit and Samsung
    Health show the same on that device. Compare with the phone's own
    Health Connect count (`getStepSources()` → `isPlatform`), which comes
-   from the same sensor: if both climb, it is the sensor.
+   from the same sensor: if both climb, it is the sensor. `motionGate`
+   (2.8.0) is the fix for the vehicle half of this - see
+   [Steps counted in a car, on a bus or on a bicycle](#steps-counted-in-a-car-on-a-bus-or-on-a-bicycle).
 2. **A HAL that jitters backwards.** A reading below the previous one used to
    be treated as a restart and the dip added back on the next sample. 1.3
    fixed it for dips of three steps or fewer, and the rule now judges a
@@ -247,7 +291,8 @@ In order of likelihood:
    `stepSource.kind`: if it is `'watch'` or another wearable kind, the lead
    is trusted by design; if the user pinned the source, it is trusted by
    choice.
-4. **The accelerometer fallback in a vehicle** — see below.
+4. **The accelerometer fallback in a vehicle** — see
+   [Steps counted in a car, on a bus or on a bicycle](#steps-counted-in-a-car-on-a-bus-or-on-a-bicycle).
 
 ## Steps are stuck
 

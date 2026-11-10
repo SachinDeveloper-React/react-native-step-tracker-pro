@@ -78,10 +78,16 @@ class StepRepository(context: Context) {
         if (steps <= 0) return null
         return db.withTransaction {
             val existing = history.findByDate(date)
-            val share = summaries.findByDate(date)?.recoveredSteps ?: 0
+            val summary = summaries.findByDate(date)
+            val share = summary?.recoveredSteps ?: 0
             val total = (existing?.steps ?: 0) + steps
             val totals = metrics.totals(
-                date, total, recoveredSteps = if (recovered) share + steps else share
+                date, total,
+                recoveredSteps = if (recovered) share + steps else share,
+                // Backfilled steps are never gated - nothing watched them
+                // being taken - but what the day already had held back
+                // stays held back.
+                gatedSteps = summary?.gatedSteps ?: 0
             )
             history.replace(totals.toEntity())
             summaries.upsert(totals.toSummary())
@@ -409,7 +415,8 @@ class StepRepository(context: Context) {
             date, steps, distance, calories, syncedHealth, syncedRemote,
             // Never more than the day has: a summary row is replaced whole,
             // and a reset that lowered the total lowered this with it.
-            recoveredSteps = (summary?.recoveredSteps ?: 0).coerceIn(0, steps)
+            recoveredSteps = (summary?.recoveredSteps ?: 0).coerceIn(0, steps),
+            gatedSteps = (summary?.gatedSteps ?: 0).coerceIn(0, steps)
         )
 
     private fun DayTotals.toEntity() = StepHistoryEntity(
@@ -426,6 +433,7 @@ class StepRepository(context: Context) {
         totalSteps = steps,
         totalDistance = distance,
         totalCalories = calories,
-        recoveredSteps = recoveredSteps
+        recoveredSteps = recoveredSteps,
+        gatedSteps = gatedSteps
     )
 }

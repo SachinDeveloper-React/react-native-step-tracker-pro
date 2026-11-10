@@ -96,6 +96,25 @@ const INVALID_CONFIGS: Array<[StepTrackerConfig, RegExp]> = [
   [{ motionSampling: { enabled: true, windowSeconds: 61 } }, /windowSeconds/],
   [{ motionSampling: { enabled: true, intervalMinutes: 0 } }, /intervalMinutes/],
   [{ motionWindowRetention: 0 }, /motionWindowRetention/],
+  [{ motionGate: { enabled: true, windowSeconds: 0 } }, /motionGate.windowSeconds/],
+  [{ motionGate: { enabled: true, windowSeconds: 16 } }, /motionGate.windowSeconds/],
+  [{ motionGate: { enabled: true, windowSeconds: 3.5 } }, /motionGate.windowSeconds/],
+  [{ motionGate: { enabled: true, engageSeconds: -1 } }, /motionGate.engageSeconds/],
+  [{ motionGate: { enabled: true, engageSeconds: 121 } }, /motionGate.engageSeconds/],
+  [{ motionGate: { enabled: true, stillVariance: 2 } }, /motionGate.stillVariance/],
+  [
+    { motionGate: { enabled: true, stillVariance: Number.NaN } },
+    /motionGate.stillVariance/,
+  ],
+  [{ motionGate: { enabled: true, minPeakRatio: 1 } }, /motionGate.minPeakRatio/],
+  [
+    { motionGate: { enabled: true, maxZeroCrossingRate: 0 } },
+    /motionGate.maxZeroCrossingRate/,
+  ],
+  [
+    { motionGate: { enabled: true, maxZeroCrossingRate: 101 } },
+    /motionGate.maxZeroCrossingRate/,
+  ],
   [{ wearableAllowlist: ['com.example.band', ''] }, /wearableAllowlist/],
   [{ wearableAllowlist: 'com.example.band' as unknown as string[] }, /wearableAllowlist/],
   [{ gapRecoveryMaxSteps: Number.NaN }, /gapRecoveryMaxSteps/],
@@ -310,15 +329,40 @@ describe('updateConfig()', () => {
     });
   });
 
-  it('patches one key of fraudDetection or motionSampling without restating enabled', async () => {
+  it('patches one key of fraudDetection, motionSampling or motionGate without restating enabled', async () => {
     // Native patches these objects key by key, so the types must not demand
     // `enabled` - this compiling is half the test.
     await StepTracker.updateConfig({ fraudDetection: { mode: 'exclude' } });
     await StepTracker.updateConfig({ motionSampling: { intervalMinutes: 2 } });
+    await StepTracker.updateConfig({ motionGate: { engageSeconds: 5 } });
     expect(native.calledWith('updateConfig')).toEqual([
       [{ fraudDetection: { mode: 'exclude' } }],
       [{ motionSampling: { intervalMinutes: 2 } }],
+      [{ motionGate: { engageSeconds: 5 } }],
     ]);
+  });
+
+  it('passes the motion gate through with every threshold the caller set', async () => {
+    await StepTracker.updateConfig({
+      motionGate: {
+        enabled: true,
+        windowSeconds: 4,
+        stillVariance: 0.01,
+        minPeakRatio: 0.15,
+        maxZeroCrossingRate: 7,
+        engageSeconds: 0,
+      },
+    });
+    expect(native.calledWith('updateConfig')[0]![0]).toEqual({
+      motionGate: {
+        enabled: true,
+        windowSeconds: 4,
+        stillVariance: 0.01,
+        minPeakRatio: 0.15,
+        maxZeroCrossingRate: 7,
+        engageSeconds: 0,
+      },
+    });
   });
 
   it.each(INVALID_CONFIGS)('rejects %j like initialize does', async (config, message) => {

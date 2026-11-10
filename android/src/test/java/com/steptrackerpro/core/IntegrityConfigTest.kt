@@ -136,6 +136,69 @@ class IntegrityConfigTest {
     }
 
     @Test
+    fun `the motion gate is off by default and its rules follow the window`() {
+        val config = StepTrackerConfig()
+        assertFalse(config.motionGateEnabled)
+        assertEquals(GateDefaults.WINDOW_SECONDS, config.motionGateWindowSeconds)
+        val rules = config.motionGateRules()
+        assertEquals(3_000L, rules.windowMs)
+        assertEquals(2_000L, rules.engageMs)
+        assertEquals(GaitGateRules.DEFAULT_STILL_VARIANCE, rules.stillVariance, 0.0)
+        // A verdict stays usable for a window past the samples it came from,
+        // and never for less than the default, so a one-second window does
+        // not expire between two step samples.
+        assertEquals(GaitGateRules.DEFAULT_STALE_MS, rules.staleMs)
+        assertEquals(16_000L, StepTrackerConfig(motionGateWindowSeconds = 15).motionGateRules().staleMs)
+    }
+
+    @Test
+    fun `the motion gate fields survive the persisted JSON`() {
+        val config = StepTrackerConfig(
+            motionGateEnabled = true,
+            motionGateWindowSeconds = 5,
+            motionGateStillVariance = 0.05,
+            motionGateMinPeakRatio = 0.2,
+            motionGateMaxZeroCrossingRate = 12.0,
+            motionGateEngageSeconds = 6
+        )
+        assertEquals(config, StepTrackerConfig.fromJson(config.toJson()))
+    }
+
+    @Test
+    fun `out-of-range gate thresholds are clamped, and a NaN falls back`() {
+        val wild = StepTrackerConfig(
+            motionGateWindowSeconds = 600,
+            motionGateStillVariance = 50.0,
+            motionGateMinPeakRatio = 1.0,
+            motionGateMaxZeroCrossingRate = 0.0,
+            motionGateEngageSeconds = -5
+        ).sanitised()
+        assertEquals(GateDefaults.MAX_WINDOW_SECONDS, wild.motionGateWindowSeconds)
+        // A still floor of 50 would call a sprint still and gate nothing; a
+        // peak share of 1 wants a pure tone and would gate every walk.
+        assertEquals(1.0, wild.motionGateStillVariance, 0.0)
+        assertEquals(0.9, wild.motionGateMinPeakRatio, 0.0)
+        assertEquals(1.0, wild.motionGateMaxZeroCrossingRate, 0.0)
+        assertEquals(0, wild.motionGateEngageSeconds)
+        assertEquals(
+            GateDefaults.MIN_WINDOW_SECONDS,
+            StepTrackerConfig(motionGateWindowSeconds = 0).sanitised().motionGateWindowSeconds
+        )
+        // NaN compares false against everything, so clamping it would turn a
+        // check off rather than hold it in range.
+        val nan = StepTrackerConfig(
+            motionGateStillVariance = Double.NaN,
+            motionGateMinPeakRatio = Double.NaN,
+            motionGateMaxZeroCrossingRate = Double.POSITIVE_INFINITY
+        ).sanitised()
+        assertEquals(GaitGateRules.DEFAULT_STILL_VARIANCE, nan.motionGateStillVariance, 0.0)
+        assertEquals(GaitGateRules.DEFAULT_MIN_PEAK_RATIO, nan.motionGateMinPeakRatio, 0.0)
+        assertEquals(
+            GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE, nan.motionGateMaxZeroCrossingRate, 0.0
+        )
+    }
+
+    @Test
     fun `persisted config never carries the headers, which are sealed separately`() {
         val config = StepTrackerConfig(remoteSyncHeaders = mapOf("Authorization" to "Bearer secret"))
         assertFalse(config.toJson(includeHeaders = false).has("remoteSyncHeaders"))

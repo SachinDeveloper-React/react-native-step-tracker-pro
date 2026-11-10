@@ -118,43 +118,19 @@ class MotionWindowSampler(
             return MotionFeatures(startedAt, duration, n, 0.0, variance, zeroCrossingRate, 0.0, stepsDuringWindow)
         }
 
-        // Direct Fourier evaluation at the samples' own timestamps, so an
-        // irregular or batched delivery is used as it came. One bin every
-        // BIN_HZ across the band: a walk and a shake sit far enough apart
-        // that finer resolution buys nothing.
-        val t0 = times[0]
-        var bestPower = 0.0
-        var bestHz = 0.0
-        var totalPower = 0.0
-        var hz = MIN_HZ
-        while (hz <= MAX_HZ + 1e-9) {
-            var re = 0.0
-            var im = 0.0
-            val w = 2.0 * PI * hz / 1000.0
-            for (i in 0 until n) {
-                val phase = w * (times[i] - t0)
-                re += x[i] * cos(phase)
-                im -= x[i] * sin(phase)
-            }
-            val power = re * re + im * im
-            totalPower += power
-            if (power > bestPower) {
-                bestPower = power
-                bestHz = hz
-            }
-            hz += BIN_HZ
-        }
-        val peakRatio = if (totalPower > 0.0) (bestPower / totalPower).coerceIn(0.0, 1.0) else 0.0
+        // One bin every BIN_HZ across the band: a walk and a shake sit far
+        // enough apart that finer resolution buys nothing.
+        val peak = MotionBand.peak(x, LongArray(n) { times[it] }, n, MIN_HZ, MAX_HZ, BIN_HZ)
         magnitudes.clear()
         times.clear()
         return MotionFeatures(
             startedAt = startedAt,
             durationMs = duration,
             sampleCount = n,
-            dominantFrequencyHz = bestHz,
+            dominantFrequencyHz = peak.hz,
             variance = variance,
             zeroCrossingRate = zeroCrossingRate,
-            peakRatio = peakRatio,
+            peakRatio = peak.ratio,
             stepsDuringWindow = stepsDuringWindow
         )
     }
@@ -176,5 +152,65 @@ class MotionWindowSampler(
         const val MAX_HZ = 6.0
 
         const val BIN_HZ = 0.05
+    }
+}
+
+/** Where a band's energy sits, and how much of the band's energy is at that one frequency. */
+internal data class SpectralPeak(val hz: Double, val ratio: Double)
+
+/**
+ * A direct Fourier evaluation at the samples' own timestamps, so an irregular
+ * or batched delivery is used exactly as it came: nothing is resampled, and it
+ * does not matter whether the hub delivered 20 Hz, 50 Hz, or a second's batch
+ * all at once.
+ *
+ * Shared by [MotionWindowSampler], which scans the whole motion band for a
+ * signature a server can judge, and by [GaitGate], which scans the gait band
+ * for a rhythm the device can judge on the spot.
+ */
+internal object MotionBand {
+
+    /**
+     * @param values the signal with its mean already removed.
+     * @param times each sample's time, any monotonic millisecond base; only
+     *   differences are used.
+     * @param n how many of [values] and [times] to read.
+     * @return the strongest frequency between [minHz] and [maxHz], and its
+     *   share of the energy found in that band: near 1 for a pure tone, lower
+     *   for a rhythm with harmonics, near 0 for broadband noise.
+     */
+    fun peak(
+        values: DoubleArray,
+        times: LongArray,
+        n: Int,
+        minHz: Double,
+        maxHz: Double,
+        binHz: Double
+    ): SpectralPeak {
+        if (n <= 0 || binHz <= 0.0 || maxHz < minHz) return SpectralPeak(0.0, 0.0)
+        val t0 = times[0]
+        var bestPower = 0.0
+        var bestHz = 0.0
+        var totalPower = 0.0
+        var hz = minHz
+        while (hz <= maxHz + 1e-9) {
+            var re = 0.0
+            var im = 0.0
+            val w = 2.0 * PI * hz / 1000.0
+            for (i in 0 until n) {
+                val phase = w * (times[i] - t0)
+                re += values[i] * cos(phase)
+                im -= values[i] * sin(phase)
+            }
+            val power = re * re + im * im
+            totalPower += power
+            if (power > bestPower) {
+                bestPower = power
+                bestHz = hz
+            }
+            hz += binHz
+        }
+        val ratio = if (totalPower > 0.0) (bestPower / totalPower).coerceIn(0.0, 1.0) else 0.0
+        return SpectralPeak(bestHz, ratio)
     }
 }

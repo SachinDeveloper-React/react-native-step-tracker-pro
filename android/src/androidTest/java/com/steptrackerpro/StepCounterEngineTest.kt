@@ -47,6 +47,9 @@ class StepCounterEngineTest {
     private val backfillReasons = mutableListOf<StepCounterEngine.BackfillReason>()
     private val observed = mutableListOf<Triple<Long, Long, Int>>()
     private val observedTimed = mutableListOf<Boolean>()
+
+    /** What the motion gate was asked about: span and steps. */
+    private val gateCalls = mutableListOf<Triple<Long, Long, Int>>()
     private var lateCalls = 0
 
     private fun now() = fakeNow
@@ -77,6 +80,7 @@ class StepCounterEngineTest {
         backfillReasons.clear()
         observed.clear()
         observedTimed.clear()
+        gateCalls.clear()
         lateCalls = 0
         engine = StepCounterEngine(
             state,
@@ -111,6 +115,14 @@ class StepCounterEngineTest {
     }
 
     private fun yesterdayAt(hour: Int, minute: Int) = bootAt(DateKeys.yesterday(), hour) + minute * 60_000L
+
+    /** A gate that calls everything it is shown a machine's vibration. */
+    private fun gateEverything() {
+        engine.gate = { from, to, steps, _ ->
+            gateCalls += Triple(from, to, steps)
+            steps
+        }
+    }
 
     @Test
     fun observedDeltasCarryTheSpanTheyWereTakenIn() {
@@ -992,6 +1004,94 @@ class StepCounterEngineTest {
 
         engine.consumeCommit()
         assertFalse(engine.shouldCommit(0))
+    }
+
+    @Test
+    fun theMotionGateHoldsStepsBackWithoutTouchingTheRawCount() {
+        engine.onCounterSample(100f, now())
+        gateEverything()
+        val t = now() + 10_000L
+        val snapshot = engine.onCounterSample(140f, t)!!
+        // The raw reading is kept whole - it is what `deviceSteps` reports -
+        // and the forty steps the gate held back are carried beside it.
+        assertEquals(140, snapshot.steps)
+        assertEquals(140, state.stepsToday)
+        assertEquals(40, snapshot.gatedSteps)
+        assertEquals(40, state.gatedToday)
+        assertEquals(Triple(now(), t, 40), gateCalls.single())
+        // And the day committed to storage says the same.
+        assertEquals(40, engine.consumeCommit().gatedSteps)
+    }
+
+    @Test
+    fun whatTheGateHoldsBackNeverReachesTheMinuteTimeline() {
+        engine.onCounterSample(100f, now())
+        observed.clear()
+        // Half of each delta: a verdict covering only part of what arrived.
+        engine.gate = { _, _, steps, _ -> steps / 2 }
+        engine.onCounterSample(120f, now() + 5_000L)
+        engine.onDetectorSample(8, now() + 9_000L)
+        // The minutes are the steps this device counted *as steps*, so a
+        // bus ride's vibration is in no minute and reaches neither the
+        // integrity timeline nor the per-minute Health Connect mirror.
+        assertEquals(listOf(10, 4), observed.map { it.third })
+        assertEquals(14, engine.snapshot().gatedSteps)
+        assertEquals(28, engine.snapshot().steps)
+    }
+
+    @Test
+    fun theGateIsNeverAskedAboutStepsItCannotJudge() {
+        context.getSharedPreferences(StepStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        state.activeDate = DateKeys.today()
+        fakeBoot = bootAt(DateKeys.today(), 7)
+        gateEverything()
+
+        // An install's since-boot claim is apportioned, not watched: there is
+        // no window that covers it and nothing is held back.
+        assertEquals(3000, engine.onCounterSample(3000f, now())!!.steps)
+        assertTrue(gateCalls.isEmpty())
+        assertEquals(0, engine.snapshot().gatedSteps)
+
+        // A paused tracker credits nothing, so there is nothing to gate.
+        engine.setPaused(true)
+        engine.onCounterSample(3100f, now() + 1_000L)
+        engine.setPaused(false)
+        assertTrue(gateCalls.isEmpty())
+    }
+
+    @Test
+    fun theGatedShareIsZeroedWithTheDayItDescribed() {
+        engine.onCounterSample(100f, now())
+        gateEverything()
+        engine.onCounterSample(160f, now() + 5_000L)
+        assertEquals(60, state.gatedToday)
+
+        // Reset: the share goes with the count it described.
+        engine.resetToday()
+        assertEquals(0, state.gatedToday)
+        assertEquals(0, engine.snapshot().gatedSteps)
+
+        // And so does a rollover, with the closing day keeping its own.
+        engine.onCounterSample(200f, now())
+        engine.onCounterSample(260f, now() + 5_000L)
+        val closed = state.gatedToday
+        assertTrue(closed > 0)
+        state.activeDate = DateKeys.yesterday()
+        assertTrue(engine.rollIfNeeded())
+        assertEquals(closed, rollovers.single().first.gatedSteps)
+        assertEquals(0, state.gatedToday)
+    }
+
+    @Test
+    fun aDayAdoptedBackwardsKeepsWhatTheGateHeldBackOnIt() {
+        // Travelling west across the date line: the day being adopted already
+        // has steps against it, and a gated share that has to come back with
+        // them or its shown total would jump.
+        engine.seedActiveDay(state.activeDate, 4000, recoveredSteps = 500, gatedSteps = 120)
+        assertEquals(4000, engine.snapshot().steps)
+        assertEquals(500, engine.snapshot().recoveredSteps)
+        assertEquals(120, engine.snapshot().gatedSteps)
     }
 
     @Test

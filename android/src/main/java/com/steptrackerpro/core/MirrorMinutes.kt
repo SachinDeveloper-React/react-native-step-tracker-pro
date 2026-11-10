@@ -86,8 +86,9 @@ object MinuteWritePlan {
      * @param rewrite every minute with steps is written again, changed or not -
      *   its distance and calories follow a profile that changed.
      * @param observed of the day's own count, the steps the sensor was seen
-     *   taking - not those credited in one go by recovery, and before
-     *   exclude mode took flagged steps out of [total]. Minutes counting
+     *   taking - not those credited in one go by recovery, nor what the
+     *   motion gate held back, and before exclude mode took flagged steps
+     *   out of [total]. Minutes counting
      *   past it hold steps not in the count yet - taken after it was read,
      *   or late steps not credited to their day yet - and give them back
      *   from the end, where they are; only what is left over [total] is

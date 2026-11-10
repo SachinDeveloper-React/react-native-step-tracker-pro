@@ -608,7 +608,7 @@ once, plus whatever the rest of the day exceeds `maxDailySteps` by.
 | `steady_cadence` | strong | `steadyCadenceMinutes` in a row whose counts never move by more than one step from one minute to the next, with no pause: a swing gadget or motor. A treadmill drifts by more |
 | `continuous` | strong | walking past `maxContinuousMinutes` with no pause; only the excess minutes |
 | `charging` | strong | steps counted while plugged in — gadgets and shakers are usually left on a charger |
-| `in_vehicle` | strong from 3 minutes, weak below | steps counted while Activity Recognition said in a vehicle |
+| `in_vehicle` | strong from 3 minutes, weak below | steps counted while Activity Recognition said in a vehicle **or on a bicycle**. Before 2.8.0 a bicycle was tagged nowhere at all, so no flag could cover a ride |
 | `activity_still` | weak | steps counted while Activity Recognition said still |
 | `night` | weak | half an hour or more of walking starting between midnight and 5:00 |
 | `shake` | strong | a motion window at 3.3 Hz or faster, with variance over 20 and a tonal peak |
@@ -680,12 +680,19 @@ call; a past day reads the verdict stored when it closed.
     { at: 1757840000000, type: 'clock_changed', detail: { jumpMs: -3600000 } },
   ],
   minutes: { count: 212, timedSteps: 13900, untimedSteps: 310, chargingSteps: 3960,
-             stillSteps: 0, vehicleSteps: 0 },
+             stillSteps: 0, vehicleSteps: 0 },   // steps the gate held back are in none of them
   evaluatedAt: 1757845200000,
   rules: { maxCadenceSpm: 200, steadyCadenceMinutes: 30, maxContinuousMinutes: 180,
            maxDailySteps: 50000, flagWhileCharging: true },
   charging: false,          // right now; false for a past day
   activityRecognition: { requested: false, available: false, current: 'unknown' },
+  motionGate: {             // 2.8; reported whether or not the checks are on
+    enabled: true,
+    verdict: 'gait',        // what the gate makes of the movement right now
+    gatedSteps: 1840,       // of deviceSteps, held back as a vehicle's vibration
+    rules: { windowSeconds: 3, stillVariance: 0.02, minPeakRatio: 0.12,
+             maxZeroCrossingRate: 9, engageSeconds: 2 },
+  },
   device: { emulator: false, testKeysBuild: false, suBinary: false, adbEnabled: false,
             developerOptions: true, appDebuggable: false,
             stepCounter: { name: 'step_counter', vendor: 'Qualcomm', version: 1, wakeUp: false } },
@@ -705,7 +712,9 @@ Events logged while the checks are on: `clock_changed` (`detail.jumpMs`),
 `config_changed` (`detail.keys` — the integrity-relevant settings that
 moved, logged even when the change turns the checks off), `sensor_changed`
 (`from`, `to`), `charging_started`, `charging_stopped`, `activity_changed`,
-`service_recovered` (`reason`) and `device_attested` (`keyId`). The log is
+`service_recovered` (`reason`), `motion_gate` (`detail.enabled` when the gate
+is switched on or off, `detail.verdict` on every change of verdict - 2.8) and
+`device_attested` (`keyId`). The log is
 bounded to 2,000 entries and to `historyRetentionDays`, and `clearHistory()`
 keeps it — logging the clear — so wiping history cannot wipe the record that
 it happened.
@@ -905,6 +914,91 @@ holds to count steps, and nothing about location is read. Without the
 dependency, or on a phone without Play Services, it does nothing and
 `IntegrityReport.activityRecognition.available` is `false`.
 
+### The motion gate
+
+Everything above *flags*. The motion gate is the one thing here that changes
+a number, because the thing it catches is not a user cheating but the phone
+being wrong: Android's hardware step counter is a pedometer inside the sensor
+hub, and on most phones a bus seat, a car's floor or a bicycle's frame feeds
+it a rhythm it reports as walking. It is a separate switch from
+`fraudDetection`, and works with no Play Services and no server.
+
+```ts
+await StepTracker.initialize({
+  motionGate: {
+    enabled: true,
+    windowSeconds: 3,          // how much of the recent past one verdict covers; 1-15
+    stillVariance: 0.02,       // (m/s²)² below which the phone is still - and never gated
+    minPeakRatio: 0.12,        // share of the band's energy a gait peak must hold; 0-0.9
+    maxZeroCrossingRate: 9,    // crossings a second above which it is buzz, not gait; 1-100
+    engageSeconds: 2,          // unbroken vibration before a step is held back; 0-120
+  },
+});
+```
+
+On, the accelerometer is registered for as long as tracking runs — 25 Hz,
+batched a second at a time where the sensor hub allows it — and once a second
+the last `windowSeconds` are reduced to three numbers from the gravity-removed
+magnitude, so a phone in a pocket, a bag or a hand is judged the same way:
+
+- the **variance**, which says whether anything is happening at all;
+- the **zero-crossing rate**, which road and engine buzz inflates far past
+  what a human cadence can produce — a clean oscillation crosses twice a
+  cycle, so even a 3 Hz sprint sits near 6;
+- the **strongest frequency between 0.3 and 6 Hz and its share of that band's
+  energy**, evaluated at the samples' own timestamps so a batched delivery
+  needs no resampling.
+
+| Verdict | When | Steps |
+|---|---|---|
+| `gait` | a peak between 1 and 3.3 Hz holding at least `minPeakRatio` of the band, with a crossing rate under `maxZeroCrossingRate` | counted |
+| `still` | variance under `stillVariance` | counted |
+| `vibration` | moving, but no gait in it | held back, once it has held for `engageSeconds` |
+| `unknown` | the gate is off, no window has filled, or no verdict is recent enough | counted |
+
+Steps that arrive during vibration stay in the raw count — `deviceSteps`,
+`getVerificationSnapshot().deviceSteps` — and are reported as `gatedSteps`,
+out of `steps` on the live snapshot, the notification, `getHistory()`, every
+stats call, what is written to Health Connect, what is uploaded, and the
+device count before Health Connect sources compete. There is no mode that
+leaves them in: unlike a flag, which is evidence for your policy to weigh,
+this is the device saying it never saw a step. `steps + gatedSteps` is what
+the hardware counter reported.
+
+It is built to leak rather than eat, because losing a real step is worse than
+keeping a false one:
+
+- a **still** phone is never gated — a steady phone gives the counter no
+  vibration to mistake for a step, and an accelerometer that stopped
+  delivering looks exactly like a still one;
+- vibration must hold for `engageSeconds` before anything is held back, while
+  a single `gait` verdict counts again at once: get off a bus and the next
+  second counts;
+- nothing **untimed** is gated — a screen-off walk arriving in one batch
+  carries only its arrival time — and neither is a delta spanning more than
+  one verdict's reach, nor anything gap recovery credited in one go;
+- a verdict more than a window old says nothing about now.
+
+With `fraudDetection.activityRecognition` also on, Activity Recognition's
+"in a vehicle" and "on a bicycle" are taken as proof and skip the
+accelerometer's verdict: it has watched minutes of movement where the gate
+sees seconds. `motionGate.enabled` governs that shortcut too.
+
+**The cost.** On a phone with a hardware counter — almost every phone — this
+is one extra sensor registration for the whole session, and on a phone whose
+accelerometer is not a wake-up sensor a partial wake lock, as
+`accelerometerWakeLock` governs. Without the wake lock the gate goes blind
+with the screen off and counts everything, which is the case it exists for.
+On a phone already counting over the accelerometer (`source:
+'accelerometer'`) it rides along on samples that are already arriving.
+
+**It is not perfect.** A smooth ride whose vibration happens to land at a
+walking cadence will still leak steps, and the first second or two of a ride
+is counted before the gate engages. Tune it against your own devices with
+`getIntegrityReport().motionGate.verdict`, which says what the gate thinks
+right now — sit in a bus with it on screen and watch it move from `gait` to
+`vibration`.
+
 ### What this cannot catch
 
 Everything above runs on a phone the user controls. A rooted phone can feed
@@ -915,8 +1009,9 @@ fits:
 
 - credit nothing from an install whose attestation failed, or whose
   snapshots stop verifying;
-- credit `deviceSteps - recoveredSteps - suspectSteps` outright; treat weak
-  flags, `untimedSteps` and recovered steps as lower confidence;
+- credit `deviceSteps - recoveredSteps - suspectSteps - gatedSteps`
+  outright; treat weak flags, `untimedSteps` and recovered steps as lower
+  confidence;
 - never reject on a single weak flag; send days with several flags, or a
   large `suspectSteps`, to review;
 - look at the events: a `clock_changed` or `reset_today` next to a big day,

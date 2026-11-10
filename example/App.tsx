@@ -42,7 +42,7 @@ const FLAG_LABELS: Record<IntegrityFlag['type'], string> = {
   steady_cadence: 'Machine-steady pace',
   continuous: 'Hours without a pause',
   charging: 'Counted while charging',
-  in_vehicle: 'Counted in a vehicle',
+  in_vehicle: 'Counted in a vehicle or on a bike',
   activity_still: 'Counted while still',
   night: 'Long walk in the small hours',
   shake: 'Phone being shaken',
@@ -137,6 +137,14 @@ export default function App() {
     fraudDetection: { enabled: true, mode: 'flag' },
     // Short accelerometer windows, so the detector can tell a shake from a walk.
     motionSampling: { enabled: true },
+    // The fix for steps counted while sitting in a bus or riding a bike:
+    // the accelerometer is watched while tracking runs, and steps that
+    // arrive while the phone is being shaken by a machine rather than
+    // walked with stay out of every number - reported as `gatedSteps`,
+    // with the raw reading still in `deviceSteps`. Costs battery: the
+    // accelerometer stays registered. Watch
+    // getIntegrityReport().motionGate.verdict to tune it on your devices.
+    motionGate: { enabled: true },
     onGoalReached: (event) =>
       Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
     // Re-read the snapshot the integrity card is drawn from.
@@ -256,6 +264,9 @@ export default function App() {
     .reduce((sum, source) => sum + source.manualSteps, 0);
   const recoveredSteps = snapshot?.recoveredSteps ?? 0;
   const suspectSteps = snapshot?.suspectSteps ?? 0;
+  // What the motion gate kept out of the count: a bus ride, a bike ride.
+  // Already out of `steps`, whatever fraudDetection.mode says.
+  const gatedSteps = snapshot?.gatedSteps ?? 0;
   // Set by an app whose server adds up the user's devices - see
   // setOtherDevicesSteps(). Already in `steps`; never in what is uploaded.
   const otherDevicesSteps = snapshot?.otherDevicesSteps ?? 0;
@@ -311,6 +322,11 @@ export default function App() {
           <Text style={styles.laneLabel}>
             {suspectSteps.toLocaleString()} flagged as suspect
             {snapshot?.stepSource?.suspectStepsExcluded ? ', not counted' : ''}
+          </Text>
+        )}
+        {gatedSteps > 0 && (
+          <Text style={styles.laneLabel}>
+            {gatedSteps.toLocaleString()} held back as vehicle vibration
           </Text>
         )}
         {(recoveredSteps > 0 || manualSteps > 0) && (
@@ -524,6 +540,19 @@ export default function App() {
               {integrity.charging ? ' · charging now' : ''}
               {deviceHints.length > 0 ? ` · ${deviceHints.join(', ')}` : ''}
             </Text>
+            {/*
+              The gate's live verdict. Sit in a bus with this on screen and
+              it should read "vibration" within a few seconds; walk and it
+              should read "gait" again by the next second.
+            */}
+            {integrity.motionGate.enabled && (
+              <Text style={styles.cardMeta}>
+                Motion gate: {integrity.motionGate.verdict}
+                {integrity.motionGate.gatedSteps > 0
+                  ? ` · ${integrity.motionGate.gatedSteps.toLocaleString()} steps held back`
+                  : ' · nothing held back'}
+              </Text>
+            )}
           </View>
         )}
 

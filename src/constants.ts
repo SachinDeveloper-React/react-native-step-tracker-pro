@@ -42,6 +42,7 @@ export const DEFAULT_CONFIG: Required<
     | 'motionSampling'
     | 'motionWindowRetention'
     | 'fraudDetection'
+    | 'motionGate'
   >
 > = {
   height: 170,
@@ -89,6 +90,14 @@ export const DEFAULT_CONFIG: Required<
     maxDailySteps: 50000,
     flagWhileCharging: true,
     activityRecognition: false,
+  },
+  motionGate: {
+    enabled: false,
+    windowSeconds: 3,
+    stillVariance: 0.02,
+    minPeakRatio: 0.12,
+    maxZeroCrossingRate: 9,
+    engageSeconds: 2,
   },
 };
 

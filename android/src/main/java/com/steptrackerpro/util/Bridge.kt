@@ -48,6 +48,8 @@ object Bridge {
         // winner does not change them.
         "recoveredSteps" to snapshot.recoveredSteps,
         "suspectSteps" to snapshot.suspectSteps,
+        // Already out of `steps`: what the motion gate called vibration.
+        "gatedSteps" to snapshot.gatedSteps,
         // Of `steps`, what the app said the user's other devices counted.
         "otherDevicesSteps" to snapshot.otherDevicesSteps
     )
@@ -68,6 +70,7 @@ object Bridge {
         putBoolean("syncedRemote", totals.syncedRemote)
         putInt("recoveredSteps", totals.recoveredSteps)
         putInt("suspectSteps", totals.suspectSteps)
+        putInt("gatedSteps", totals.gatedSteps)
     }
 
     fun days(list: List<DayTotals>): WritableArray = Arguments.createArray().apply {

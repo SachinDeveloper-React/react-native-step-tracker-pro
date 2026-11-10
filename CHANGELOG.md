@@ -5,6 +5,117 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-11-10
+
+A minor release about the oldest complaint there is: *"I sat in a bus for an
+hour and it counted two thousand steps."* It adds `motionGate`, which tells a
+walking rhythm from a machine's vibration and keeps the machine's steps out of
+every number, and fixes a bug that meant a bicycle could never be flagged at
+all.
+
+### Added
+
+- **`motionGate`: steps counted while a vehicle shakes the phone are held
+  back.** Android's hardware step counter is a pedometer inside the sensor
+  hub, and on most phones a bus seat, a car's floor or a bicycle's frame
+  feeds it a rhythm it reports as walking. Nothing this package did
+  afterwards could tell those steps from real ones, because by the time a
+  step arrives the evidence is gone: the counter hands over a number, not a
+  waveform. So with `motionGate: { enabled: true }` the accelerometer is
+  watched for as long as tracking runs, and once a second the last three
+  seconds are judged - is this a person walking, or a machine vibrating?
+
+  Three numbers decide it, from the gravity-removed accelerometer magnitude,
+  so a phone in a pocket, a bag or a hand is judged the same way: the
+  variance, which says whether anything is happening at all; the
+  zero-crossing rate, which road and engine buzz inflates far past what a
+  human cadence can produce; and the strongest frequency between 0.3 and
+  6 Hz with its share of that band's energy, found at the samples' own
+  timestamps so a batched delivery needs no resampling. Gait is a peak
+  between 1 and 3.3 Hz that holds a real share of the band, with a crossing
+  rate consistent with it. Everything else that is moving at all is
+  vibration.
+
+  Steps that arrive during vibration stay in the raw count, which is what
+  `deviceSteps` and the verification snapshot report, and are reported as
+  `gatedSteps` - out of `steps` everywhere: the live snapshot, the
+  notification, history, stats, what goes into Health Connect, what is
+  uploaded, and the device count before Health Connect sources compete.
+  Unlike a flag, which is evidence for a policy to weigh, this is the device
+  saying it never saw a step, so there is no `fraudDetection.mode` that
+  leaves it in. `steps + gatedSteps` is what the hardware counter said.
+
+  It is deliberately lopsided, because losing a real step is worse than
+  keeping a false one:
+
+  - A **still** phone is never gated. Holding a phone steady gives the
+    counter no vibration to mistake for a step, and - the reason that matters
+    - an accelerometer that stopped delivering looks exactly like a still
+    one. Gating stillness would have thrown away the first steps of every
+    walk out of every pause.
+  - Vibration has to hold for `engageSeconds` (2 by default) before a step is
+    held back, while a single walking verdict starts counting again at once.
+    Get off a bus and the next second counts.
+  - Nothing **untimed** is gated - a screen-off walk arriving in one batch
+    carries only its arrival time, and there is no window to judge it by.
+    Nor is a delta spanning more than one verdict's reach: a dead process's
+    worth of steps is not judged by three seconds of accelerometer. Nor is
+    anything gap recovery credited in one go, which was never watched.
+  - A verdict more than a window old says nothing about now, and steps it
+    would cover are counted.
+
+  With `fraudDetection.activityRecognition` also on and Play Services in the
+  app, Activity Recognition's "in a vehicle" and "on a bicycle" are taken as
+  proof and skip the accelerometer's verdict: it has watched minutes of
+  movement where the gate sees seconds. `motionGate.enabled` governs that
+  shortcut too, so an app that turns only the detector on has nothing held
+  back.
+
+  **It costs battery.** On a phone with a hardware counter - almost every
+  phone - the gate needs the accelerometer registered for as long as tracking
+  runs, at 25 Hz, batched a second at a time where the hub allows it, and on
+  a phone whose accelerometer is not a wake-up sensor a partial wake lock as
+  `accelerometerWakeLock` governs. Without the wake lock the gate goes blind
+  with the screen off and counts everything, which is the case it exists for.
+  On a phone already counting over the accelerometer it rides along for free.
+  That is why it is off by default, and why the default has not changed for
+  anybody upgrading.
+
+  **It is not perfect.** A smooth ride whose vibration happens to land at a
+  walking cadence will still leak steps, and the first second or two of a ride
+  is counted before the gate engages. Every threshold is in config, and
+  `getIntegrityReport().motionGate.verdict` says what the gate thinks right
+  now, so it can be tuned against the devices an app actually ships to -
+  sit in a bus with that on screen and watch it.
+- **`gatedSteps`** on `StepSnapshot`, `DayRecord`, the verification snapshot
+  and `getIntegrityReport().motionGate`, and a `motion_gate` integrity event
+  for every verdict change while `fraudDetection.enabled`.
+- `daily_summary.gatedSteps`, database version 7. One `ALTER TABLE` with a
+  default of 0, as version 3 added `recoveredSteps`: nothing was held back on
+  a day the gate did not run, so every stored day keeps showing exactly the
+  total it showed before the upgrade.
+
+### Fixed
+
+- **Steps taken on a bicycle were tagged nowhere at all, so no flag could
+  ever cover a ride.** `ON_BICYCLE` transitions were requested from Play
+  Services, the state reached the per-minute timeline, and the `when` that
+  turns a state into a minute's tag handled `still` and `in_vehicle` and
+  dropped everything else on the floor. A cyclist's phone could count steps
+  for an hour with `fraudDetection.activityRecognition` on, `mode:
+  'exclude'` set and nothing whatsoever to show for it. A bicycle now counts
+  towards `vehicleSteps` and the `in_vehicle` flag: it is a machine carrying
+  the phone, and its frame feeds the counter the same false rhythm a bus
+  does. Only affects apps that ship `play-services-location` and turned
+  `activityRecognition` on; for everybody else the tag was never populated
+  either way, which is what `motionGate` is for.
+
+### Changed
+
+- The spectral scan behind `motionSampling`'s windows and the one behind the
+  gate are now the same tested code (`MotionBand`), evaluated at the samples'
+  own timestamps as before. No change to any `MotionWindow` figure.
+
 ## [2.7.2] - 2026-10-30
 
 A patch: the dip 2.7.1 stopped counting twice was still counted twice when it
