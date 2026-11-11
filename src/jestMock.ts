@@ -20,8 +20,15 @@ import {
 } from './constants';
 import { StepTrackerError } from './errors';
 import type {
+  useHealthConnect as realUseHealthConnect,
+  useStepStats as realUseStepStats,
+  useStepTracker as realUseStepTracker,
+} from './hooks';
+import type { StepTracker as RealStepTracker } from './StepTracker';
+import type {
   DayRecord,
   HealthConnectDataType,
+  HealthConnectStatus,
   HealthConnectVitalType,
   IntegrityReport,
   RangeStats,
@@ -177,7 +184,7 @@ function integrityReport(date = today()): IntegrityReport {
   };
 }
 
-const healthConnectStatus = {
+const healthConnectStatus: HealthConnectStatus = {
   available: false,
   availability: 'not_installed' as const,
   requiresUpdate: false,
@@ -225,11 +232,11 @@ const permissions = {
 
 const listeners = new Map<StepTrackerEvent, Set<(payload: unknown) => void>>();
 
-const done = <T>(value: T) => fn(async (..._args: never[]) => value);
+const done = <T>(value: T) => fn(async (..._args: unknown[]) => value);
 
-export const StepTracker = {
-  initialize: fn(async (..._args: never[]) => mockSnapshot()),
-  updateConfig: fn(async (..._args: never[]) => ({ ...DEFAULT_CONFIG })),
+export const StepTracker: typeof RealStepTracker = {
+  initialize: fn(async (..._args: unknown[]) => mockSnapshot()),
+  updateConfig: fn(async (..._args: unknown[]) => ({ ...DEFAULT_CONFIG })),
   getConfig: fn(async () => ({ ...DEFAULT_CONFIG })),
   startTracking: fn(async () => mockSnapshot({ state: 'running' })),
   pauseTracking: fn(async () => mockSnapshot({ state: 'paused' })),
@@ -257,13 +264,13 @@ export const StepTracker = {
   setOtherDevicesSteps: fn(async (date: string, steps: number) =>
     date === today() ? withOtherDevices(steps) : mockSnapshot()
   ),
-  setCountFrom: fn(async (..._args: never[]) => mockSnapshot()),
+  setCountFrom: fn(async (..._args: unknown[]) => mockSnapshot()),
   getYesterdaySteps: fn(async () => day()),
   getStepsForDate: fn(async (date: string) => day(date)),
-  getWeeklyStats: fn(async (..._args: never[]) => stats()),
-  getMonthlyStats: fn(async (..._args: never[]) => stats()),
-  getYearlyStats: fn(async (..._args: never[]) => stats()),
-  getStatsForRange: fn(async (..._args: never[]) => stats()),
+  getWeeklyStats: fn(async (..._args: unknown[]) => stats()),
+  getMonthlyStats: fn(async (..._args: unknown[]) => stats()),
+  getYearlyStats: fn(async (..._args: unknown[]) => stats()),
+  getStatsForRange: fn(async (..._args: unknown[]) => stats()),
   getHistory: done([] as DayRecord[]),
   getVerificationSnapshot: fn(async (date: string) => ({
     schemaVersion: 2,
@@ -296,7 +303,7 @@ export const StepTracker = {
     suspectSteps: 0,
     integrity: integrityReport(date),
   })),
-  getSignedSnapshot: fn(async (..._args: never[]) => ({
+  getSignedSnapshot: fn(async (..._args: unknown[]) => ({
     keyId: 'mock-key',
     algorithm: 'SHA256withECDSA' as const,
     value: '',
@@ -309,7 +316,7 @@ export const StepTracker = {
   getIntegrityReport: fn(async (date: string) => integrityReport(date)),
   getIntegrityEvents: done([]),
   getStepMinutes: done([]),
-  attestDevice: fn(async (..._args: never[]) => ({
+  attestDevice: fn(async (..._args: unknown[]) => ({
     keyId: 'mock-key',
     algorithm: 'SHA256withECDSA' as const,
     publicKey: '',
@@ -325,7 +332,7 @@ export const StepTracker = {
     token: 'mock-integrity-token',
     requestHash: options.requestHash,
   })),
-  prepareIntegrity: fn(async (..._args: never[]) => undefined),
+  prepareIntegrity: fn(async (..._args: unknown[]) => undefined),
 
   resetToday: done(true),
   clearHistory: done(true),
@@ -402,7 +409,7 @@ export const StepTracker = {
     policy: 'auto' as const,
     preferredPackage: null,
   })),
-  setPreferredStepSource: fn(async (..._args: never[]) => resolved()),
+  setPreferredStepSource: fn(async (..._args: unknown[]) => resolved()),
   getInstalledCompanionApps: done([]),
 
   getSyncStatus: fn(async () => ({
@@ -450,7 +457,7 @@ export function estimateStride(
   return (height * STRIDE_COEFFICIENT[sex]) / 100;
 }
 
-export const useStepTracker = fn((..._args: never[]) => ({
+export const useStepTracker: typeof realUseStepTracker = fn((..._args: unknown[]) => ({
   snapshot: mockSnapshot(),
   state: 'idle' as const,
   ready: true,
@@ -463,29 +470,31 @@ export const useStepTracker = fn((..._args: never[]) => ({
   requestPermissions: async () => true,
 }));
 
-export const useStepStats = fn((..._args: never[]) => ({
+export const useStepStats: typeof realUseStepStats = fn((..._args: unknown[]) => ({
   stats: stats(),
   loading: false,
   error: null,
   reload: async () => {},
 }));
 
-export const useHealthConnect = fn((..._args: never[]) => ({
-  status: healthConnectStatus,
-  sources: [],
-  current: null,
-  companionApps: [],
-  hasWearable: false,
-  loading: false,
-  error: null,
-  enable: async () => healthConnectStatus,
-  request: async () => healthConnectStatus,
-  openSettings: async () => {},
-  install: async () => {},
-  revoke: async () => {},
-  selectSource: async () => {},
-  refresh: async () => {},
-}));
+export const useHealthConnect: typeof realUseHealthConnect = fn(
+  (..._args: unknown[]) => ({
+    status: healthConnectStatus,
+    sources: [],
+    current: null,
+    companionApps: [],
+    hasWearable: false,
+    loading: false,
+    error: null,
+    enable: async () => healthConnectStatus,
+    request: async () => healthConnectStatus,
+    openSettings: async () => {},
+    install: async () => {},
+    revoke: async () => {},
+    selectSource: async () => {},
+    refresh: async () => {},
+  })
+);
 
 export {
   DEFAULT_CONFIG,

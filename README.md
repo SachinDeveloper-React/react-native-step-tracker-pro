@@ -431,12 +431,15 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.0** — `motionGate` keeps
-steps the hardware counter reports while a bus, a car or a bicycle shakes the
-phone out of every number, by watching the accelerometer and telling a
-walking rhythm from a machine's vibration; opt-in, because it costs the
-accelerometer for the whole session. It also fixes a bicycle being tagged
-nowhere at all, so no flag could ever cover a ride. **2.7.2** stopped a batch
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.1** — the npm package is a
+third smaller (378 KB packed), `MotionGateConfig` and `MotionVerdict` are
+exported from the index, and `react-native.config.js` ships. **2.8.0** added
+`motionGate`, which keeps steps the hardware counter reports while a bus, a
+car or a bicycle shakes the phone out of every number, by watching the
+accelerometer and telling a walking rhythm from a machine's vibration;
+opt-in, because it costs the accelerometer for the whole session. It also
+fixed a bicycle being tagged nowhere at all, so no flag could ever cover a
+ride. **2.7.2** stopped a batch
 the sensor hub replays, or delivers out of order, being read as a counter that
 restarted at a high value, which counted the whole dip a second time and read
 a couple of percent high all day. **2.7.1** closed two other ways the day

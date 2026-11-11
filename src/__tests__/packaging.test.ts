@@ -196,8 +196,8 @@ describe('Jest mock (react-native-step-tracker-pro/jest)', () => {
 
   it('exports the hooks and constants the package does', () => {
     expect(mock.useStepTracker().ready).toBe(true);
-    expect(mock.useStepStats().loading).toBe(false);
-    expect(mock.useHealthConnect().status.available).toBe(false);
+    expect(mock.useStepStats('week').loading).toBe(false);
+    expect(mock.useHealthConnect().status?.available).toBe(false);
     expect(mock.isSupported()).toBe(true);
     expect(mock.DEFAULT_CONFIG.dailyGoal).toBe(10000);
     expect(new mock.StepTrackerError('E_UNKNOWN', 'x').code).toBe('E_UNKNOWN');

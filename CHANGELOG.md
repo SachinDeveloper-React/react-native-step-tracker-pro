@@ -5,6 +5,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.1] - 2026-11-11
+
+A patch release about what the package weighs and two things 2.8.0 left
+out of the tarball.
+
+### Fixed
+
+- `MotionGateConfig` and `MotionVerdict` are exported from the package
+  index. They were declared in 2.8.0's types and reachable only through
+  `StepTrackerConfig['motionGate']`.
+
+- `react-native.config.js` is in the published package. It names the
+  Android source directory and says there is no iOS side; autolinking
+  found the module without it, by its own heuristics, so nothing was
+  broken, but a file the CLI reads belongs in the tarball.
+
+### Changed
+
+- **The npm package is a third smaller: 378 KB packed, 1.4 MB unpacked,
+  down from 578 KB and 2.1 MB.** `docs/`, `CHANGELOG.md`, `SECURITY.md`
+  and `CONTRIBUTING.md` no longer ship in the tarball - they are on GitHub,
+  which is where the README's links to them already resolve on npm - and
+  the compiled output carries no source maps or declaration maps: `src/`
+  ships, so there is nothing to map to that is not already there. Nothing
+  an app imports has moved.
+
+- The Jest mock's declaration file is 1.8 KB instead of 22 KB: the mock is
+  typed as `typeof StepTracker` and `typeof` each hook, so its `.d.ts`
+  refers to the real signatures rather than restating every return type
+  inline. TypeScript now checks the mock against the real API, where the
+  packaging test checked only the method names.
+
+- `androidx.lifecycle:lifecycle-service` is no longer a dependency. Nothing
+  in the module imported it.
+
 ## [2.8.0] - 2026-11-10
 
 A minor release about the oldest complaint there is: *"I sat in a bus for an
