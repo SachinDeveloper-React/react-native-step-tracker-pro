@@ -46,7 +46,7 @@ npx react-native run-android
 
 ```sh
 npm test                 # Jest, JS layer, Jest mock, Expo plugin (191 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days and countFrom shares (290 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days, countFrom shares and the motion gate (317 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -511,7 +511,11 @@ synthetic accelerometer cannot produce road buzz.
 
 - [ ] walk 5 minutes: the verdict reads `gait` within a second or two, and
       `gatedSteps` stays 0 - **this is the test that matters**, because a
-      gate that eats real steps is worse than no gate
+      gate that eats real steps is worse than no gate. Do it three times:
+      phone in hand, in a front trouser pocket, and in a back pocket or bag.
+      The pocket is where 2.8.0 and 2.8.1 read a walk as `vibration`, and
+      the gap shows as this phone's count falling behind the platform's own
+      pedometer in Health Connect
 - [ ] hold the phone dead still for a minute: `still`, and `gatedSteps`
       stays 0. Not gated on purpose
 - [ ] sit in a bus or a car for 10 minutes with the phone in hand or pocket:
@@ -522,7 +526,9 @@ synthetic accelerometer cannot produce road buzz.
 - [ ] ride a bicycle for 10 minutes with the phone in a pocket: `vibration`,
       same as above
 - [ ] get off the bus and walk: the verdict is `gait` within a second or
-      two, and the count moves again with no further delay
+      two, and the count moves again with no further delay. With
+      `fraudDetection.activityRecognition` on, the count moves after ten
+      seconds of walking at the latest, whatever Activity Recognition says
 - [ ] walk down the aisle of a moving bus: `gait`, and the steps count. The
       gait peak outweighs the ride
 - [ ] with the screen off for 10 minutes of a ride, then on: on a phone whose

@@ -5,6 +5,43 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.2] - 2026-11-12
+
+A patch release: the motion gate was holding back real walks.
+
+### Fixed
+
+- **The motion gate no longer takes a walk for a vehicle when the phone is
+  in a trouser pocket.** A phone in a front pocket rides one leg, so the
+  strongest line in its accelerometer is the stride - half the step rate,
+  0.75-0.9 Hz - below the 1-3.3 Hz band the gate looked for a step in. A
+  hard heel strike does the same from above, with more energy in the step's
+  harmonic than in the step. Both read as `vibration`, and after
+  `engageSeconds` every step of the walk went into `gatedSteps` and out of
+  the count, the notification, Health Connect and the upload: the phone's
+  number fell behind the platform's own pedometer in Health Connect, which
+  reads the same hardware counter. The strongest line is now gait when it
+  is a step rate, the stride of one or the harmonic of one, as long as the
+  step rate itself is there at a quarter of its strength - which is what
+  still keeps a coach's sway from passing as a stride. Every vehicle trace
+  the gate was built against still reads as `vibration`.
+
+- A gentle walk sampled fast no longer reads as buzz. Zero crossings were
+  counted bare, so sensor noise flickering across the mean on each slow
+  slope pushed a walk at 100 Hz over `maxZeroCrossingRate`; a crossing is
+  now a swing through a band around the mean.
+
+- The gate judges a phone whose accelerometer delivers faster than 100 Hz.
+  Android delivers at the fastest rate any app asked for, and at 200 Hz the
+  window never held enough time to form a verdict, so the gate counted
+  everything. Samples closer than 8 ms apart are let go.
+
+- Activity Recognition saying "in a vehicle" or "on a bicycle" no longer
+  holds back a walk indefinitely. Its word that the phone left the vehicle
+  comes a minute or more late, and on some phones not at all, while its
+  state was never aged: every step after a missed exit was gated. Ten
+  seconds of unbroken walking on the accelerometer now outvotes it.
+
 ## [2.8.1] - 2026-11-11
 
 A patch release about what the package weighs and two things 2.8.0 left

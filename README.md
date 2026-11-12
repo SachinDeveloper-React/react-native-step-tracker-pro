@@ -431,9 +431,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.1** — the npm package is a
-third smaller (378 KB packed), `MotionGateConfig` and `MotionVerdict` are
-exported from the index, and `react-native.config.js` ships. **2.8.0** added
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.2** — the motion gate no
+longer takes a walk for a vehicle: a phone in a trouser pocket (strongest at
+the stride) and a hard heel strike (strongest at the harmonic) read as gait,
+sensor noise at 100 Hz is not counted as buzz, a sensor delivering past
+100 Hz is judged rather than ignored, and ten seconds of walking outvotes
+Activity Recognition's late word on leaving a vehicle. **2.8.1** made the npm
+package a third smaller (378 KB packed), exported `MotionGateConfig` and
+`MotionVerdict` from the index, and shipped `react-native.config.js`. **2.8.0** added
 `motionGate`, which keeps steps the hardware counter reports while a bus, a
 car or a bicycle shakes the phone out of every number, by watching the
 accelerometer and telling a walking rhythm from a machine's vibration;

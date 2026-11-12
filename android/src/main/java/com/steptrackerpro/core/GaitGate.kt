@@ -142,6 +142,10 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
     @Volatile
     private var vibrationSince: Long = 0L
 
+    /** When the current unbroken run of gait began; 0 when there is none. */
+    @Volatile
+    private var gaitSince: Long = 0L
+
     private var lastClassifiedAt: Long = 0L
 
     /**
@@ -157,6 +161,11 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         // A sample older than one already seen is a batch arriving out of
         // order; the window it belongs to has been judged or has gone.
         if (size > 0 && atMs < newestAt()) return null
+        // Android delivers a sensor at the fastest rate any app on the phone
+        // asked for, not the rate asked for here. Past the rate the window
+        // is sized for, it would hold less than half a window and never
+        // judge anything, so the extra samples are let go.
+        if (size > 0 && atMs - newestAt() < MIN_SAMPLE_GAP_MS) return null
         push(sqrt((x * x + y * y + z * z).toDouble()), atMs)
         dropOlderThan(atMs - rules.windowMs)
         if (lastClassifiedAt > 0L && atMs - lastClassifiedAt < rules.slideMs) return null
@@ -177,6 +186,11 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
             // The run starts now, not at the window's start: the window
             // reaching back over a walk that just ended must not count
             // towards engaging the gate.
+            else -> atMs
+        }
+        gaitSince = when {
+            next != MotionVerdict.GAIT -> 0L
+            previous == MotionVerdict.GAIT && gaitSince > 0L -> gaitSince
             else -> atMs
         }
         return next
@@ -208,6 +222,17 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         return steps
     }
 
+    /**
+     * Whether the accelerometer has read as walking, without a break, for
+     * at least [GAIT_OVERRIDES_VEHICLE_MS] up to [atMs] - long enough to
+     * outvote Activity Recognition, whose word that the phone left a
+     * vehicle arrives late, and on some phones not at all. See [MotionGate].
+     */
+    @Synchronized
+    fun sustainedGait(atMs: Long): Boolean =
+        verdictFor(atMs) == MotionVerdict.GAIT && gaitSince > 0L &&
+            atMs - gaitSince >= GAIT_OVERRIDES_VEHICLE_MS
+
     /** Forgets the window and the verdict; the next samples start a fresh one. */
     @Synchronized
     fun reset() {
@@ -216,6 +241,7 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         verdict = MotionVerdict.UNKNOWN
         lastVerdictAt = 0L
         vibrationSince = 0L
+        gaitSince = 0L
         lastClassifiedAt = 0L
     }
 
@@ -233,9 +259,17 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         // pocket, a bag or a hand is judged the same way.
         if (energy / n < rules.stillVariance) return MotionVerdict.STILL
 
-        var crossings = 0
-        for (i in 1 until n) if ((signal[i - 1] < 0.0) != (signal[i] < 0.0)) crossings++
-        if (crossings / (spanMs / 1_000.0) > rules.maxZeroCrossingRate) return MotionVerdict.VIBRATION
+        // Counted with hysteresis: a crossing is a swing from one side of
+        // the band to the other, not every flicker of sensor noise across
+        // zero. A gentle walk sampled at 100 Hz chatters across the mean
+        // several times on each slow slope, and counted bare, that read as
+        // buzz. A vehicle's buzz swings through the band on every cycle and
+        // is counted exactly as before.
+        if (crossings(signal, n, CROSSING_BAND * sqrt(energy / n)) / (spanMs / 1_000.0) >
+            rules.maxZeroCrossingRate
+        ) {
+            return MotionVerdict.VIBRATION
+        }
 
         // Scanned wider than the gait band on purpose. Restricted to the
         // band, a bus's half-hertz sway leaks across the band's edge and is
@@ -243,10 +277,81 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         // a motorway as a slow walk. Scanned wide, the sway peaks where it
         // actually is, outside the band, and is vibration.
         val at = LongArray(n) { timeAt(it) }
-        val peak = MotionBand.peak(signal, at, n, SCAN_MIN_HZ, SCAN_MAX_HZ, BIN_HZ)
-        if (peak.hz < MIN_GAIT_HZ || peak.hz > MAX_GAIT_HZ) return MotionVerdict.VIBRATION
-        if (peak.ratio < rules.minPeakRatio) return MotionVerdict.VIBRATION
-        return MotionVerdict.GAIT
+        val power = MotionBand.spectrum(signal, at, n, SCAN_MIN_HZ, SCAN_MAX_HZ, BIN_HZ)
+        if (power.isEmpty()) return MotionVerdict.UNKNOWN
+        var total = 0.0
+        var top = 0
+        for (i in power.indices) {
+            total += power[i]
+            if (power[i] > power[top]) top = i
+        }
+        if (total <= 0.0) return MotionVerdict.UNKNOWN
+        return if (isGait(power, top, total)) MotionVerdict.GAIT else MotionVerdict.VIBRATION
+    }
+
+    /**
+     * Whether the strongest line in [power] is a walk's: the step rate
+     * itself, the stride (half of it), or the step's first harmonic (twice
+     * it) - with the step rate there in its own right, and the three of
+     * them holding [GaitGateRules.minPeakRatio] of the energy.
+     *
+     * Only asking for the step rate called most real walks vibration. A
+     * phone in a trouser pocket rides one leg, so the strongest line is
+     * the stride at 0.75-0.9 Hz, below the gait band; a heel strike puts
+     * the most energy in the harmonic, above it. Both read as a machine,
+     * after two seconds the gate engaged, and the walk was gone.
+     *
+     * Requiring the step rate to stand at [STEP_LINE_MIN_SHARE] of the
+     * strongest line is what keeps a coach's 0.5 Hz sway from passing as
+     * the stride of a 1 Hz walk: a sway has nothing at twice its rate but
+     * the leakage of its own line.
+     */
+    private fun isGait(power: DoubleArray, top: Int, total: Double): Boolean {
+        val topHz = hzAt(top)
+        val candidates = buildList {
+            add(topHz) // the strongest line is the step
+            add(topHz * 2.0) // it is the stride
+            add(topHz / 2.0) // it is the step's harmonic
+        }
+        for (step in candidates) {
+            if (step < MIN_GAIT_HZ - 1e-9 || step > MAX_GAIT_HZ + 1e-9) continue
+            val stepPower = near(power, step)
+            if (stepPower < STEP_LINE_MIN_SHARE * power[top]) continue
+            val family = stepPower + near(power, step / 2.0) + near(power, step * 2.0)
+            if (family / total >= rules.minPeakRatio) return true
+        }
+        return false
+    }
+
+    private fun hzAt(index: Int): Double = SCAN_MIN_HZ + index * BIN_HZ
+
+    /**
+     * The power at [hz], taken as the strongest of the bins either side of
+     * it - three seconds resolve a third of a hertz, so a line spreads over
+     * several bins, and half or twice a bin's frequency rarely falls on a
+     * bin. Zero outside the scan.
+     */
+    private fun near(power: DoubleArray, hz: Double): Double {
+        val centre = Math.round((hz - SCAN_MIN_HZ) / BIN_HZ).toInt()
+        var best = 0.0
+        for (i in centre - 1..centre + 1) if (i in power.indices && power[i] > best) best = power[i]
+        return best
+    }
+
+    /** Swings of [signal] from below -[band] to above +[band], and back. */
+    private fun crossings(signal: DoubleArray, n: Int, band: Double): Int {
+        var count = 0
+        var side = 0
+        for (i in 0 until n) {
+            val now = when {
+                signal[i] > band -> 1
+                signal[i] < -band -> -1
+                else -> continue
+            }
+            if (side != 0 && now != side) count++
+            side = now
+        }
+        return count
     }
 
     // ---- the window --------------------------------------------------------
@@ -303,8 +408,34 @@ class GaitGate(val rules: GaitGateRules = GaitGateRules()) {
         /** Below a sway's slowest, so a sway peaks at itself and not at the band's edge. */
         const val SCAN_MIN_HZ = 0.3
 
-        /** Above the gait band's first harmonic, where road buzz already is. */
-        const val SCAN_MAX_HZ = 6.0
+        /**
+         * Twice the gait band's top, so a fast walk's harmonic - where a
+         * heel strike puts most of its energy - is inside the scan.
+         */
+        const val SCAN_MAX_HZ = 6.6
+
+        /**
+         * How strong the step rate itself must be, against the strongest
+         * line, for that line to be taken as the stride or a harmonic of it.
+         */
+        const val STEP_LINE_MIN_SHARE = 0.25
+
+        /**
+         * The half-width of the band a crossing has to swing through, as a
+         * share of the window's RMS.
+         */
+        const val CROSSING_BAND = 0.15
+
+        /** 1000 / [MAX_RATE_HZ], less a little for jitter in the timestamps. */
+        const val MIN_SAMPLE_GAP_MS = 8L
+
+        /**
+         * Unbroken walking this long overrides Activity Recognition saying
+         * the phone is in a vehicle. Its exit from a car or a bus comes a
+         * minute or more after the user has stepped off, and every step of
+         * the walk away was being thrown out meanwhile.
+         */
+        const val GAIT_OVERRIDES_VEHICLE_MS = 10_000L
 
         /**
          * Coarser than [MotionWindowSampler]'s: three seconds resolve about
@@ -327,8 +458,11 @@ object MotionGate {
      * How many of [steps] stay out of the day's total.
      *
      * @param inVehicle Activity Recognition says the phone is in a vehicle
-     *   or on a bicycle. Enough on its own: it is a far better witness than
-     *   three seconds of accelerometer.
+     *   or on a bicycle. Enough on its own - it is a far better witness than
+     *   three seconds of accelerometer - until the accelerometer has read as
+     *   walking for [GaitGate.GAIT_OVERRIDES_VEHICLE_MS] straight: Activity
+     *   Recognition reports leaving a vehicle late, and its state is not
+     *   aged, so one missed exit used to gate every step that followed.
      * @param timed false when only the steps' arrival is known. Nothing
      *   untimed is ever gated - there is no window to judge it by, and a
      *   screen-off walk arriving in one batch is exactly what would be lost.
@@ -347,7 +481,7 @@ object MotionGate {
         // turned only the detector on would find steps quietly missing.
         if (gate == null) return 0
         if (!timed) return 0
-        if (inVehicle) return steps
+        if (inVehicle && !gate.sustainedGait(toMs)) return steps
         return gate.gated(fromMs, toMs, steps)
     }
 }

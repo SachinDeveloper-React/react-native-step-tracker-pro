@@ -398,17 +398,29 @@ apart is to be watching the accelerometer at the time.
 
 `GaitGate` is a sliding window: `windowSeconds` of accelerometer magnitude,
 re-judged at most once a second, with samples older than the window dropped
-from a ring buffer sized for 100 Hz. Per verdict, from the mean-removed
-magnitude (so gravity and orientation drop out):
+from a ring buffer sized for 100 Hz. Samples closer together than 8 ms are
+let go: Android delivers at the fastest rate any app on the phone asked for,
+and at 200 Hz the buffer held less than half a window and never judged
+anything. Per verdict, from the mean-removed magnitude (so gravity and
+orientation drop out):
 
 - variance under `stillVariance` → `still`;
-- crossing rate over `maxZeroCrossingRate` → `vibration`;
-- otherwise `MotionBand.peak` over 0.3-6 Hz, deliberately wider than the
-  gait band: scanned only across 1-3.3 Hz, a coach's half-hertz sway leaks
-  over the band's edge and reports as a strong 1 Hz peak, which read as a
-  slow walk. Scanned wide, the peak lands where it is. A peak outside
-  1-3.3 Hz, or holding less than `minPeakRatio` of the band, is `vibration`;
-  anything else is `gait`.
+- crossing rate over `maxZeroCrossingRate` → `vibration`. A crossing is a
+  swing from below -0.15 RMS to above +0.15 RMS or back, so the chatter of
+  sensor noise on a gentle walk's slow slopes is not counted as buzz;
+- otherwise `MotionBand.spectrum` over 0.3-6.6 Hz, deliberately wider than
+  the gait band: scanned only across 1-3.3 Hz, a coach's half-hertz sway
+  leaks over the band's edge and reports as a strong 1 Hz peak, which read
+  as a slow walk. Scanned wide, the peak lands where it is. It is `gait`
+  when the strongest line is a step rate in 1-3.3 Hz, **or the stride (half
+  of one) or its first harmonic (twice one)** - provided that step rate
+  stands at a quarter of the strongest line in its own right, and the step,
+  stride and harmonic together hold `minPeakRatio` of the energy. Anything
+  else is `vibration`. Before 2.8.2 only the first case was gait, which
+  called a phone in a trouser pocket (strongest at the stride, 0.75-0.9 Hz)
+  and a hard heel strike (strongest at the harmonic) a vehicle and held back
+  the walk. The quarter-strength rule is what keeps a sway from passing as
+  the stride of a walk: a sway has nothing at twice its rate but leakage.
 
 The service feeds it in `onSensorChanged`, stamped with
 `SensorEventTime.resolve` rather than the sensor's own base, so a verdict can
@@ -435,8 +447,13 @@ minutes nor the per-minute Health Connect mirror, and no flag can cover it.
 Every uncertainty counts the steps: an untimed sample, a delta spanning more
 than one verdict's reach, a verdict older than a window, a window that never
 filled, a still phone. Vibration must hold for `engageSeconds` before
-anything is held back, and one `gait` verdict ends it at once. JVM tests feed
-synthetic walks (brisk, gentle, strolling, running, with noise, and down the
+anything is held back, and one `gait` verdict ends it at once. Activity
+Recognition's in-vehicle or on-bicycle state gates on its own, without the
+accelerometer, until the gate has read `gait` for ten unbroken seconds
+(`GaitGate.sustainedGait`): Activity Recognition's state is not aged, and
+its exit from a vehicle comes late or, on some phones, never. JVM tests feed
+synthetic walks (brisk, gentle, strolling, running, with noise, sampled at
+25 to 200 Hz, a phone in a trouser pocket, a heel strike, and down the
 aisle of a moving bus) against bus seats, car floors, bicycles, a coach's
 sway, a train and broadband hiss, and assert each rule catches the case it
 exists for.

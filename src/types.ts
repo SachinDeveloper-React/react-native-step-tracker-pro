@@ -325,7 +325,10 @@ export interface StepTrackerConfig {
  * With `fraudDetection.activityRecognition` also on and Play Services in the
  * app, Activity Recognition's own "in a vehicle" and "on a bicycle" are taken
  * as proof and skip the accelerometer's verdict: it has watched minutes of
- * movement where the gate sees seconds.
+ * movement where the gate sees seconds. Until the accelerometer has read as
+ * walking for ten seconds straight (from 2.8.2): Activity Recognition says
+ * the phone left a vehicle a minute or more after it did, and on some phones
+ * not at all, and every step of the walk away was being held back.
  *
  * **The cost.** On a phone with a hardware step counter - almost every phone
  * - the gate needs the accelerometer registered for as long as tracking runs,
@@ -362,16 +365,19 @@ export interface MotionGateConfig {
    */
   stillVariance?: number;
   /**
-   * Share of the motion's energy, 0..1, that the strongest frequency must
-   * hold for the rhythm to count as gait. Default 0.12; up to 0.9. A walk
-   * keeps its energy in one peak and its harmonics, broadband buzz has no
-   * peak worth the name. Raising it gates more, and eventually gates walks.
+   * Share of the motion's energy, 0..1, that a walking rhythm must hold for
+   * it to count as gait - the step rate, its stride (half of it) and its
+   * first harmonic (twice it) together. Default 0.12; up to 0.9. A walk
+   * keeps its energy in that family, broadband buzz has no peak worth the
+   * name. Raising it gates more, and eventually gates walks.
    */
   minPeakRatio?: number;
   /**
    * Mean crossings a second above which the signal is buzz rather than gait.
    * Default 9; 1 to 100. A clean oscillation crosses twice a cycle, so even
-   * a 3 Hz sprint sits near 6; road and engine buzz runs far higher.
+   * a 3 Hz sprint sits near 6; road and engine buzz runs far higher. A
+   * crossing is a swing through a band around the mean, not every flicker
+   * of sensor noise across it.
    */
   maxZeroCrossingRate?: number;
   /**

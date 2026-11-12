@@ -187,13 +187,39 @@ internal object MotionBand {
         maxHz: Double,
         binHz: Double
     ): SpectralPeak {
-        if (n <= 0 || binHz <= 0.0 || maxHz < minHz) return SpectralPeak(0.0, 0.0)
-        val t0 = times[0]
-        var bestPower = 0.0
-        var bestHz = 0.0
+        val power = spectrum(values, times, n, minHz, maxHz, binHz)
+        if (power.isEmpty()) return SpectralPeak(0.0, 0.0)
+        var best = 0
         var totalPower = 0.0
-        var hz = minHz
-        while (hz <= maxHz + 1e-9) {
+        for (i in power.indices) {
+            totalPower += power[i]
+            if (power[i] > power[best]) best = i
+        }
+        val bestHz = if (power[best] > 0.0) minHz + best * binHz else 0.0
+        val ratio = if (totalPower > 0.0) (power[best] / totalPower).coerceIn(0.0, 1.0) else 0.0
+        return SpectralPeak(bestHz, ratio)
+    }
+
+    /**
+     * The power at every [binHz] from [minHz] to [maxHz]: index `i` is
+     * `minHz + i * binHz`. Empty when there is nothing to evaluate. For a
+     * caller that has to look at more than the one strongest line - the gate
+     * asks whether that line is a step, a stride or a step's harmonic.
+     */
+    fun spectrum(
+        values: DoubleArray,
+        times: LongArray,
+        n: Int,
+        minHz: Double,
+        maxHz: Double,
+        binHz: Double
+    ): DoubleArray {
+        if (n <= 0 || binHz <= 0.0 || maxHz < minHz) return DoubleArray(0)
+        val bins = ((maxHz - minHz) / binHz + 1e-9).toInt() + 1
+        val out = DoubleArray(bins)
+        val t0 = times[0]
+        for (b in 0 until bins) {
+            val hz = minHz + b * binHz
             var re = 0.0
             var im = 0.0
             val w = 2.0 * PI * hz / 1000.0
@@ -202,15 +228,8 @@ internal object MotionBand {
                 re += values[i] * cos(phase)
                 im -= values[i] * sin(phase)
             }
-            val power = re * re + im * im
-            totalPower += power
-            if (power > bestPower) {
-                bestPower = power
-                bestHz = hz
-            }
-            hz += binHz
+            out[b] = re * re + im * im
         }
-        val ratio = if (totalPower > 0.0) (bestPower / totalPower).coerceIn(0.0, 1.0) else 0.0
-        return SpectralPeak(bestHz, ratio)
+        return out
     }
 }

@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import kotlin.math.PI
+import kotlin.math.exp
 import kotlin.math.sin
 
 /**
@@ -86,6 +87,27 @@ class GaitGateTest {
         1.6 * sin(2 * PI * 1.9 * t) + 0.5 * sin(2 * PI * 3.8 * t) +
             0.3 * sin(2 * PI * 6.5 * t) + 0.25 * sin(2 * PI * 9.3 * t)
 
+    /**
+     * A phone in a front trouser pocket rides one leg, so the stride - half
+     * the step rate - is the strongest line, below the gait band.
+     */
+    private fun pocketWalk(t: Double) =
+        1.3 * sin(2 * PI * 0.85 * t) + 1.0 * sin(2 * PI * 1.7 * t) +
+            0.6 * sin(2 * PI * 3.4 * t) + 0.3 * sin(2 * PI * 5.1 * t)
+
+    private fun slowPocketWalk(t: Double) =
+        1.0 * sin(2 * PI * 0.75 * t) + 0.7 * sin(2 * PI * 1.5 * t) + 0.4 * sin(2 * PI * 3.0 * t)
+
+    /** A hard heel strike puts more into the harmonic than into the step, above the band. */
+    private fun heelStrikeWalk(t: Double) = 1.0 * sin(2 * PI * 2.0 * t) + 1.4 * sin(2 * PI * 4.0 * t)
+
+    /** Heel strikes as the impulses they are, one per step at 1.9 Hz. */
+    private fun heelStrikes(t: Double): Double {
+        val period = 1.0 / 1.9
+        val d = t % period - period / 2
+        return 4.0 * exp(-(d * d) / (2 * 0.04 * 0.04))
+    }
+
     /** Deterministic, so a failure is reproducible. */
     private fun noise(amplitude: Double): (Double) -> Double {
         var seed = 12_345L
@@ -119,6 +141,64 @@ class GaitGateTest {
     @Test
     fun `walking down a moving bus is still walking`() {
         assertEquals(MotionVerdict.GAIT, verdictOf { walkingInABus(it) })
+    }
+
+    /**
+     * Steps every half second over [seconds] of [signal], asking the gate
+     * about each as the counting path would.
+     *
+     * @return how many of them it threw out.
+     */
+    private fun gatedOver(
+        seconds: Double = 20.0,
+        rateHz: Double = 25.0,
+        signal: (Double) -> Double
+    ): Int {
+        val gate = GaitGate()
+        var gated = 0
+        var at = BASE
+        var t = 0.0
+        while (t < seconds) {
+            at = gate.feed(at, 0.5, rateHz) { signal(t + it) } + (1000.0 / rateHz).toLong()
+            gated += gate.gated(at - 500, at, 1)
+            t += 0.5
+        }
+        return gated
+    }
+
+    @Test
+    fun `a walk whose strongest line is the stride or a harmonic is walking`() {
+        // All four read as vibration before, and lost every step after the
+        // first two seconds.
+        assertEquals(MotionVerdict.GAIT, verdictOf { pocketWalk(it) })
+        assertEquals(MotionVerdict.GAIT, verdictOf { slowPocketWalk(it) })
+        assertEquals(MotionVerdict.GAIT, verdictOf { heelStrikeWalk(it) })
+        assertEquals(MotionVerdict.GAIT, verdictOf { heelStrikes(it) })
+        assertEquals(0, gatedOver { pocketWalk(it) })
+        assertEquals(0, gatedOver { slowPocketWalk(it) })
+        assertEquals(0, gatedOver { heelStrikeWalk(it) })
+        assertEquals(0, gatedOver { heelStrikes(it) })
+    }
+
+    @Test
+    fun `a walk sampled fast with sensor noise is walking`() {
+        // Bare zero crossings counted the noise's chatter on each slow slope
+        // as buzz: eight windows in nineteen read as vibration.
+        val hiss = noise(0.15)
+        assertEquals(0, gatedOver(rateHz = 100.0) { gentleWalk(it) + hiss(it) })
+        assertEquals(0, gatedOver(rateHz = 50.0) { pocketWalk(it) })
+    }
+
+    @Test
+    fun `a sensor delivering faster than the window is sized for is still judged`() {
+        // Android delivers at the fastest rate any app asked for. At 200 Hz
+        // the window held a second and a half and never formed a verdict.
+        val gate = GaitGate()
+        gate.feed(BASE, 8.0, rateHz = 200.0) { busSeat(it) }
+        assertEquals(MotionVerdict.VIBRATION, gate.verdict)
+        val walking = GaitGate()
+        walking.feed(BASE, 8.0, rateHz = 200.0) { briskWalk(it) }
+        assertEquals(MotionVerdict.GAIT, walking.verdict)
     }
 
     @Test
@@ -323,5 +403,20 @@ class GaitGateTest {
         // `motionGate.enabled` governs both halves.
         assertEquals(0, MotionGate.gated(gate, true, at - 500, at, 6, timed = false))
         assertEquals(0, MotionGate.gated(null, true, at - 500, at, 6, timed = true))
+    }
+
+    @Test
+    fun `walking long enough outvotes Activity Recognition's late word on leaving a vehicle`() {
+        val gate = GaitGate()
+        // Off the bus and walking, and Activity Recognition has not said so
+        // yet - on some phones it never does. The first steps go with the
+        // bus; once the walk has held for ten seconds it counts.
+        val early = gate.feed(BASE, 8.0) { pocketWalk(it) }
+        assertEquals(6, MotionGate.gated(gate, true, early - 500, early, 6, timed = true))
+        val later = gate.feed(early + 40, 6.0) { pocketWalk(8.0 + it) }
+        assertEquals(0, MotionGate.gated(gate, true, later - 500, later, 6, timed = true))
+        // One window of anything else and the vehicle has the say again.
+        val shaken = gate.feed(later + 40, 3.0) { busSeat(it) }
+        assertEquals(6, MotionGate.gated(gate, true, shaken - 500, shaken, 6, timed = true))
     }
 }
