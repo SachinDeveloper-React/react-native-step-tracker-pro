@@ -67,11 +67,25 @@ class IntegritySignals(private val context: Context, private val core: StepTrack
         val wantActivity = cfg.wantsActivityRecognition
         if (wantActivity && !activityStarted) {
             activityStarted = ActivityRecognitionBridge.start(context)
+            // No request could be made - no Play Services, no permission:
+            // nothing is listening, so nothing it said before stands.
+            if (!activityStarted) core.onActivityStopped()
         } else if (!wantActivity && activityStarted) {
             ActivityRecognitionBridge.stop(context)
             activityStarted = false
             core.onActivityStopped()
         }
+    }
+
+    /**
+     * Makes the Activity Recognition request again when the last one was
+     * refused, or could not be made for want of the permission. From the
+     * service's heartbeat, on the main thread like [apply].
+     */
+    fun retryActivityRecognition() {
+        if (!core.config().wantsActivityRecognition) return
+        if (!ActivityRecognitionBridge.shouldRetry(System.currentTimeMillis())) return
+        activityStarted = ActivityRecognitionBridge.start(context)
     }
 
     fun stop() {

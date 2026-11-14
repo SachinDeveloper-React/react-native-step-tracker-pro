@@ -36,7 +36,7 @@ side of the split a permission is on.
 | `RECEIVE_BOOT_COMPLETED` | the library | restarting after a reboot | tracking stays off until the app is opened |
 | `WAKE_LOCK` | the library | sync jobs and the accelerometer fallback | background work can stop mid-run |
 | Health Connect read set: `READ_STEPS`, and `READ_DISTANCE` and `READ_TOTAL_CALORIES_BURNED` unless `healthConnectReadTypes` leaves them out | **your app**, with `healthConnectReadEnabled` (default on) | reading watches and other apps | `E_HEALTH_CONNECT_NOT_DECLARED` |
-| Health Connect write set: `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_TOTAL_CALORIES_BURNED` | **your app**, with `healthConnectWriteEnabled` (default on) | mirroring this phone's count | `E_HEALTH_CONNECT_NOT_DECLARED` |
+| Health Connect write set: `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_ACTIVE_CALORIES_BURNED` (calories are written as active burn from 2.10; `WRITE_TOTAL_CALORIES_BURNED` before) | **your app**, with `healthConnectWriteEnabled` (default on) | mirroring this phone's count | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_HEALTH_DATA_IN_BACKGROUND` | **your app**, with `healthConnectBackgroundRead` | background reads of a watch | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_HEALTH_DATA_HISTORY` | **your app**, with `healthConnectHistoryRead` | reads past 30 days | `E_HEALTH_CONNECT_NOT_DECLARED` |
 | `READ_ACTIVE_CALORIES_BURNED` | **your app**, with `healthConnectReadActiveCalories` | `StepSource.activeCalories` | `E_HEALTH_CONNECT_NOT_DECLARED` |
@@ -86,7 +86,7 @@ Add the Health Connect entries your config uses to
 <!-- healthConnectWriteEnabled (default true): mirroring this phone's count -->
 <uses-permission android:name="android.permission.health.WRITE_STEPS" />
 <uses-permission android:name="android.permission.health.WRITE_DISTANCE" />
-<uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
+<uses-permission android:name="android.permission.health.WRITE_ACTIVE_CALORIES_BURNED" />
 
 <!-- Optional, each only with its config flag -->
 <!-- healthConnectBackgroundRead -->
@@ -267,7 +267,7 @@ needs:
 | Config | Adds to the sheet |
 |---|---|
 | `healthConnectReadEnabled: true` (default) | `READ_STEPS`, `READ_DISTANCE`, `READ_TOTAL_CALORIES_BURNED` - or only the types in `healthConnectReadTypes` |
-| `healthConnectWriteEnabled: true` (default) | `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_TOTAL_CALORIES_BURNED` |
+| `healthConnectWriteEnabled: true` (default) | `WRITE_STEPS`, `WRITE_DISTANCE`, `WRITE_ACTIVE_CALORIES_BURNED` |
 | `healthConnectBackgroundRead: true` | `READ_HEALTH_DATA_IN_BACKGROUND` |
 | `healthConnectHistoryRead: true` | `READ_HEALTH_DATA_HISTORY` |
 | `healthConnectReadActiveCalories: true` | `READ_ACTIVE_CALORIES_BURNED` |

@@ -46,7 +46,7 @@ npx react-native run-android
 
 ```sh
 npm test                 # Jest, JS layer, Jest mock, Expo plugin (212 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days, countFrom shares, the motion gate and its walking witness (336 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days, countFrom shares, the motion gate and its walking witness, the calories read and write types (349 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,14 +59,14 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. A hundred and one cases: fifty-nine drive the engine, five build the
+sensor. A hundred and five cases: fifty-nine drive the engine, five build the
 Room database as an older version from the exported schema, migrate real
-rows to the current version and check every one survived, thirty run the
+rows to the current version and check every one survived, thirty-four run the
 integrity layer, the motion gate, sync bookkeeping, Health Connect reads, the
 notification, other devices' steps, countFrom and background work end to end
 through the real core, database and Keystore, four check that remote-sync
 headers are sealed, read back and migrated from 1.x, and three pin when
-`goalReached` fires. Three more, against Health Connect itself, are opt-in -
+`goalReached` fires. Six more, against Health Connect itself, are opt-in -
 see [Health Connect on a device](#health-connect-on-a-device); without the
 property they are skipped. Three more, against Play Services' own classes,
 are opt-in too - see
@@ -126,6 +126,11 @@ run until 2.9.0, and two of them were wrong. Among them:
 | `otherDevicesStepsCountTowardsTheDailyGoal` | a day the other devices take past the goal fires nothing until a step on this phone, or fires twice |
 | `resetTodayAndClearHistoryForgetOtherDevicesSteps` | the last account's other devices' steps are shown, or signed, for the next one |
 | `countFromStartsTodayOverAndIsSignedIntoTheSnapshot` | today keeps steps from before countFrom, setting it again on launch starts today over, or snapshots do not carry it |
+| `aRideIsHeldAndTheWalkAwayFromItIsGivenBack` | a ride's steps are counted, the walk away from it stays held, or what is given back is tagged as a vehicle's |
+| `theGateHoldsNothingWithoutActivityRecognitionAndTagsNothingItWasNotAskedTo` | steps are held with nothing reporting a vehicle, or an app that asked only for the gate gets activity tags |
+| `aWalkInARideIsCountedAsWalkedAndARideTheGateEndedStaysEnded` | a walk down a train is held or flagged as a vehicle's, or a ride ended by three minutes of walking begins again when the process restarts |
+| `aNewProcessPicksTheRideUpOnlyWhileTheRegistrationStands` | a process killed mid-ride leaks the rest of it, or a ride saved before a reboot or force stop holds steps with nothing left to end it |
+| `aRideAndActivityRecognitionsWordAreKeptForTheNextProcess` / `theGateBeingOnIsLoggedWhenItChangesNotWheneverItIsBuilt` | the ride is not saved, or stopping Activity Recognition leaves it saved; the event log gains an `enabled` row per process start |
 
 ### Health Connect on a device
 
@@ -145,6 +150,21 @@ cd android && ./gradlew connectedDebugAndroidTest -PstpHealthConnectTests \
 | `aSnapshotWithItsRecordsReadsTheDayOnce` | a snapshot that asks for its raw records reads the day twice against Health Connect's rate limits |
 | `aRecordTypeTheSourcesDoNotReadIsReadOnItsOwn` | records of a type the sources do not read go missing, or everything is read twice |
 | `recordsBeforeCountFromAreNotCountedButKeptAsEvidence` | a watch's steps from before countFrom are counted, or the snapshot's raw records lose them |
+| `theCountFromDaysRecordStartsAtCountFrom` | the record this phone writes on countFrom's day claims the steps from midnight |
+| `caloriesAreWrittenAsActiveBurnAndTheOldTotalBurnRecordIsCleared` | calories go in as total burn, the walking is in a day twice, or a deleted day leaves its old total-burn record behind |
+| `aRecordStraddlingCountFromCountsForItsShareAfterIt` | `readHealthConnectSteps()` counts a record that began before countFrom whole, or not at all |
+
+The last of these needs Health Connect's aggregate to see the test's own
+record, and an aggregate reads only from apps on the priority list - which
+Health Connect's permission screen puts an app on, and `pm grant` does
+not. The test joins it through the hidden method that screen calls, which
+is reachable only with the hidden-API checks off; without that it is
+skipped:
+
+```sh
+adb shell settings put global hidden_api_policy 1    # before the run
+adb shell settings delete global hidden_api_policy   # after
+```
 
 ### Activity Recognition on a device
 
@@ -166,7 +186,7 @@ cd android && ./gradlew connectedDebugAndroidTest -PstpPlayServicesTests \
 |---|---|
 | `aRealTransitionResultGoesThroughTheReceiverToTheGate` | a ride Activity Recognition reports is not held, the walk away from it is not given back, or a bus read as a bicycle ends the ride |
 | `anIntentWithNoResultInItChangesNothing` | a stray broadcast moves the state |
-| `playServicesAcceptsTheRegistrationThisPackageMakes` | Play Services refuses the request or its `PendingIntent`, and the gate never hears of a ride - silently, but for a log line |
+| `playServicesAcceptsTheRegistrationThisPackageMakes` | Play Services refuses the request or its `PendingIntent`, and the gate never hears of a ride; the report's `status` does not reach `'registered'`; or a ride saved before the `PendingIntent` was lost is still believed |
 
 It does not wait for Play Services to send a transition of its own. On an
 emulator lying still one arrived a second after registering on one run -
@@ -551,8 +571,9 @@ numbers against recorded walks and rides (see
 [ARCHITECTURE.md](ARCHITECTURE.md#the-motion-gate)). What only a device can
 show is what Activity Recognition reports on that phone, and when.
 
-- [ ] before anything: `activityRecognition.available` is `true`. If it is
-      `false` the dependency is missing and every box below will fail
+- [ ] before anything: `activityRecognition.available` is `true` and
+      `status` is `'registered'`. If not, every box below will fail - see
+      [TROUBLESHOOTING.md](TROUBLESHOOTING.md#steps-counted-in-a-car-on-a-bus-or-on-a-bicycle)
 - [ ] walk 5 minutes, three times - phone in hand, in a front trouser
       pocket, in a back pocket or bag: `holding` stays `false`, `gatedSteps`
       stays 0, and the count matches the platform's own pedometer in Health
@@ -574,9 +595,24 @@ show is what Activity Recognition reports on that phone, and when.
       is missing
 - [ ] get off, take ten steps to a bench and sit: when `holding` turns
       `false` the ten are back, or most of them
-- [ ] ride a bicycle with the phone in a pocket: `holding` turns `true` and
-      then `false` again about thirty seconds later, and the ride counts.
-      Expected - pedalling reads as a walking rhythm
+- [ ] ride a bicycle with the phone in a pocket: `holding` turns `true`
+      and stays `true` for the whole ride - pedalling reads as a walking
+      rhythm, so on a bicycle the accelerometer is not asked - and the ride
+      adds nothing. Get off and walk: the walk comes back when
+      `activityRecognition.activity` reads `walking`
+- [ ] in a train or bus, walk down it for half a minute and sit again:
+      `holding` turns `false` while you walk - the walk counts - and `true`
+      again once you sit, with a `motion_gate` row `reason: 'resumed'`
+- [ ] a stop of several minutes - a station, a jam - with the phone still:
+      `holding` stays `true` through it and after it
+- [ ] kill the app's process in the middle of a ride (`adb shell am kill
+      <package>` with the app in the background): when the service is back,
+      `holding` is still `true` without a new report
+- [ ] force-stop it in the middle of a ride (`adb shell am force-stop
+      <package>`, or a task killer that does the same) and open the app
+      again: `holding` is `false` and steps count - the request Activity
+      Recognition would have answered went with the force stop - until it
+      reports the vehicle afresh
 - [ ] with the screen off for 10 minutes of a ride, then on: the ride is
       held either way. On a phone whose accelerometer is not a wake-up
       sensor, with `accelerometerWakeLock: false`, only the early

@@ -53,9 +53,11 @@ function permissionsFor(options = {}) {
     const scope = hc === true ? {} : hc;
     const read = scope.read !== false;
     const write = scope.write !== false;
-    const types = ['STEPS', 'DISTANCE', 'TOTAL_CALORIES_BURNED'];
+    // Calories are read as other apps' total burn and written as active
+    // burn - the walking alone is what this package works out (2.10).
+    const writeTypes = ['STEPS', 'DISTANCE', 'ACTIVE_CALORIES_BURNED'];
     if (read) readTypesFor(scope.readTypes).forEach((t) => out.push(`${HEALTH}READ_${t}`));
-    if (write) types.forEach((t) => out.push(`${HEALTH}WRITE_${t}`));
+    if (write) writeTypes.forEach((t) => out.push(`${HEALTH}WRITE_${t}`));
     if (read && scope.backgroundRead) out.push(`${HEALTH}READ_HEALTH_DATA_IN_BACKGROUND`);
     if (read && scope.historyRead) out.push(`${HEALTH}READ_HEALTH_DATA_HISTORY`);
     if (read && scope.activeCalories) out.push(`${HEALTH}READ_ACTIVE_CALORIES_BURNED`);

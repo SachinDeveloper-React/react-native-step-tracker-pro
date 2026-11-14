@@ -1262,6 +1262,9 @@ export const StepTracker = {
    * provider, no `READ_STEPS`, or Health Connect refusing a read from the
    * background (no activity on screen and tracking off) without
    * `READ_HEALTH_DATA_IN_BACKGROUND` - rather than resolving with no records.
+   *
+   * Nothing before `setCountFrom()`'s instant is counted (2.10): days
+   * before its day are left out, and its day counts from it on.
    */
   async readHealthConnectSteps(
     startIso: string,

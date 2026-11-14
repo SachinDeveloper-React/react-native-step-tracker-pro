@@ -413,9 +413,20 @@ simple pedometer counts there. It is gone.
 
 - *the ride* - `vehicleSince`, set when Activity Recognition reports
   in-vehicle or on-bicycle (at the event's own time, not the broadcast's
-  arrival) and cleared by any report that is not one of the two, by the
-  witness confirming a walk, by five minutes of stillness, and by twelve
-  hours;
+  arrival) and cleared by any report that is not one of the two, by three
+  minutes of a confirmed walk, by half an hour of stillness, and by twelve
+  hours. Activity Recognition reports only changes, so nothing short of
+  that ends a ride: a walk the witness confirms *pauses* holding
+  (`walkingSince`), which resumes when the walk stops - a train corridor, a
+  seat changed. Confirming takes 24 seconds of rhythm in the last 30;
+  once confirmed, the walk goes on for as long as 15 still show it
+  (`stillWalking`), because a stride that reads poorly dips below 24
+  without the walker having stopped, and a walk taken for over has its
+  steps held. On a bicycle the witness is not asked at all: pedalling
+  reads as a stride. When the same ride is next reported as a vehicle it
+  is asked again from that moment (`witnessFrom`): what it saw of the
+  pedalling confirms nothing, and what was held while it had no say is not
+  given back on its word;
 - *the ledger* - every held delta with the span the counter gave it, kept
   two minutes;
 - *the witness* - a `WalkWitness`, below.
@@ -444,20 +455,57 @@ is late by is the walk away from the ride. So holding is provisional:
 |---|---|
 | Activity Recognition: walking, running | everything from the 90 s before the report |
 | Activity Recognition: still, or a bare exit | what the witness vouches for in those 90 s (`gaitAround`); the rest stays owed for 60 s to a "walking" that follows |
-| the witness confirms a walk | everything from the last 60 s; no ride until a vehicle is reported afresh |
-| five minutes still, twelve hours, Activity Recognition stopped | nothing |
+| the witness confirms a walk (not on a bicycle) | everything from the last 60 s; holding pauses until the walk stops, and three minutes of it end the ride |
+| half an hour still, twelve hours, Activity Recognition stopped | nothing |
 
 `StepTrackerCore.giveBack` takes the release to the engine
 (`releaseGated`, which lowers `gatedToday` by no more than the active day
-holds, so steps held before midnight stay with the day that closed) and
-replays each held delta onto the minute timeline and the Health Connect
-minute mirror with its original span and `walked = true` - tagged as
+holds, so steps held before midnight stay with the day that closed) and,
+inside the engine's lock so no commit sees one without the other, replays
+each held delta onto the minute timeline and the Health Connect minute
+mirror with its original span and `walked = true` - tagged as
 walking whatever Activity Recognition said when it was taken, or the
 `in_vehicle` flag would cover the very steps just cleared of it. Because
 the gated share now goes down, `DailySummaryDao.upsertKeepingRecovered`
 writes it as given and keeps its maximum rule for the recovered share
-alone. Every start, stop and release is a `motion_gate` row in the event
-log.
+alone. Steps counted while a walk is being confirmed in the middle of a
+ride are tagged the same way (`VehicleGate.walking`): Activity Recognition
+still says "in a vehicle" then. Every start, stop, pause, resumption and
+release is a `motion_gate` row in the event log; the gate being turned on
+or off is logged when it changes, not each time a process builds it.
+
+**Across a process death.** `VehicleGate.saved()` - the ride, what is
+carrying the phone, the ledger, the grace - and Activity Recognition's last
+state go to their own preferences file (`step_tracker_pro_vehicle_gate`):
+at once when a ride begins, ends or gives back, and at most every five
+seconds while steps are held. A new process puts both back before anything
+else (`restoreActivity`, `restore`), dropping a ride past twelve hours and
+held steps past two minutes; the witness starts over. Stopping Activity
+Recognition - tracking stopped, or nothing asking for it - clears both.
+
+Two things keep that from holding steps on a word nobody can take back.
+*The request must still stand.* What was saved is believed only if the
+`PendingIntent` the transitions are sent to still exists
+(`ActivityRecognitionBridge.registrationSurvives`, asked with
+`FLAG_NO_CREATE` before this process makes the request again), the
+permission is still held and the library is there. The system keeps a
+`PendingIntent` across a killed process and drops it on a reboot, a force
+stop - what some phones' task killers do - an update or cleared data, and
+Play Services drops the request with it: after any of those nothing would
+ever have said the ride was over, so the saved state is deleted and every
+step counts. A request that cannot be made at all - no permission, no
+library - clears it the same way. *And what the gate saved is its last
+word.* With the gate on in the process before, no saved ride means no
+ride: one the gate ended itself, after three minutes of walking or half an
+hour of stillness, is not begun again because Activity Recognition's last
+report, which is restored for the integrity tags, still reads "in a
+vehicle".
+
+**Whether it is listening.** `ActivityRecognitionBridge.status` follows
+the request through Play Services' answer - `pending`, then `registered` or
+`failed` with the error - and is reported beside `available`; a refusal is
+asked again every five minutes from the service's heartbeat, as is a
+request that waited on `ACTIVITY_RECOGNITION` being granted.
 
 **`WalkWitness`** answers one question in one direction - is this, beyond
 doubt, a person walking? - and is never asked whether something is a
@@ -484,6 +532,12 @@ vehicle.
   line in a band.
 - *A walk.* `confirmedWalking` is 24 `gait` seconds in the last 30. One
   second proves nothing; 2% of the seconds on a recorded bus pass.
+  `stillWalking` is 15 of the same 30, and is only asked about a walk
+  already confirmed. Of the 131 recorded walks 6 fell below 24 after being
+  confirmed and 2 below 15; on the recorded rides no stretch at 15 or more
+  lasted a minute (49 s in a taxi, 6 s on a bus, none on a train), so a
+  walk that has stopped is seen to have stopped - about a quarter of a
+  minute after it does.
 
 The numbers were chosen against recordings, with the Kotlin above run over
 them, and the JVM tests pin the behaviour with traces built the way roads
@@ -503,13 +557,34 @@ Walking is [Brajdic & Harle's UbiComp 2013 set](https://www.repository.cam.ac.uk
 [Kaewunruen et al.](https://zenodo.org/records/5140105) (gravity already
 removed, so each was replayed with gravity along each phone axis in turn,
 and "0" is zero on all three). Both were also replayed as bare 25 Hz point
-samples, with aliasing left in, and the table did not move. With a vehicle
-reported for the whole of every walk, the gate gave back all 10,197 steps.
-Neither set is in this repository: one is GPL, and neither is ours to ship.
+samples, with aliasing left in, and the table did not move. Neither set is
+in this repository: one is GPL, and neither is ours to ship.
+
+The whole gate was replayed over the same recordings, as 2.10 ships it and
+under 2.9.0's rules for ending a ride (the first confirmed walk, or five
+still minutes), each ride reported once at its start and never again:
+
+| Recorded, reported once | Held by 2.10 | Held under 2.9.0's rules |
+|---|---|---|
+| bus, as a vehicle | 100% of the ride | 100% |
+| taxi, as a vehicle | 100% | 85-91% |
+| train, as a vehicle (still four seconds in five) | 100% | 8-28% |
+| bicycle, as a bicycle | 100% | 37-52% |
+| bicycle, as a vehicle | 64-66% | 37-52% |
+
+And for the walker, with a vehicle reported for the whole of every walk:
+all 10,197 steps came back when "walking" arrived at the walk's end; with
+Activity Recognition silent for good, 0.3-0.4% did not - two walks whose
+rhythm fell below half and which ended before it was confirmed again
+(1.4% before a confirmed walk was kept going at 15 seconds). A walk down a
+bus between two stretches of sitting lost 0.02-0.06% of its steps, and
+holding began again 15 s after sitting down, 20 s at worst. The ranges are
+the two ways of delivering the samples.
 
 **The sensor.** The gate needs none to hold a ride. The witness's
-accelerometer is registered when `VehicleGate.holding` turns true and
-released when it turns false - `StepTrackerCore.onGateChanged` tells the
+accelerometer is registered when a ride begins (`VehicleGate.inRide`) and
+released when it ends - through a walk that pauses the holding, which is
+when it is needed most - and `StepTrackerCore.onGateChanged` tells the
 service, which posts to its sensor thread and syncs under a lock, because
 the news arrives from the sensor thread (a walk confirmed) and the main one
 (a broadcast) alike. 25 Hz, batched five seconds where the hub has a FIFO,
@@ -520,11 +595,14 @@ witness rides along on samples already arriving. `gateListening` tracks who
 owns the registration, so a signature window closing does not take it down.
 
 **What gets through, by design.** The first minute of a ride; the false
-steps of the half-minute before a "walking"; a bus that sat long enough at
-a light to read as still, until it is reported moving again; pedalling,
-with the phone on the rider. Every one is a vehicle's step counted. None
-is a walker's step lost, which takes Activity Recognition being wrong for
-longer than it takes to walk for half a minute.
+steps of the half-minute before a "walking"; a vehicle's steps in the
+quarter-minute after a walk inside it; a bicycle Activity Recognition
+reports as a vehicle, for as long as the pedalling reads as a walk; the
+rest of a ride after a reboot or a force stop, or after one of the
+backstops, until it is reported afresh. Every one is a vehicle's step
+counted. A walker's step is lost only when Activity Recognition is wrong
+and stays silent while a stride that reads poorly ends before it is
+confirmed again - the 0.3-0.4% above.
 
 ### Integrity checks
 

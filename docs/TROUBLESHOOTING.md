@@ -56,8 +56,12 @@ reported as `gatedSteps`. This is how Google Fit removes them. See
 To check it on a device, put `getIntegrityReport().motionGate` on screen -
 the example app does - and ride:
 
-- `activityRecognition.available` must be `true`. `false` means the app
-  does not ship `play-services-location`, and nothing will ever be held;
+- `activityRecognition.available` must be `true` and `status`
+  `'registered'`. `available: false` means the app does not ship
+  `play-services-location`; `status: 'failed'` (with `error`) means Play
+  Services refused the request - out of date, or disabled - and it is asked
+  again every five minutes; `'no_permission'` means `ACTIVITY_RECOGNITION`
+  is not granted. In each case nothing will be held;
 - about a minute after a bus sets off, `activityRecognition.activity` reads
   `in_vehicle`, `holding` turns `true`, and the count on screen stops
   moving while `gatedSteps` rises;
@@ -80,9 +84,23 @@ the example app does - and ride:
 - *It reads `still` at every stop.* A bus that waits long enough at a light
   is reported still, holding ends, and the next minute of the ride is
   counted before `in_vehicle` comes back.
-- *It is a bicycle and the phone is in a pocket.* Pedalling is a rhythm the
-  accelerometer cannot tell from walking, so it is confirmed as a walk and
-  its steps are counted.
+- *Someone walked during it.* A walk the accelerometer confirms - down a
+  train, to the front of a bus - is counted, and holding starts again about
+  a quarter of a minute after it stops. Three minutes of walking end the
+  ride: nobody walks that long inside a vehicle, and the rest of a journey
+  after one is counted.
+- *The phone was restarted, or the app force-stopped, during it.* Either
+  ends the request Activity Recognition would have answered - some phones'
+  task killers force-stop where others only kill the process - so the ride
+  saved before it is not believed, and steps count until a vehicle is
+  reported afresh. A process the system merely kills picks the ride up
+  again.
+- *It is a bicycle, and `activity` reads `in_vehicle`.* A ride reported as
+  a bicycle is held whole. Reported as a vehicle, the pedalling reads as a
+  walk to the accelerometer and is counted until the next report.
+- *Before 2.10, a long stop or pedalling.* 2.9.0 ended a ride after five
+  still minutes and whenever the accelerometer confirmed a walk, which on
+  a bicycle it does within thirty seconds; the rest of the ride counted.
 
 **If steps are held that were walked**, that is a bug in this package or a
 wrong report from Activity Recognition, and the log has it: a `motion_gate`

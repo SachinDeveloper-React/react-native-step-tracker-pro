@@ -100,18 +100,31 @@ class HealthConnectManager(
      * The record types `healthConnectReadTypes` can name - also the three
      * this package writes, so each carries its write permission too, and
      * the prefix of the `clientRecordId` its day records carry.
+     *
+     * Calories are read as one type and written as another. What other
+     * apps publish as `TotalCaloriesBurnedRecord` - a watch's whole day, the
+     * resting burn included - is what a day's calories are read from. What
+     * this package works out is `0.57 kcal x kg x km`, the energy of the
+     * walking alone, which Health Connect's model calls
+     * `ActiveCaloriesBurnedRecord`: written as total burn, every app adding
+     * up a user's day read the walking as the whole of it. Until 2.10 it
+     * was written as total burn.
      */
     enum class ReadType(
         val jsValue: String,
         val recordClass: KClass<out Record>,
-        private val clientIdPrefix: String
+        private val clientIdPrefix: String,
+        /** What this package writes for the type, and deletes of its own. */
+        val writeRecordClass: KClass<out Record> = recordClass
     ) {
         STEPS("steps", StepsRecord::class, "stp-steps-"),
         DISTANCE("distance", DistanceRecord::class, "stp-distance-"),
-        TOTAL_CALORIES("totalCalories", TotalCaloriesBurnedRecord::class, "stp-calories-");
+        TOTAL_CALORIES(
+            "totalCalories", TotalCaloriesBurnedRecord::class, "stp-calories-", ActiveCaloriesBurnedRecord::class
+        );
 
         val permission: String = HealthPermission.getReadPermission(recordClass)
-        val writePermission: String = HealthPermission.getWritePermission(recordClass)
+        val writePermission: String = HealthPermission.getWritePermission(writeRecordClass)
 
         /**
          * The `clientRecordId` of the record this package writes for [date]:
@@ -676,8 +689,32 @@ class HealthConnectManager(
     suspend fun readDailySteps(
         start: Instant,
         end: Instant,
-        origins: Set<String> = emptySet()
+        origins: Set<String> = emptySet(),
+        countFromMs: Long = 0L
     ): List<DayTotals> {
+        if (countFromMs > 0L) {
+            // Nothing before countFrom is counted, here as on every other
+            // read. The days are the caller's - a day apart from `start`, by
+            // the local clock, which is how Health Connect slices them - so
+            // the ones that end before countFrom are not asked for, the one
+            // it falls in is asked for from countFrom on, and the rest are
+            // asked for as they were. An aggregate over part of a record's
+            // time counts that part of it.
+            val floor = Instant.ofEpochMilli(countFromMs)
+            if (!floor.isBefore(end)) return emptyList()
+            if (floor.isAfter(start)) {
+                val zone = ZoneId.systemDefault()
+                val floorLocal = LocalDateTime.ofInstant(floor, zone)
+                var day = LocalDateTime.ofInstant(start, zone)
+                while (!day.plusDays(1).isAfter(floorLocal)) day = day.plusDays(1)
+                val next = day.plusDays(1).atZone(zone).toInstant()
+                val first = readDailySteps(floor, minOf(next, end), origins)
+                    .take(1)
+                    .map { it.copy(date = DateKeys.format(day.toLocalDate())) }
+                val rest = if (next.isBefore(end)) readDailySteps(next, end, origins) else emptyList()
+                return first + rest
+            }
+        }
         val hc = client() ?: throw IllegalStateException("Health Connect is not available")
         val zone = ZoneId.systemDefault()
         // Only types the app reads and holds a grant for: an aggregate that
@@ -1680,6 +1717,13 @@ class HealthConnectManager(
             (dayInterval(day, now) != null).also { writable -> if (!writable) written += day.date }
         }
         if (toWrite.isEmpty()) return WriteOutcome(written, emptySet())
+        if (ReadType.TOTAL_CALORIES in access.writeTypes) {
+            clearLegacyCalories(
+                hc,
+                toWrite.filter { mayHoldLegacyCalories(it.date) }.map { ReadType.TOTAL_CALORIES.clientRecordId(it.date) },
+                remember = true
+            )
+        }
 
         // Health Connect resolves same-id collisions by keeping the higher
         // version, so this has to be monotonic. Using the wall clock meant that
@@ -1722,16 +1766,81 @@ class HealthConnectManager(
     }
 
     /**
+     * Client record ids whose total-burn record this process has deleted:
+     * once gone it cannot come back, and a day is written every few minutes.
+     */
+    private val legacyCaloriesCleared: MutableSet<String> = java.util.Collections.synchronizedSet(HashSet())
+
+    /**
+     * Whether [date] can hold calories written as total burn, which is what
+     * releases before 2.10 wrote: only a day up to the one this release
+     * first wrote or deleted on, remembered the first time this is asked.
+     * Past it there is nothing to clear, however long the app goes on
+     * holding the old permission.
+     */
+    private fun mayHoldLegacyCalories(date: String): Boolean {
+        val until = state.legacyCaloriesUntil ?: DateKeys.today().also { state.legacyCaloriesUntil = it }
+        return date <= until
+    }
+
+    /**
+     * Deletes the `TotalCaloriesBurnedRecord`s releases before 2.10 wrote
+     * under [ids] - the ids calories are written under now, as active burn.
+     * A record about to be written again must not leave the walking in the
+     * day twice, once under each type; one being deleted must not leave its
+     * old twin behind. By `clientRecordId`, so nothing else the app writes
+     * is touched; only while the app still holds
+     * `WRITE_TOTAL_CALORIES_BURNED`, which Health Connect needs to delete
+     * them. Best effort: a refusal leaves the old record as it was and the
+     * caller goes ahead.
+     *
+     * @param remember true on the write path, which comes back for the same
+     *   ids every few minutes.
+     */
+    private suspend fun clearLegacyCalories(hc: HealthConnectClient, ids: Collection<String>, remember: Boolean) {
+        if (ids.isEmpty()) return
+        val pending = ids.filter { it !in legacyCaloriesCleared }
+        if (pending.isEmpty() || LEGACY_WRITE_TOTAL_CALORIES !in grantedPermissions()) return
+        try {
+            for (chunk in pending.chunked(MAX_IDS_PER_DELETE)) {
+                metered(Category.WRITE) {
+                    hc.deleteRecords(TotalCaloriesBurnedRecord::class, emptyList(), chunk)
+                }
+            }
+            if (remember) legacyCaloriesCleared += pending
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
      * The span one day's records cover: midnight to midnight, or to now for
-     * the open day - never an end time in the future. Null when there is
-     * nothing to write: no steps, or no time yet.
+     * the open day - never an end time in the future. On the day countFrom
+     * falls on it starts at countFrom: this phone counted nothing before it,
+     * and a record from midnight would tell every app reading Health Connect
+     * that those steps were walked in hours this phone did not count. Null
+     * when there is nothing to write: no steps, or no time yet.
      */
     private fun dayInterval(totals: DayTotals, now: Instant): Pair<Instant, Instant>? {
         if (totals.steps <= 0) return null
-        val start = DateKeys.startOfDayInstant(totals.date)
+        val start = dayStart(totals.date)
         val rawEnd = DateKeys.endOfDayInstant(totals.date)
         val end = if (rawEnd.isAfter(now)) now else rawEnd
         return if (end.isAfter(start)) start to end else null
+    }
+
+    /**
+     * Where this phone's count of [date] begins: midnight, or countFrom on
+     * the day it falls on. A day before countFrom's is history and keeps
+     * its midnight; a day after it begins at its own.
+     */
+    private fun dayStart(date: String): Instant {
+        val midnight = DateKeys.startOfDayInstant(date)
+        val floor = state.countFromAt
+        if (floor <= 0L) return midnight
+        val at = Instant.ofEpochMilli(floor)
+        return if (at.isAfter(midnight) && at.isBefore(DateKeys.endOfDayInstant(date))) at else midnight
     }
 
     /**
@@ -1771,7 +1880,7 @@ class HealthConnectManager(
                 endZoneOffset = endOffset,
                 metadata = metadata(ReadType.DISTANCE)
             ),
-            if (ReadType.TOTAL_CALORIES !in writeTypes) null else TotalCaloriesBurnedRecord(
+            if (ReadType.TOTAL_CALORIES !in writeTypes) null else ActiveCaloriesBurnedRecord(
                 energy = Energy.kilocalories(totals.calories),
                 startTime = start,
                 endTime = end,
@@ -1800,6 +1909,9 @@ class HealthConnectManager(
      * every minute of the day, for a day whose written minutes nothing
      * remembers any more. Returns those types. Throws when a delete fails or
      * is refused for quota: the caller decides whether that matters.
+     *
+     * The total-burn records releases before 2.10 wrote under the same ids
+     * go too, best effort - see [clearLegacyCalories].
      */
     suspend fun deleteOwnDays(
         dates: Collection<String>,
@@ -1815,10 +1927,20 @@ class HealthConnectManager(
             allMinutes.forEach { date -> minutesOf(date).forEach { ids += type.minuteRecordId(date, it) } }
             for (chunk in ids.chunked(MAX_IDS_PER_DELETE)) {
                 metered(Category.WRITE) {
-                    hc.deleteRecords(recordType = type.recordClass, recordIdsList = emptyList(), clientRecordIdsList = chunk)
+                    hc.deleteRecords(recordType = type.writeRecordClass, recordIdsList = emptyList(), clientRecordIdsList = chunk)
                 }
             }
         }
+        // And what releases before 2.10 wrote for the same days as total
+        // burn - whether or not calories can be written now.
+        val legacy = ArrayList<String>()
+        val calories = ReadType.TOTAL_CALORIES
+        dates.filter { mayHoldLegacyCalories(it) }.forEach { legacy += calories.clientRecordId(it) }
+        minutes.filterKeys { mayHoldLegacyCalories(it) }
+            .forEach { (date, starts) -> starts.forEach { legacy += calories.minuteRecordId(date, it) } }
+        allMinutes.filter { mayHoldLegacyCalories(it) }
+            .forEach { date -> minutesOf(date).forEach { legacy += calories.minuteRecordId(date, it) } }
+        clearLegacyCalories(hc, legacy, remember = false)
         return types
     }
 
@@ -1918,7 +2040,7 @@ class HealthConnectManager(
                 }
                 try {
                     metered(Category.WRITE) {
-                        hc.deleteRecords(type.recordClass, emptyList(), chunk.map { it.second })
+                        hc.deleteRecords(type.writeRecordClass, emptyList(), chunk.map { it.second })
                     }
                     changed += chunkDates
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -1937,6 +2059,21 @@ class HealthConnectManager(
             if (day.deleteResidual) residualDeleted += day.date
         }
 
+        // What releases before 2.10 wrote as total burn under the ids this
+        // pass deletes, or writes again as active burn - and no other: a
+        // minute left alone keeps the one record it has.
+        val legacy = ArrayList<String>()
+        val calories = ReadType.TOTAL_CALORIES
+        for (day in days) {
+            if (day.date in failed || !mayHoldLegacyCalories(day.date)) continue
+            day.deletes.forEach { legacy += calories.minuteRecordId(day.date, it) }
+            if (day.deleteResidual) legacy += calories.clientRecordId(day.date)
+            if (calories !in types) continue
+            day.upserts.keys.forEach { legacy += calories.minuteRecordId(day.date, it) }
+            if (day.residual > 0 && day.residualSpan != null) legacy += calories.clientRecordId(day.date)
+        }
+        clearLegacyCalories(hc, legacy, remember = true)
+
         // Inserts, a piece per minute and one for each day's residual - its
         // day record, first - so a minute's records land or fail together.
         val now = Instant.now()
@@ -1945,7 +2082,9 @@ class HealthConnectManager(
         val pieces = ArrayList<Piece>()
         for (day in days) {
             if (day.date in failed) continue
-            val dayStart = DateKeys.startOfDayInstant(day.date)
+            // The residual is the steps no minute holds, and on countFrom's
+            // day none of them was taken before it.
+            val dayStart = dayStart(day.date)
             val end = minOf(day.dayEnd, now)
             val span = day.residualSpan
             if (day.residual > 0 && span != null) {
@@ -2060,7 +2199,7 @@ class HealthConnectManager(
                 endZoneOffset = endOffset,
                 metadata = metadata(ReadType.DISTANCE)
             ),
-            if (ReadType.TOTAL_CALORIES !in types) null else TotalCaloriesBurnedRecord(
+            if (ReadType.TOTAL_CALORIES !in types) null else ActiveCaloriesBurnedRecord(
                 energy = Energy.kilocalories(totals.calories * share),
                 startTime = start,
                 endTime = end,
@@ -2508,6 +2647,13 @@ class HealthConnectManager(
                 it.get(null) as? String
             }
         }.getOrNull()
+
+        /**
+         * What calories were written under before 2.10. Only ever used to
+         * delete the records written with it - see [clearLegacyCalories].
+         */
+        val LEGACY_WRITE_TOTAL_CALORIES: String =
+            HealthPermission.getWritePermission(TotalCaloriesBurnedRecord::class)
 
         /** Opt-in: active calories per source (`healthConnectReadActiveCalories`). */
         val READ_ACTIVE_CALORIES: String =

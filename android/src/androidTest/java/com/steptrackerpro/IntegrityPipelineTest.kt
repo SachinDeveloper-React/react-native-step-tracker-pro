@@ -1015,4 +1015,157 @@ class IntegrityPipelineTest {
         core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
         assertTrue(core.motionWitnessWanted())
     }
+
+    @Test
+    fun aRideAndActivityRecognitionsWordAreKeptForTheNextProcess() = runBlocking {
+        val prefs = context.getSharedPreferences(StepTrackerCore.GATE_PREFS_NAME, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
+        core.onActivityEvents(listOf(ActivityEvent(ActivityState.IN_VEHICLE, true, now - 60_000L)))
+        // What a new process reads back: the ride, and what was last said.
+        val saved = org.json.JSONObject(prefs.getString("saved", null)!!)
+        assertEquals(now - 60_000L, saved.getLong("vehicleSince"))
+        assertEquals("in_vehicle", saved.getString("carried"))
+        assertEquals("in_vehicle", prefs.getString("activity", null))
+        // Stopping Activity Recognition forgets both: nothing it said holds.
+        core.onActivityStopped()
+        assertFalse(prefs.contains("saved"))
+        assertFalse(prefs.contains("activity"))
+    }
+
+    @Test
+    fun aNewProcessPicksTheRideUpOnlyWhileTheRegistrationStands() = runBlocking {
+        val prefs = context.getSharedPreferences(StepTrackerCore.GATE_PREFS_NAME, Context.MODE_PRIVATE)
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        val survives = core.activityRegistrationSurvives
+        @Suppress("UNCHECKED_CAST")
+        suspend fun lastSaid() = ((core.integrityReport(today)["motionGate"] as Map<String, Any?>)["activityRecognition"]
+            as Map<String, Any?>)["activity"]
+        try {
+            core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
+            core.onActivityEvents(listOf(ActivityEvent(ActivityState.IN_VEHICLE, true, now - 60_000L)))
+            assertTrue(core.motionGateHolding())
+
+            // Killed and started again, Play Services still holding the
+            // request: the ride goes on, though nothing new was reported.
+            core.activityRegistrationSurvives = { true }
+            core.restartGateForTest()
+            assertTrue(core.motionGateHolding())
+            assertTrue(core.motionWitnessWanted())
+            assertEquals("in_vehicle", lastSaid())
+
+            // A reboot or a force stop took the request with it: nothing
+            // would ever have said the ride was over, so it is not believed.
+            core.activityRegistrationSurvives = { false }
+            core.restartGateForTest()
+            assertFalse(core.motionGateHolding())
+            assertFalse(core.motionWitnessWanted())
+            assertEquals("unknown", lastSaid())
+            assertFalse(prefs.contains("saved"))
+            assertFalse(prefs.contains("activity"))
+        } finally {
+            core.activityRegistrationSurvives = survives
+        }
+    }
+
+    @Test
+    fun aWalkInARideIsCountedAsWalkedAndARideTheGateEndedStaysEnded() = runBlocking {
+        val prefs = context.getSharedPreferences(StepTrackerCore.GATE_PREFS_NAME, Context.MODE_PRIVATE)
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        val start = now - 10 * 60_000L
+        assumeTrue(DateKeys.of(start) == today)
+        val survives = core.activityRegistrationSurvives
+        fun stride(t: Double) = 1.3 * kotlin.math.sin(2 * Math.PI * 0.85 * t) +
+            1.0 * kotlin.math.sin(2 * Math.PI * 1.7 * t) + 0.6 * kotlin.math.sin(2 * Math.PI * 3.4 * t)
+        /** Walking, as the accelerometer feels it, from [fromMs] for [seconds]. */
+        fun walk(fromMs: Long, seconds: Int) {
+            for (i in 0 until seconds * 25) {
+                core.onMotionSample(0f, 0f, (9.81 + stride(i / 25.0)).toFloat(), fromMs + i * 40L)
+            }
+        }
+        try {
+            core.updateConfig(
+                StepTrackerConfig(
+                    fraudDetectionEnabled = true, fraudActivityRecognition = true, motionGateEnabled = true
+                )
+            )
+            var raw = 1_000f
+            core.engine.onCounterSample(raw, start)
+            val before = core.engine.snapshot().steps
+
+            // On a train: its own four "steps" are held.
+            core.onActivityEvents(listOf(ActivityEvent(ActivityState.IN_VEHICLE, true, start + 30_000L)))
+            raw += 4f
+            core.engine.onCounterSample(raw, start + 40_000L)
+            assertEquals(4, core.engine.snapshot().gatedSteps)
+
+            // A walk down it. Activity Recognition says nothing: the
+            // accelerometer confirms it, and holding pauses - the ride goes on.
+            val walkFrom = start + 120_000L
+            walk(walkFrom, 40)
+            assertFalse(core.motionGateHolding())
+            assertTrue(core.motionWitnessWanted())
+            raw += 30f
+            core.engine.onCounterSample(raw, walkFrom + 41_000L)
+            assertEquals(4, core.engine.snapshot().gatedSteps)
+            assertEquals(before + 34, core.engine.snapshot().steps)
+            // Counted, and not as a vehicle's: Activity Recognition still
+            // says "in a vehicle", and tagged with that the walk would be
+            // flagged as the very thing it was cleared of.
+            val minutes = core.stepMinutes(today, today)
+            assertEquals(30, minutes.sumOf { it.totalSteps })
+            assertEquals(0, minutes.sumOf { it.vehicleSteps })
+
+            // Three minutes of it and nobody has said the ride is over: it
+            // is, and the report that would have said so was missed.
+            walk(walkFrom + 40_000L, 180)
+            assertFalse(core.motionWitnessWanted())
+            @Suppress("UNCHECKED_CAST")
+            suspend fun events() = (core.integrityReport(today)["events"] as List<Map<String, Any?>>)
+                .filter { it["type"] == IntegrityEvent.MOTION_GATE }
+                .map { it["detail"] as Map<String, Any?> }
+            core.integrity.flush()
+            eventually { events().any { it["holding"] == false && it["reason"] == "walked_away" } }
+            assertTrue("${events()}", events().any { it["holding"] == false && it["reason"] == "walking" })
+            assertFalse(prefs.contains("saved"))
+
+            // A new process does not begin it again because Activity
+            // Recognition's last word was "in a vehicle".
+            assertEquals("in_vehicle", prefs.getString("activity", null))
+            core.activityRegistrationSurvives = { true }
+            core.restartGateForTest()
+            assertFalse(core.motionWitnessWanted())
+            raw += 10f
+            core.engine.onCounterSample(raw, walkFrom + 230_000L)
+            assertEquals(4, core.engine.snapshot().gatedSteps)
+            assertEquals(before + 44, core.engine.snapshot().steps)
+        } finally {
+            core.activityRegistrationSurvives = survives
+        }
+    }
+
+    @Test
+    fun theGateBeingOnIsLoggedWhenItChangesNotWheneverItIsBuilt() = runBlocking {
+        val today = DateKeys.today()
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = false))
+        // The log outlives clearHistory(): only what this test caused counts.
+        val since = System.currentTimeMillis()
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
+        // A config change about something else, and the gate asked again.
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true, dailyGoal = 9_000))
+        core.syncMotionGate()
+        core.integrity.flush()
+        eventually {
+            @Suppress("UNCHECKED_CAST")
+            val events = (core.integrityReport(today)["events"] as List<Map<String, Any?>>)
+                .filter { it["type"] == IntegrityEvent.MOTION_GATE && (it["at"] as Long) >= since && (it["detail"] as Map<*, *>).containsKey("enabled") }
+            events.isNotEmpty() && (events.last()["detail"] as Map<*, *>)["enabled"] == true
+        }
+        @Suppress("UNCHECKED_CAST")
+        val enabled = (core.integrityReport(today)["events"] as List<Map<String, Any?>>)
+            .filter { it["type"] == IntegrityEvent.MOTION_GATE && (it["at"] as Long) >= since && (it["detail"] as Map<*, *>)["enabled"] == true }
+        assertEquals(1, enabled.size)
+    }
 }

@@ -1095,7 +1095,14 @@ class StepCounterEngineTest {
         observed.clear()
 
         // The walk away from the bus stop: forty of the sixty were steps.
-        assertEquals(40, engine.releaseGated(40))
+        // They are placed under the engine's lock, with the share lowered.
+        var placed = -1
+        assertEquals(40, engine.releaseGated(40) { released ->
+            assertTrue(Thread.holdsLock(engine))
+            assertEquals(20, state.gatedToday)
+            placed = released
+        })
+        assertEquals(40, placed)
         assertEquals(20, state.gatedToday)
         // The raw count never moved - they were in it all along - and the
         // day is owed a write, so storage hears about the smaller share.

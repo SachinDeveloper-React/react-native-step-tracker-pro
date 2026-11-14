@@ -50,9 +50,13 @@ class VehicleGateTest {
         var steps: Int = 0,
         var held: Int = 0,
         var released: Int = 0,
-        var ended: String? = null,
+        /** The last change in holding, and every one in order. */
+        var change: String? = null,
+        val changes: MutableList<String> = ArrayList(),
         var lastMs: Long = 0L
-    )
+    ) {
+        val ended: String? get() = changes.lastOrNull { it == VehicleGate.ENDED_WALKING || it == VehicleGate.ENDED_STILL }
+    }
 
     /**
      * Feeds [seconds] of accelerometer at 25 Hz from [fromMs], with a step
@@ -78,7 +82,10 @@ class VehicleGateTest {
             }
             onSample(0f, 0f, (gravity + signal(i / 25.0)).toFloat(), at)?.let { outcome ->
                 outcome.release?.let { into.released += it.steps }
-                outcome.ended?.let { into.ended = it }
+                outcome.change?.let {
+                    into.change = it
+                    into.changes += it
+                }
             }
             into.lastMs = at
         }
@@ -292,13 +299,12 @@ class VehicleGateTest {
     // ---- the accelerometer, for the walker -----------------------------------
 
     @Test
-    fun `a walk the accelerometer confirms ends the ride without being told`() {
+    fun `a walk the accelerometer confirms pauses holding and gives back what it held`() {
         val gate = VehicleGate()
         gate.onActivity(ActivityState.IN_VEHICLE, base)
-        // Activity Recognition never reports leaving. The user walks.
+        // Activity Recognition has not noticed yet. The user walks.
         val fed = gate.ride(base, 45, 600, signal = ::walk)
-        assertEquals(VehicleGate.ENDED_WALKING, fed.ended)
-        assertFalse(gate.holding)
+        assertEquals(listOf(VehicleGate.PAUSED_WALKING), fed.changes)
         // Everything held while the witness made sure is given back, and
         // nothing after that was held at all: twenty-six seconds of steps,
         // which is twenty-four seconds of rhythm and the three it takes to
@@ -306,8 +312,62 @@ class VehicleGateTest {
         assertEquals(fed.held, fed.released)
         assertTrue("held ${fed.held}", fed.held in 40..50)
         assertEquals(74, fed.steps)
-        // And it stays over: the next steps are counted until a vehicle is
-        // reported afresh.
+        // Not holding, and still a ride: nothing has said it is over.
+        assertFalse(gate.holding)
+        assertTrue(gate.inRide)
+        assertEquals(0, gate.gated(fed.lastMs, fed.lastMs + 600, 1, true))
+    }
+
+    @Test
+    fun `holding starts again when the walk stops and nothing has said the ride is over`() {
+        val gate = VehicleGate()
+        val noise = road()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        // Down a train's corridor and back to a seat.
+        val fed = gate.ride(base, 40, 600, signal = ::walk)
+        assertEquals(VehicleGate.PAUSED_WALKING, fed.change)
+        gate.ride(fed.lastMs + 40, 120, 3_000, fed) { noise(it) }
+        assertEquals(listOf(VehicleGate.PAUSED_WALKING, VehicleGate.RESUMED), fed.changes)
+        assertTrue(gate.holding)
+        // The rest of the journey is held, as it would have been had the
+        // walk never happened; 2.9.0 counted all of it.
+        val heldBefore = fed.held
+        val stepsBefore = fed.steps
+        gate.ride(fed.lastMs + 40, 300, 3_000, fed) { noise(it + 160.0) }
+        assertEquals(fed.steps - stepsBefore, fed.held - heldBefore)
+        assertEquals(99, fed.steps - stepsBefore)
+    }
+
+    @Test
+    fun `a walk whose rhythm falters is still the walk`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        val walked = gate.ride(base, 40, 600, signal = ::walk)
+        assertEquals(listOf(VehicleGate.PAUSED_WALKING), walked.changes)
+        // Ten seconds the accelerometer cannot read a stride in - the phone
+        // taken out and typed on - and the walk goes on. Fewer seconds of
+        // rhythm than it takes to confirm a walk, more than half: not taken
+        // for over, and not a step of it held.
+        val faltered = gate.ride(walked.lastMs + 40, 10, 600, signal = road())
+        val on = gate.ride(faltered.lastMs + 40, 30, 600, signal = ::walk)
+        assertTrue(faltered.changes.toString(), faltered.changes.isEmpty())
+        assertTrue(on.changes.toString(), on.changes.isEmpty())
+        assertEquals(0, faltered.held + on.held)
+        assertTrue(gate.walking)
+        // Sitting down again is seen within the half minute.
+        val sat = gate.ride(on.lastMs + 40, 25, 0, signal = road())
+        assertEquals(listOf(VehicleGate.RESUMED), sat.changes)
+        assertTrue(gate.holding)
+    }
+
+    @Test
+    fun `three minutes of walking ends a ride nobody said was over`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        val fed = gate.ride(base, 240, 600, signal = ::walk)
+        assertEquals(listOf(VehicleGate.PAUSED_WALKING, VehicleGate.ENDED_WALKING), fed.changes)
+        assertFalse(gate.inRide)
+        // And stays over until a vehicle is reported afresh.
         assertEquals(0, gate.gated(fed.lastMs, fed.lastMs + 600, 1, true))
         gate.onActivity(ActivityState.IN_VEHICLE, fed.lastMs + 10_000)
         assertEquals(1, gate.gated(fed.lastMs + 10_000, fed.lastMs + 10_600, 1, true))
@@ -330,29 +390,42 @@ class VehicleGateTest {
         // A walk to the bus stop, seen because another ride had just ended
         // - then the bus. The walk before must not confirm a walk during.
         gate.onActivity(ActivityState.IN_VEHICLE, base)
-        gate.ride(base, 40, 0, signal = ::walk)
-        assertFalse(gate.holding)
+        val walked = gate.ride(base, 40, 0, signal = ::walk)
+        gate.onActivity(ActivityState.STILL, walked.lastMs)
+        assertFalse(gate.inRide)
         gate.onActivity(ActivityState.IN_VEHICLE, base + 41_000)
         val fed = gate.ride(base + 41_000, 20, 2_000, signal = road())
-        assertNull(fed.ended)
+        assertTrue(fed.changes.isEmpty())
         assertTrue(gate.holding)
         assertEquals(9, fed.held)
     }
 
-    // ---- a ride cannot outlive its evidence ------------------------------------
+    @Test
+    fun `a train standing at a station is still the ride when it moves off`() {
+        val gate = VehicleGate()
+        val noise = road()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        // Ten minutes at a platform with the phone on the seat, nothing
+        // from Activity Recognition, and on again.
+        val fed = gate.ride(base, 600, 0) { 0.0 }
+        assertTrue(fed.changes.isEmpty())
+        assertTrue(gate.holding)
+        gate.ride(fed.lastMs + 40, 60, 3_000, fed) { noise(it) }
+        assertEquals(19, fed.held)
+    }
 
     @Test
-    fun `five minutes of a phone lying still ends the ride`() {
+    fun `half an hour of a phone lying still ends the ride`() {
         val gate = VehicleGate()
         gate.onActivity(ActivityState.IN_VEHICLE, base)
         assertEquals(4, gate.gated(base + 1_000, base + 2_000, 4, true))
         // A missed "left the vehicle": the phone is on a table.
-        val fed = gate.ride(base + 3_000, 4 * 60, 0) { 0.0 }
+        val fed = gate.ride(base + 3_000, 29 * 60, 0) { 0.0 }
         assertNull(fed.ended)
         assertTrue(gate.holding)
         gate.ride(fed.lastMs + 40, 70, 0, fed) { 0.0 }
         assertEquals(VehicleGate.ENDED_STILL, fed.ended)
-        assertFalse(gate.holding)
+        assertFalse(gate.inRide)
         // Nothing is given back for it - there was no walk - and nothing
         // more is held.
         assertEquals(0, fed.released)
@@ -506,6 +579,133 @@ class VehicleGateTest {
         // Entering what the phone is already in is no change either.
         assertTrue(ride.through(listOf(enter(ActivityState.IN_VEHICLE, base))).isEmpty())
         assertTrue(ActivityState.UNKNOWN.through(emptyList()).isEmpty())
+    }
+
+    // ---- a bicycle ------------------------------------------------------------------
+
+    @Test
+    fun `pedalling is not a walk that ends a bicycle ride`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.ON_BICYCLE, base)
+        // A pedalling leg is the same rhythm as a stride: the witness would
+        // confirm it thirty seconds in. On a bicycle it is not asked.
+        val fed = gate.ride(base, 600, 700, signal = ::walk)
+        assertTrue(fed.changes.isEmpty())
+        assertEquals(0, fed.released)
+        assertEquals(fed.steps, fed.held)
+        assertTrue(gate.holding)
+        // Activity Recognition saying "walking" gives back the last ninety
+        // seconds - the walk away from the bike, and the last of the ride.
+        val release = gate.onActivity(ActivityState.WALKING, fed.lastMs)
+        assertTrue("released ${release?.steps}", (release?.steps ?: 0) in 120..130)
+        assertFalse(gate.inRide)
+    }
+
+    @Test
+    fun `a bicycle ride ending on still gives nothing back on the accelerometer's word`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.ON_BICYCLE, base)
+        val fed = gate.ride(base, 120, 700, signal = ::walk)
+        // On a bicycle every second "vouches": pedalling. None is believed.
+        assertNull(gate.onActivity(ActivityState.STILL, fed.lastMs))
+        // A "walking" that follows still claims the rest, as after any ride.
+        assertTrue((gate.onActivity(ActivityState.WALKING, fed.lastMs + 5_000)?.steps ?: 0) > 100)
+    }
+
+    @Test
+    fun `a bus read as a bicycle stops listening to the accelerometer`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        val fed = gate.ride(base, 40, 600, signal = ::walk)
+        assertFalse(gate.holding)
+        gate.onActivity(ActivityState.ON_BICYCLE, fed.lastMs)
+        assertTrue(gate.holding)
+        assertEquals(ActivityState.ON_BICYCLE, gate.carried)
+    }
+
+    @Test
+    fun `a bicycle read as a vehicle gives the accelerometer its say from that moment`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.ON_BICYCLE, base)
+        // Two minutes of pedalling, every "step" of it held.
+        val pedalled = gate.ride(base, 120, 700, signal = ::walk)
+        assertEquals(pedalled.steps, pedalled.held)
+        // The same ride, now reported as a vehicle. What the accelerometer
+        // watched while it had no say is not a walk confirmed on the spot...
+        val flipAt = pedalled.lastMs + 40
+        assertNull(gate.onActivity(ActivityState.IN_VEHICLE, flipAt))
+        assertEquals(ActivityState.IN_VEHICLE, gate.carried)
+        val first = gate.ride(flipAt, 20, 700, signal = ::walk)
+        assertTrue(first.changes.isEmpty())
+        assertEquals(0, first.released)
+        assertTrue(gate.holding)
+        // ...and when it does confirm one, thirty seconds on, it gives back
+        // only what was held since: not the pedalling before.
+        val then = gate.ride(first.lastMs + 40, 20, 700, signal = ::walk)
+        assertEquals(listOf(VehicleGate.PAUSED_WALKING), then.changes)
+        assertTrue("released ${then.released}", then.released in 1..(first.held + then.held))
+        assertTrue(gate.walking)
+    }
+
+    @Test
+    fun `a walk being confirmed in a ride is walking, and nothing else is`() {
+        val gate = VehicleGate()
+        assertFalse(gate.walking)
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        assertFalse(gate.walking)
+        val walked = gate.ride(base, 40, 600, signal = ::walk)
+        assertTrue(gate.walking)
+        assertFalse(gate.holding)
+        // The walk stops: holding again, and no longer walking.
+        gate.ride(walked.lastMs + 40, 30, 0, signal = road())
+        assertFalse(gate.walking)
+        assertTrue(gate.holding)
+        // Nor once the ride is over.
+        gate.ride(walked.lastMs + 40 + 30_000, 40, 600, signal = ::walk)
+        assertTrue(gate.walking)
+        gate.onActivity(ActivityState.WALKING, walked.lastMs + 80_000)
+        assertFalse(gate.walking)
+    }
+
+    // ---- across a process death ---------------------------------------------------
+
+    @Test
+    fun `a ride and its held steps survive the process`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        assertEquals(5, gate.gated(base + 9_000, base + 10_000, 5, true))
+        assertEquals(6, gate.gated(base + 59_000, base + 60_000, 6, true))
+        val saved = gate.saved()
+
+        // The system kills the process; a new one starts thirty seconds on.
+        val next = VehicleGate()
+        next.restore(saved, base + 90_000)
+        assertTrue(next.holding)
+        assertEquals(base, next.vehicleSince)
+        assertEquals(ActivityState.IN_VEHICLE, next.carried)
+        assertEquals(3, next.gated(base + 95_000, base + 96_000, 3, true))
+        // And the walk it was holding comes back when "walking" arrives -
+        // in 2.9.0 it stayed held for good.
+        assertEquals(14, next.onActivity(ActivityState.WALKING, base + 100_000)?.steps)
+    }
+
+    @Test
+    fun `what was saved too long ago is not restored`() {
+        val gate = VehicleGate()
+        gate.onActivity(ActivityState.IN_VEHICLE, base)
+        assertEquals(5, gate.gated(base + 9_000, base + 10_000, 5, true))
+        val saved = gate.saved()
+        // Three minutes on: the ride stands, the held steps are past keeping.
+        val later = VehicleGate().also { it.restore(saved, base + 190_000) }
+        assertTrue(later.inRide)
+        assertNull(later.onActivity(ActivityState.WALKING, base + 191_000))
+        // Thirteen hours on: no ride either.
+        val much = VehicleGate().also { it.restore(saved, base + 13 * 3_600_000L) }
+        assertFalse(much.inRide)
+        assertEquals(0, much.gated(base + 13 * 3_600_000L, base + 13 * 3_600_000L + 1_000, 2, true))
+        // Nothing saved, nothing restored.
+        val empty = VehicleGate().also { it.restore(VehicleGate().saved(), base) }
+        assertFalse(empty.inRide)
     }
 
     // ---- a day in the life ------------------------------------------------------

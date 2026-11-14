@@ -28,15 +28,15 @@ StepTracker.addListener("stepsChanged", (data) => console.log(data.steps));
 
 | Mode | What counts | Guide |
 |---|---|---|
-| **Native sensor only** | the phone's hardware step counter, in a foreground service; no Health Connect, no health permissions | [USAGE_MODES.md § A](docs/USAGE_MODES.md#mode-a-native-sensor-only) |
-| **Health Connect only** | whatever Samsung Health, Google Fit or a watch wrote; nothing runs in the background | [USAGE_MODES.md § B](docs/USAGE_MODES.md#mode-b-health-connect-only) |
-| **Both** *(default)* | the phone counts, and a source that saw more of the day supplies the number — merged live, never summed | [USAGE_MODES.md § C](docs/USAGE_MODES.md#mode-c-both-recommended) |
+| **Native sensor only** | the phone's hardware step counter, in a foreground service; no Health Connect, no health permissions | [USAGE_MODES.md § A](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/USAGE_MODES.md#mode-a-native-sensor-only) |
+| **Health Connect only** | whatever Samsung Health, Google Fit or a watch wrote; nothing runs in the background | [USAGE_MODES.md § B](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/USAGE_MODES.md#mode-b-health-connect-only) |
+| **Both** *(default)* | the phone counts, and a source that saw more of the day supplies the number — merged live, never summed | [USAGE_MODES.md § C](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/USAGE_MODES.md#mode-c-both-recommended) |
 
 Each mode has its own manifest entries, permission flow and Play Console
 forms; the guide has all three side by side. From 2.0 the library declares
 only what sensor counting needs - Health Connect and the battery-exemption
 prompt are yours to add, so nothing you do not use needs justifying to Play.
-Permissions in one place: [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
+Permissions in one place: [docs/PERMISSIONS.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/PERMISSIONS.md).
 
 ## What it does
 
@@ -66,11 +66,11 @@ npx react-native run-android
 Requires `minSdk 26` (React Native's template starts at 24 - raise it),
 `compileSdk 35` or higher, RN ≥ 0.77, AGP 8 or 9. From 2.0 the Health Connect
 permissions are yours to declare - see [the modes](#three-ways-to-use-it) and
-[who declares what](docs/PERMISSIONS.md#who-declares-what). Upgrading from
-1.x: [docs/MIGRATING.md](docs/MIGRATING.md).
+[who declares what](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/PERMISSIONS.md#who-declares-what). Upgrading from
+1.x: [docs/MIGRATING.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/MIGRATING.md).
 Expo: add `"react-native-step-tracker-pro"` to `plugins` and prebuild; the
 config plugin declares what you opt into. Full steps:
-[docs/INSTALLATION.md](docs/INSTALLATION.md).
+[docs/INSTALLATION.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/INSTALLATION.md).
 
 ## Compatibility
 
@@ -114,7 +114,7 @@ An app that converts steps into anything of value adds
 `remoteSyncPayload: "full"`, and posts `getVerificationSnapshot(date)` to its
 server rather than the number on screen — see
 [Watches and Health Connect](#watches-and-health-connect) and
-[docs/API.md](docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot).
+[docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#getverificationsnapshotdate-string-options-promiseverificationsnapshot).
 It keeps `gapRecovery: "split"`, the one policy under which every step the
 tracker saw is judged on the day it was taken - steps the phone held with
 the screen off across midnight included - and a paid day that grows after
@@ -143,7 +143,7 @@ const snapshot = await StepTracker.getVerificationSnapshot(date, {
 ```
 
 The default `"flag"` mode changes no number; the verdict is evidence for your
-server. See [docs/API.md](docs/API.md#integrity-checks).
+server. See [docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#integrity-checks).
 
 ### Steps counted in a bus
 
@@ -179,7 +179,7 @@ of 131 real walks, thirty seconds in, and for no minute of 473 on buses,
 What gets through is the first minute of a ride, before Activity
 Recognition has noticed it. What 2.8 did instead - letting the
 accelerometer hold steps on its own - lost real walks, and is gone: see
-[docs/API.md](docs/API.md#the-motion-gate).
+[docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#the-motion-gate).
 
 Stride length defaults to `height × 0.415` (male) / `0.413` (female) /
 `0.414` (unspecified); pass `strideLength` in metres to override. Calories use
@@ -238,7 +238,7 @@ sub.remove();
 StepTracker.removeAllListeners("goalReached");
 ```
 
-Signatures and payload shapes: [docs/API.md](docs/API.md).
+Signatures and payload shapes: [docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md).
 
 ## Hooks
 
@@ -292,7 +292,7 @@ all of them once a quota is used up. The package reads 5,000 records a page,
 keeps each day's answer until Health Connect's changes feed says it moved,
 writes every pending day in one insert, and backs off after a refusal -
 answering from what it read before with `healthConnect: 'rate_limited'` -
-see [Rate limits](docs/API.md#rate-limits).
+see [Rate limits](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#rate-limits).
 
 **Why `auto` merges.** A watch publishes in batches. Take its number and the
 display freezes at 6,000 for the whole walk, then jumps. Instead `auto`
@@ -323,17 +323,17 @@ serverTotal - thisPhoneSent)` puts the others on top of this phone's live
 count in the notification, `getTodaySteps()`, `stepsChanged` and the daily
 goal - and into nothing this phone stores, mirrors or uploads; a
 verification snapshot carries it apart. See
-[docs/API.md](docs/API.md#setotherdevicesstepsdate-steps-promisestepsnapshot).
+[docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#setotherdevicesstepsdate-steps-promisestepsnapshot).
 
 **Counting from.** `setCountFrom(signInTime)` counts nothing before it - not
 this phone's steps, not a watch's in Health Connect - for a session that
 starts at sign-in or a phone another account takes over; signed snapshots
 carry it as `countFrom`. And stop means stop: a start after `stopTracking()`
 counts nothing walked in between. See
-[docs/API.md](docs/API.md#setcountfromat-number--null-promisestepsnapshot).
+[docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#setcountfromat-number--null-promisestepsnapshot).
 
 Permission handling, the install and settings fallbacks, and the full source
-API: [docs/API.md](docs/API.md#health-connect).
+API: [docs/API.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/API.md#health-connect).
 
 ## How the count survives things
 
@@ -345,7 +345,7 @@ hardware kept counting while you were dead, and the next sample reconciles.
 When the dead period crossed midnight the steps are split between the days by
 time (`gapRecovery`), rather than dropped.
 
-Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Details: [docs/ARCHITECTURE.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/ARCHITECTURE.md).
 
 ## Low-end and OEM phones
 
@@ -362,7 +362,7 @@ if (health.aggressiveOem || health.batteryOptimizationEnabled) {
 }
 ```
 
-Per-manufacturer instructions to show the user: [docs/OEM_BATTERY.md](docs/OEM_BATTERY.md).
+Per-manufacturer instructions to show the user: [docs/OEM_BATTERY.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/OEM_BATTERY.md).
 
 Phones with no step sensor at all — some entry-level Tecno, itel, Lava and
 Redmi A-series — count over the accelerometer instead of refusing to start
@@ -372,7 +372,7 @@ you when a user is on it.
 
 ## Before you ship
 
-Read [docs/PLAY_STORE_COMPLIANCE.md](docs/PLAY_STORE_COMPLIANCE.md). The three
+Read [docs/PLAY_STORE_COMPLIANCE.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/PLAY_STORE_COMPLIANCE.md). The three
 things that get apps rejected here are the foreground service declaration, the
 Health Connect permissions form, and asking for a battery optimisation
 exemption without an eligible use case.
@@ -396,7 +396,7 @@ jest.mock("react-native-step-tracker-pro", () =>
 Every method resolves with an empty-day value and is a `jest.fn`, so a test
 overrides one with `mockResolvedValueOnce`; `__emit(event, payload)` fires a
 listener; the hooks return settled results. See
-[docs/TESTING.md](docs/TESTING.md#mocking-the-package-in-your-apps-tests).
+[docs/TESTING.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/TESTING.md#mocking-the-package-in-your-apps-tests).
 
 This package's own suites:
 
@@ -424,7 +424,7 @@ phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
 with the screen off is not a shake, and that the motion gate holds a ride and
-never a walk. A hundred and one instrumented tests cover the
+never a walk. A hundred and five instrumented tests cover the
 reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
 pause, stop-and-start, countFrom and counter-reset paths by feeding samples
 to the engine directly, the
@@ -436,11 +436,16 @@ Connect reads against the platform's own provider when asked to. CI runs all
 of it on every push, plus the compatibility builds above.
 
 The device-level QA matrix — force-stop recovery, real reboot, Doze, Health
-Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
+Connect, OEM battery managers — is in [docs/TESTING.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.9.0** — the motion gate no
+[CHANGELOG.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/CHANGELOG.md). Latest release **2.10.0** — a ride is held for as long as Activity
+Recognition says it is: a walk during it pauses the holding instead of
+ending the ride, a bicycle is not ended by pedalling, and a ride survives
+the process being killed; the registration's status is reported and a
+refused one retried; calories are written as active burn; and countFrom
+covers the day record and `readHealthConnectSteps()`. **2.9.0** — the motion gate no
 longer hides real steps. It holds steps back only while Google's Activity
 Recognition reports a vehicle or a bicycle, which is how Google Fit does it,
 and gives the walk away from a ride back; the accelerometer classifier of
@@ -524,7 +529,7 @@ Native 0.82+ as new-architecture-only), a minimal manifest that declares only
 what sensor counting needs, typed codegen events, Play Integrity, raw Health
 Connect records and change tracking, sealed remote-sync headers with a
 `syncAuthFailed` event, a Jest mock and an Expo config plugin. Breaking
-changes and how to move: [docs/MIGRATING.md](docs/MIGRATING.md).
+changes and how to move: [docs/MIGRATING.md](https://github.com/SachinDeveloper-React/react-native-step-tracker-pro/blob/release/2.10.0/docs/MIGRATING.md).
 
 ## Licence
 

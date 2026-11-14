@@ -553,9 +553,16 @@ export default function App() {
                 Motion gate:{' '}
                 {!integrity.motionGate.activityRecognition.available
                   ? 'no Play Services, holding nothing'
-                  : integrity.motionGate.holding
-                    ? `holding (${integrity.motionGate.activityRecognition.activity}, accelerometer says ${integrity.motionGate.verdict})`
-                    : `counting (${integrity.motionGate.activityRecognition.activity})`}
+                  : integrity.motionGate.activityRecognition.status !== 'registered' &&
+                      integrity.motionGate.activityRecognition.status !== 'pending'
+                    ? `Activity Recognition ${integrity.motionGate.activityRecognition.status}${
+                        integrity.motionGate.activityRecognition.error
+                          ? ` (${integrity.motionGate.activityRecognition.error})`
+                          : ''
+                      }, holding nothing`
+                    : integrity.motionGate.holding
+                      ? `holding (${integrity.motionGate.activityRecognition.activity}, accelerometer says ${integrity.motionGate.verdict})`
+                      : `counting (${integrity.motionGate.activityRecognition.activity})`}
                 {integrity.motionGate.gatedSteps > 0
                   ? ` · ${integrity.motionGate.gatedSteps.toLocaleString()} steps held back`
                   : ' · nothing held back'}

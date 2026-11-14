@@ -229,10 +229,11 @@ const shown = await StepTracker.setCountFrom(Date.now());
 
 - **Health Connect** is read from `at` on, whatever the day: a record that
   ends before it counts nothing, one that straddles it counts its share
-  after it, by time. That is every source, resolution, stats, sources list
-  and snapshot `sources`. Explicit raw reads - `getHealthConnectRecords()`,
-  `readHealthConnectSteps()`, the changes feed, vitals - return what Health
-  Connect holds for the window you give them.
+  after it, by time. That is every source, resolution, stats, sources list,
+  snapshot `sources` and - from 2.10 - `readHealthConnectSteps()`, which is
+  a count like the rest. Raw reads of records - `getHealthConnectRecords()`,
+  the changes feed, vitals, a snapshot's `healthConnectRecords` - return
+  what Health Connect holds for the window you give them, as evidence.
 - **This phone** cannot tell when the steps it has already counted today
   were taken, so an `at` later than today's start - and than the countFrom
   before it - starts today over at the call, as `resetToday()` does (other
@@ -959,8 +960,9 @@ it is given to decide:
 
 Nothing else holds a step: not the accelerometer, not a cadence, not a
 guess. `getIntegrityReport().motionGate` says where things stand: whether
-Activity Recognition is `available`, the `activity` it last reported, and -
-as `holding` - whether steps are being held as you read it.
+Activity Recognition is `available` and - as `status`, from 2.10 - whether
+Play Services took the request, the `activity` it last reported, and - as
+`holding` - whether steps are being held as you read it.
 
 **Held is not gone.** Activity Recognition reports leaving a vehicle about a
 minute after the fact, and that minute is the walk away from the bus stop.
@@ -974,17 +976,43 @@ So a held step waits two minutes to be given back, and three things do it:
   accelerometer saw a walking rhythm in come back, and the rest are still
   owed to a "walking" that follows within a minute;
 - the **accelerometer confirms a walk** by itself: everything held in the
-  last minute comes back, and the ride is over without waiting to be told,
-  until a vehicle is reported afresh.
+  last minute comes back, and nothing is held while the walk goes on. What
+  is counted during it is tagged as walked, like what is given back.
 
 What is given back returns to `steps` and to the minutes it was taken in,
 each with the span the counter first reported it over, and is logged as a
 `motion_gate` event with `released` and a `reason`. `gatedSteps` therefore
 goes down as well as up.
 
-**A ride cannot outlive its evidence.** Five minutes of a phone lying still
-ends it, and so do twelve hours, so a missed "left the vehicle" cannot hold
-a day's steps. And steps that cannot be placed in a ride are counted: an
+**Activity Recognition's word stands until it says otherwise** (2.10). It
+sends a transition only when its state changes, so a ride it has reported
+is a ride for as long as it reports nothing else. The accelerometer only
+pauses the holding: a walk it confirms - down a train's corridor, or off a
+bus Activity Recognition has not yet noticed leaving - is counted, and when
+the walk stops and nothing has said the ride is over, holding starts again.
+2.9.0 ended the ride instead, and the rest of it was counted: a train
+standing at a station, a bus in a jam. Confirming a walk takes 24 seconds
+of rhythm in the last 30; once confirmed it goes on for as long as 15 still
+show it, so a stride that reads poorly for a few seconds - a phone taken
+out and typed on - is not a walk taken for over, with its steps held.
+**On a bicycle the accelerometer has no say:** pedalling is a rhythm it
+cannot tell from a stride, so Activity Recognition alone ends a bicycle
+ride and gives its last steps back. If the same ride is next reported as a
+vehicle, the accelerometer is asked again from that moment on.
+
+**A ride cannot outlive its evidence.** Three minutes of unbroken walking -
+nobody walks that long down a bus - half an hour of a phone lying still, or
+twelve hours end it, so a missed "left the vehicle" cannot hold a day's
+steps. A ride, its held steps and what Activity Recognition last said are
+kept across a process the system kills (2.10): it reports only changes, and
+a restarted process would otherwise know nothing of a ride until it was
+over. They are believed only while the request made of Activity Recognition
+still stands. A reboot, a force stop - which is what some phones' task
+killers do - an update or a revoked permission ends it, and with it the
+only thing that would have said the ride was over: then what was saved is
+dropped and every step counts until a vehicle is reported afresh. A ride
+the gate ended itself is not begun again by a restart either. And steps
+that cannot be placed in a ride are counted: an
 untimed sample, a step taken before the ride began and reported after, a
 lump the counter hands over after a gap that reaches back past the ride's
 start, anything gap recovery credited in one go.
@@ -1022,9 +1050,23 @@ traces:
 
 With a vehicle reported - wrongly - for the whole of every one of those
 walks, which is the worst case there is for a real step, the gate gave back
-all 10,197 of them. The vehicle recordings have gravity removed, so the
-accelerometer a phone would have seen was rebuilt with gravity along each
-phone axis in turn; "none" is none on any of the three.
+all 10,197 of them when "walking" was reported at the walk's end. With
+nothing reported at all, ever, 0.3-0.4% stayed held: two walks whose rhythm
+faded and which ended before it was confirmed again. The vehicle recordings
+have gravity removed, so the accelerometer a phone would have seen was
+rebuilt with gravity along each phone axis in turn; "none" is none on any
+of the three.
+
+And each recorded ride, reported once at its start and never again - how
+much of it is held:
+
+| | 2.10 | under 2.9.0's rules |
+|---|---|---|
+| bus | 100% | 100% |
+| taxi | 100% | 85-91% |
+| train | 100% | 8-28% |
+| bicycle, reported as a bicycle | 100% | 37-52% |
+| bicycle, reported as a vehicle | 64-66% | 37-52% |
 
 **What 2.8 did, and why it is gone.** 2.8.0-2.8.2 let the accelerometer
 hold steps on its own word: movement with no walking rhythm in it was
@@ -1037,7 +1079,7 @@ Replayed against the same 131 walks:
 |---|---|---|---|
 | 2.8.0 | 14.8% | 44.0% (worst walk 94%) | 45 of 131 |
 | 2.8.2 | 3.5% | 11.5% (worst walk 46%) | 16 of 131 |
-| 2.9.0, a vehicle reported throughout | 0.0% | 0.0% | 0 of 131 |
+| 2.9.0 and 2.10, a vehicle reported throughout | 0.0% | 0.0% | 0 of 131 |
 
 - and on the recorded bus rides they held back only about a third of the
 steps a simple pedometer counts there. `windowSeconds`, `minPeakRatio`,
@@ -1052,12 +1094,19 @@ still accepted and read back, and nothing uses them.
   "still" pays it again when it sets off.
 - When a ride ends on "walking", the false steps of its last half-minute
   come back with the walk.
-- Pedalling a bicycle with the phone in a pocket is a rhythm nothing here
-  can tell from a stride: it is confirmed as walking and its steps are
-  given back. Google Fit removes them; this would rather count a ride than
-  lose a walk.
+- Pedalling a bicycle is a rhythm nothing here can tell from a stride. A
+  ride Activity Recognition reports as a bicycle is held whole (2.10); one
+  it reports as a vehicle is not - the accelerometer confirms a "walk" and
+  the pedalling counts until the next report. This would rather count a
+  ride than lose a walk.
+- After a walk inside a ride, the vehicle's own steps are counted for about
+  a quarter of a minute, until the walk is seen to have stopped.
+- A ride goes unheld from a reboot, a force stop or an update until
+  Activity Recognition reports it afresh, and after one of the backstops -
+  three minutes of walking, half an hour of stillness, twelve hours.
 - A real step is held only while Activity Recognition is wrong and the
-  walk has not yet lasted half a minute.
+  walk has not yet lasted half a minute - and lost only if it then says
+  nothing at all and the walk's rhythm fades just before the walk ends.
 
 **Two figures, if you want them.** Sweatcoin shows its users both: every
 step the phone registered, and the ones that count. Here those are
@@ -1286,6 +1335,23 @@ UI can compare `grantedReadTypes` with `healthConnectReadTypes` to offer
 "also allow distance". Before 2.1.1 a single unticked type turned Health
 Connect off - no watch steps and no mirror - without an error.
 
+**Calories are read as total burn and written as active burn** (2.10).
+What a watch publishes as `TotalCaloriesBurnedRecord` - its whole day, the
+resting burn included - is what a day's calories are read from
+(`READ_TOTAL_CALORIES_BURNED`). What this package works out,
+`0.57 kcal x kg x km`, is the energy of the walking alone, which Health
+Connect calls `ActiveCaloriesBurnedRecord`, so that is what the mirror
+writes (`WRITE_ACTIVE_CALORIES_BURNED`). Before 2.10 it was written as
+total burn, and an app adding up a user's day read the walking as all of
+it. An app still holding `WRITE_TOTAL_CALORIES_BURNED` has the old
+total-burn record deleted, by its client id, wherever a record is written
+again as active burn or deleted - a day, or in minute mode each minute as
+it is rewritten - so the walking is not in a day twice and a deleted day
+leaves no twin behind; without that permission, those records stay as they
+were. Only days up to the one 2.10 first writes on can hold such a record,
+and nothing is asked of Health Connect for later ones. `grantedWriteTypes`
+still says `'totalCalories'` for the calories grant.
+
 **Features** (2.5). Background and history reads are Health Connect
 features, and a provider too old for one cannot grant its permission:
 `backgroundReadAvailable` / `historyReadAvailable` say whether it can. When it
@@ -1384,6 +1450,14 @@ Health Connect refuses the read - from the background, with no activity on
 screen and no foreground service (tracking off), without
 `READ_HEALTH_DATA_IN_BACKGROUND` (2.4). It used to resolve with no records,
 which passed for a window nobody walked in.
+
+With [`setCountFrom()`](#setcountfromat-number--null-promisestepsnapshot)
+in force, nothing before countFrom is counted here either (2.10): days
+before its day are left out, and its day counts from countFrom on, a record
+straddling it for its share after it by time - which is how Health
+Connect's aggregate treats a record that lies partly outside the window
+asked for. The days stay the ones you asked for: a day apart from
+`startIso`. Before 2.10 this one count read straight through countFrom.
 
 ```ts
 { totalSteps: 82310, records: [ { date, steps, distance, calories, synced } ] }

@@ -175,22 +175,38 @@ class WalkWitness(val rules: WitnessRules = WitnessRules()) {
         if (lastVerdictAt == 0L || abs(atMs - lastVerdictAt) > staleMs) MotionVerdict.UNKNOWN else verdict
 
     /**
-     * Whether the accelerometer has shown a walking rhythm in at least
-     * [CONFIRM_GAIT_SECONDS] of the [CONFIRM_SPAN_MS] up to [atMs]. False
-     * when it has not been watching that long, or stopped: a witness that
-     * saw nothing confirms nothing.
+     * In how many of the seconds of the [CONFIRM_SPAN_MS] up to [atMs] the
+     * accelerometer showed a walking rhythm. 0 when it has not been
+     * watching, or stopped: a witness that saw nothing confirms nothing.
      */
     @Synchronized
-    fun confirmedWalking(atMs: Long): Boolean {
-        if (lastVerdictAt == 0L || abs(atMs - lastVerdictAt) > STALE_MS) return false
+    fun gaitSeconds(atMs: Long): Int {
+        if (lastVerdictAt == 0L || abs(atMs - lastVerdictAt) > STALE_MS) return 0
         var gait = 0
         for (i in 0 until historySize) {
             val slot = (historyHead + i) % HISTORY
             val at = historyAt[slot]
             if (at > atMs - CONFIRM_SPAN_MS && at <= atMs + STALE_MS && history[slot] == MotionVerdict.GAIT) gait++
         }
-        return gait >= CONFIRM_GAIT_SECONDS
+        return gait
     }
+
+    /**
+     * Whether the accelerometer has shown a walking rhythm in at least
+     * [CONFIRM_GAIT_SECONDS] of the [CONFIRM_SPAN_MS] up to [atMs]. False
+     * when it has not been watching that long, or stopped.
+     */
+    fun confirmedWalking(atMs: Long): Boolean = gaitSeconds(atMs) >= CONFIRM_GAIT_SECONDS
+
+    /**
+     * Whether a walk already confirmed is still going on at [atMs]: a
+     * walking rhythm in at least [KEEP_GAIT_SECONDS] of the last thirty.
+     * Lower than it takes to confirm one, on purpose. A walker whose stride
+     * reads poorly - a phone being typed on, a loose back pocket - drops
+     * below [CONFIRM_GAIT_SECONDS] now and then without having stopped,
+     * and a walk taken for over while it goes on has its steps held.
+     */
+    fun stillWalking(atMs: Long): Boolean = gaitSeconds(atMs) >= KEEP_GAIT_SECONDS
 
     /**
      * Whether the second a step at [stepAtMs] was taken in showed a walking
@@ -374,6 +390,17 @@ class WalkWitness(val rules: WitnessRules = WitnessRules()) {
         /** Thirty seconds, of which [CONFIRM_GAIT_SECONDS] must show a walking rhythm. */
         const val CONFIRM_SPAN_MS = 30_000L
         const val CONFIRM_GAIT_SECONDS = 24
+
+        /**
+         * Of the same thirty seconds, how many must still show a walking
+         * rhythm for a confirmed walk to count as going on: half. On the
+         * recorded walks 6 of 131 fell below [CONFIRM_GAIT_SECONDS] after
+         * being confirmed and 2 below this - and on the recorded rides no
+         * stretch at or above it lasted a minute (49 s in a taxi, 6 s on a
+         * bus, none on a train), so a walk that has stopped is seen to
+         * have stopped.
+         */
+        const val KEEP_GAIT_SECONDS = 15
 
         /** Grid values a hole may be bridged across: 0.2 s, a hub delivering at 5 Hz. */
         const val MAX_FILL_BINS = 5L

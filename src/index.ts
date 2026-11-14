@@ -14,6 +14,7 @@ export {
 } from './constants';
 export * from './hooks';
 export type {
+  ActivityRecognitionStatus,
   AnyHealthConnectRecord,
   BackgroundRestrictionStatus,
   CompanionApp,

@@ -1,5 +1,33 @@
 # Migrating
 
+## From 2.9 to 2.10
+
+- **Writing calories needs `WRITE_ACTIVE_CALORIES_BURNED`.** Calories are
+  written to Health Connect as active burn, which is what they are; an app
+  that declares only `WRITE_TOTAL_CALORIES_BURNED` keeps writing steps and
+  distance, and calories stop until it declares the new one and the user
+  grants it. The Expo plugin declares it. Keep `WRITE_TOTAL_CALORIES_BURNED`
+  for a release as well if you want the old total-burn records cleaned up
+  as their days are written again or deleted - without it Health Connect
+  will not let them be deleted - and drop it after: only days up to the
+  one 2.10 first writes on can hold one. `grantedWriteTypes` still calls
+  the calories grant `'totalCalories'`.
+- **`readHealthConnectSteps()` honours countFrom.** It used to read straight
+  through it.
+- **A ride is held for as long as Activity Recognition says it is.** Expect
+  `gatedSteps` to come out higher than on 2.9.0 for train and bicycle
+  journeys and stop-and-go traffic, which 2.9.0 counted after its own
+  rules ended the ride. Walks during a ride still count.
+- **`motion_gate` events:** `reason: 'walking'` beside `holding: false` now
+  means a walk paused the holding, not that the ride ended; `'resumed'`
+  and `'walked_away'` are new. If your server reads these rows, a ride now
+  ends on an activity's name, `'walked_away'`, `'still'`, `'expired'` or
+  `'stopped'`.
+- **`getIntegrityReport()`** gains `motionGate.activityRecognition.status`
+  and `.error`, and `activityRecognition.status`; a type
+  `ActivityRecognitionStatus` is exported.
+- No database change.
+
 ## From 2.8 to 2.9
 
 One thing to do if you use `motionGate`; nothing otherwise.

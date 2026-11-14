@@ -30,9 +30,12 @@ jobs:
           npm pack --dry-run 2>&1 | tee pack.txt
           # Tests, mocks, build output, the Kotlin daemon's logs and source
           # maps must never ship. Neither do docs/, CHANGELOG.md, SECURITY.md
-          # or CONTRIBUTING.md since 2.8.1: they live on GitHub, where the
-          # README's links resolve on npm too.
+          # or CONTRIBUTING.md since 2.8.1: they live on GitHub, and the
+          # README links to them there, at the release they describe.
           ! grep -E '__tests__|__mocks__|android/build/|android/\.kotlin|android/src/(test|androidTest)/|\.map$| docs/| (CHANGELOG|SECURITY|CONTRIBUTING)\.md$' pack.txt
+          # So a link the README makes to one must be absolute: relative, it
+          # is broken in node_modules and goes to main's copy on npmjs.com.
+          ! grep -nE '\]\((docs/|CHANGELOG\.md|SECURITY\.md|CONTRIBUTING\.md)' README.md
           # What an app, the CLI, Expo and the Jest mock load must.
           for f in README.md LICENSE package.json react-native.config.js app.plugin.js plugin/manifest.js plugin/withStepTrackerPro.js jest/index.js jest/index.d.ts lib/commonjs/index.js lib/module/index.js lib/typescript/index.d.ts lib/commonjs/jestMock.js android/build.gradle android/src/main/AndroidManifest.xml; do
             grep -q " $f$" pack.txt || { echo "missing from the package: $f"; exit 1; }

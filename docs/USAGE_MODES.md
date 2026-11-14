@@ -312,7 +312,7 @@ set, plus background reads if you turn them on:
 <uses-permission android:name="android.permission.health.READ_TOTAL_CALORIES_BURNED" />
 <uses-permission android:name="android.permission.health.WRITE_STEPS" />
 <uses-permission android:name="android.permission.health.WRITE_DISTANCE" />
-<uses-permission android:name="android.permission.health.WRITE_TOTAL_CALORIES_BURNED" />
+<uses-permission android:name="android.permission.health.WRITE_ACTIVE_CALORIES_BURNED" />
 <!-- with healthConnectBackgroundRead: true -->
 <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
 ```

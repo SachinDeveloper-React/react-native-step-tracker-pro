@@ -32,6 +32,33 @@ class HealthConnectTypesTest {
     }
 
     @Test
+    fun `calories are read as total burn and written as active burn`() {
+        // What other apps publish - a watch's whole day - is total burn;
+        // what this package works out from distance is the walking alone,
+        // which Health Connect calls active burn. Written as total until 2.10.
+        assertEquals(readCalories, ReadType.TOTAL_CALORIES.permission)
+        assertEquals(
+            "android.permission.health.WRITE_ACTIVE_CALORIES_BURNED",
+            ReadType.TOTAL_CALORIES.writePermission
+        )
+        assertEquals(
+            "android.permission.health.WRITE_TOTAL_CALORIES_BURNED",
+            HealthConnectManager.LEGACY_WRITE_TOTAL_CALORIES
+        )
+        assertEquals(
+            setOf(
+                "android.permission.health.WRITE_STEPS",
+                "android.permission.health.WRITE_DISTANCE",
+                "android.permission.health.WRITE_ACTIVE_CALORIES_BURNED"
+            ),
+            HealthConnectManager.WRITE_PERMISSIONS
+        )
+        // Steps and distance are read and written as the same type.
+        assertEquals(ReadType.STEPS.recordClass, ReadType.STEPS.writeRecordClass)
+        assertEquals(ReadType.DISTANCE.recordClass, ReadType.DISTANCE.writeRecordClass)
+    }
+
+    @Test
     fun `a steps-only app requires one read permission`() {
         val stepsOnly = PermissionScope(write = false, readTypes = setOf(ReadType.STEPS))
         assertEquals(setOf(readSteps), stepsOnly.required)

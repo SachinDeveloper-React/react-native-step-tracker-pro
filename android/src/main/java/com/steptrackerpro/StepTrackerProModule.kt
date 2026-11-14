@@ -944,9 +944,12 @@ class StepTrackerProModule(private val reactContext: ReactApplicationContext) :
                 return@launchSafely
             }
             healthConnectRead(promise) {
+                // countFrom applies here too: it counts nothing before an
+                // instant "from this phone or any Health Connect app".
                 val days = core.healthConnect.readDailySteps(
                     Instant.parse(startIso),
-                    Instant.parse(endIso)
+                    Instant.parse(endIso),
+                    countFromMs = core.state.countFromAt
                 )
                 Bridge.map(
                     mapOf(

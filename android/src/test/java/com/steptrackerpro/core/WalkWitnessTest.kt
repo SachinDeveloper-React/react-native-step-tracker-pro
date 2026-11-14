@@ -314,6 +314,26 @@ class WalkWitnessTest {
     }
 
     @Test
+    fun `a confirmed walk goes on at half the seconds, and is over below that`() {
+        val road = roadNoise(0.7)
+        val witness = WalkWitness()
+        val walked = witness.feed(base, 40.0, signal = ::briskWalk)
+        assertTrue(witness.confirmedWalking(walked.lastMs))
+        assertTrue(witness.stillWalking(walked.lastMs))
+        // Ten seconds nothing can be read in: too few seconds of rhythm left
+        // to confirm a walk, enough for one already confirmed to go on.
+        val faltered = witness.feed(walked.lastMs + 40, 10.0, signal = road)
+        assertFalse(witness.confirmedWalking(faltered.lastMs))
+        assertTrue(witness.stillWalking(faltered.lastMs))
+        assertTrue(witness.gaitSeconds(faltered.lastMs) in WalkWitness.KEEP_GAIT_SECONDS until WalkWitness.CONFIRM_GAIT_SECONDS)
+        // Twenty-five seconds of it: the walk has stopped.
+        val stopped = witness.feed(faltered.lastMs + 40, 15.0, signal = road)
+        assertFalse(witness.stillWalking(stopped.lastMs))
+        // And a witness that is not watching says nothing goes on.
+        assertEquals(0, witness.gaitSeconds(stopped.lastMs + 60_000))
+    }
+
+    @Test
     fun `a witness that stopped watching confirms nothing`() {
         val witness = WalkWitness()
         val result = witness.feed(base, 40.0, signal = ::briskWalk)

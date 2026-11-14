@@ -164,6 +164,10 @@ class ActivityRecognitionGlueTest {
         InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
             context.packageName, "android.permission.ACTIVITY_RECOGNITION"
         )
+        // With no PendingIntent - a reboot, a force stop - no request of an
+        // earlier process stands, and nothing saved before is believed (2.10).
+        ActivityRecognitionBridge.pendingIntent(context).cancel()
+        assertFalse(ActivityRecognitionBridge.registrationSurvives(context))
         // The very request and PendingIntent the service registers: Play
         // Services answers asynchronously, and a refusal - a PendingIntent
         // flag it does not accept, a transition it does not know - would
@@ -171,6 +175,17 @@ class ActivityRecognitionGlueTest {
         val intent = ActivityRecognitionBridge.pendingIntent(context)
         Tasks.await(ActivityRecognitionBridge.Gms.request(context, intent), 20, TimeUnit.SECONDS)
         assertTrue(ActivityRecognitionBridge.start(context))
+        // And the answer is kept, for the integrity report to say (2.10).
+        val until = System.currentTimeMillis() + 20_000L
+        while (ActivityRecognitionBridge.status == ActivityRecognitionBridge.STATUS_PENDING &&
+            System.currentTimeMillis() < until
+        ) {
+            Thread.sleep(100)
+        }
+        assertEquals(ActivityRecognitionBridge.STATUS_REGISTERED, ActivityRecognitionBridge.status)
+        assertFalse(ActivityRecognitionBridge.shouldRetry(System.currentTimeMillis()))
+        assertTrue(ActivityRecognitionBridge.registrationSurvives(context))
         ActivityRecognitionBridge.stop(context)
+        assertEquals(ActivityRecognitionBridge.STATUS_NOT_REQUESTED, ActivityRecognitionBridge.status)
     }
 }

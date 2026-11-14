@@ -197,6 +197,15 @@ class StepStateStore(context: Context) {
     }
 
     /**
+     * The last date that can hold calories written to Health Connect as
+     * total burn, which is what releases before 2.10 wrote: the day this
+     * release first wrote or deleted there. Null until it has.
+     */
+    var legacyCaloriesUntil: String?
+        get() = prefs.getString(KEY_HC_LEGACY_CALORIES_UNTIL, null)
+        set(value) = prefs.edit().putString(KEY_HC_LEGACY_CALORIES_UNTIL, value).apply()
+
+    /**
      * How many times the Health Connect permission sheet has been shown without
      * the user granting anything.
      *
@@ -629,6 +638,7 @@ class StepStateStore(context: Context) {
         private const val KEY_DAY_WRITES_THROUGH = "hc_day_writes_through"
         private const val KEY_MIRROR_RESIDUALS = "hc_mirror_residuals"
         private const val KEY_HC_VERSION = "hc_record_version"
+        private const val KEY_HC_LEGACY_CALORIES_UNTIL = "hc_legacy_calories_until"
         private const val KEY_HC_DENIALS = "hc_permission_denials"
         private const val KEY_HC_GRANTS = "hc_last_grants"
         private const val KEY_PREFERRED_SOURCE = "preferred_step_source"

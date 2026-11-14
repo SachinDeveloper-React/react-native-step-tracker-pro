@@ -5,6 +5,141 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-11-14
+
+A minor release from a review of 2.9.0 and of the countFrom and Health
+Connect paths: a ride is held for as long as Activity Recognition says it
+is, calories are written as the type they are, and countFrom covers the
+two places it did not.
+
+### Fixed
+
+- **The rest of a ride was counted whenever the gate ended it on its own.**
+  2.9.0 ended a ride after five minutes of a still phone, when the
+  accelerometer confirmed a walk, or after twelve hours - while Activity
+  Recognition, which sends a transition only when its state changes, still
+  said the phone was in a vehicle. A train standing at a station, a bus in
+  a jam, a walk down a train's corridor: everything after counted.
+  Activity Recognition's word now stands until it says otherwise. A walk
+  the accelerometer confirms pauses the holding - the walk counts, tagged
+  as walked - and holding starts again when it stops (`motion_gate` with
+  `reason: 'resumed'`). Confirming a walk still takes 24 seconds of rhythm
+  in 30; once confirmed it goes on for as long as 15 show it, so a stride
+  that reads poorly for a few seconds is not a walk taken for over. The
+  backstops against a report that never comes are three minutes of
+  unbroken walking (`'walked_away'`), half an hour of stillness and twelve
+  hours.
+- **A bicycle ride ended about thirty seconds in.** Pedalling is a rhythm
+  the accelerometer cannot tell from a stride, so it confirmed a "walk" and
+  ended every ride. On a bicycle the accelerometer now has no say: Activity
+  Recognition alone ends the ride and gives its last steps back, and an end
+  on "still" gives back nothing on the accelerometer's word. When the same
+  ride is next reported as a vehicle, the accelerometer is asked again from
+  that moment: what it saw of the pedalling confirms nothing.
+- **A process killed in the middle of a ride leaked the rest of it, and
+  kept the walk it was about to give back.** The ride, its held steps and
+  what Activity Recognition last said were in memory only. They are kept in
+  their own preferences file (`step_tracker_pro_vehicle_gate`) and put back
+  when the next process starts; a ride past twelve hours and held steps
+  past two minutes are dropped. They are believed only while the request
+  made of Activity Recognition still stands - its `PendingIntent` exists,
+  the permission is held. A reboot, a force stop or an update ends it, and
+  with it the only thing that would have said the ride was over: then what
+  was saved is dropped and every step counts. A ride the gate ended itself
+  is not begun again by a restart. Stopping Activity Recognition, or a
+  request that cannot be made at all, clears what was saved.
+- **A refused Activity Recognition request showed only in logcat, and was
+  never made again.** `getIntegrityReport().motionGate.activityRecognition`
+  has `status` - `'not_requested'`, `'unavailable'`, `'no_permission'`,
+  `'pending'`, `'registered'` or `'failed'` - and `error`, and the
+  integrity checks' own `activityRecognition` has `status` too. A refused
+  request is made again every five minutes, and one that waited on
+  `ACTIVITY_RECOGNITION` once it is granted, from the service's heartbeat.
+- **Calories were written as `TotalCaloriesBurnedRecord`.** What this
+  package works out - `0.57 kcal x kg x km` - is the energy of the walking
+  alone, which Health Connect calls `ActiveCaloriesBurnedRecord`; written
+  as total burn, an app adding up a user's day read the walking as all of
+  it, resting burn included. Calories are written as active burn now, under
+  `WRITE_ACTIVE_CALORIES_BURNED`, and still read as other apps' total burn.
+  An app still holding `WRITE_TOTAL_CALORIES_BURNED` has the old total-burn
+  record deleted, by its client id, wherever a record is written again as
+  active burn or deleted - a day, or in minute mode each minute as it is
+  rewritten - so the walking is not in a day twice and a deleted day leaves
+  no twin behind. Only days up to the one 2.10 first writes on can hold
+  one; nothing is asked of Health Connect for later days. The Expo plugin
+  declares the new permission.
+- **On countFrom's day the day record started at midnight.** This phone
+  counted nothing before countFrom, but the record it wrote to Health
+  Connect - and the residual record in minute mode - told every app reading
+  it that the steps were walked from midnight. Both start at countFrom on
+  its day.
+- **`readHealthConnectSteps()` ignored countFrom.** It is a count like
+  every other read, and now counts nothing before countFrom: days that end
+  before it are left out, and the day it falls in is read from countFrom
+  on, a record straddling it for its share after it. The days stay the
+  ones asked for, a day apart from `startIso`.
+- **Steps given back were placed on the minutes outside the engine's
+  lock.** A commit in between could write Health Connect's minute mirror
+  from a held share already lowered and minutes not yet holding the steps,
+  for one cycle. Both now happen under the lock.
+- **`motion_gate` with `enabled: true` was logged every time a process
+  started.** It is logged when the gate is turned on or off.
+- **The README linked to `docs/` and `CHANGELOG.md`, which the package
+  does not ship.** Its links point at this release's files on GitHub, and
+  CI refuses a relative one.
+
+### Changed
+
+- `MotionGateConfig.stillVariance` now ends a ride after half an hour of
+  stillness rather than five minutes.
+- `motion_gate` with `holding: false, reason: 'walking'` means a walk has
+  paused the holding; in 2.9.0 it meant the ride was over.
+
+### Not changed, by decision
+
+- A day's number still comes from one source; the phone's and a watch's
+  steps are not merged minute by minute.
+- Health Connect records from apps other than this one, taken while
+  tracking was stopped, still count under `'auto'`; `setCountFrom()` is the
+  way to exclude a stretch.
+
+### Notes
+
+- **Replayed on recordings**, the Kotlin that ships over the 131 walks and
+  the bus, taxi, train and bicycle rides of 2.9.0's validation. Each ride
+  reported once at its start and never again, 2.10 holds 100% of the bus,
+  taxi and train rides and of a bicycle ride reported as one; 2.9.0's
+  rules held 100%, 85-91%, 8-28% and 37-52%. A bicycle reported as a
+  vehicle is held for 64-66%: there the pedalling reads as a walk. With a
+  vehicle reported for the whole of every walk, all 10,197 steps come back
+  when "walking" is reported at its end; with nothing ever reported,
+  0.3-0.4% do not (two walks whose rhythm faded and which ended before it
+  was confirmed again). A walk down a bus between two stretches of sitting
+  loses 0.02-0.06% of its steps, and holding begins again 15 s after
+  sitting down.
+- **Checked against Health Connect itself**, on the platform provider:
+  an aggregate over part of a record's time counts that part of it - a
+  1,000-step record half inside the window reads 500 - which is what
+  `readHealthConnectSteps()` relies on at countFrom.
+- Not verified in a vehicle, as for 2.9.0: what Activity Recognition
+  reports on a given phone in a given bus only a ride can show.
+
+### Tests
+
+- JVM 349 (from 336): the gate's pausing and resuming, a faltering walk,
+  the three backstops, bicycle rides and one reported as a vehicle, save
+  and restore; the witness's lower bar; the calories read and write types.
+- Instrumented 105 (from 101): releasing under the engine's lock, a walk
+  inside a ride counted and tagged as walked, a ride the gate ended
+  staying ended across a restart, a restart picking a ride up only while
+  the registration stands, the gate's being on logged once. Opt-in, against
+  Health Connect itself (6): the countFrom day's record starting at
+  countFrom, a record straddling countFrom read for its share, calories
+  written as active burn and the old total-burn record cleared on a write
+  and on a delete. Opt-in, against Play Services (3): the registration
+  reaches `'registered'`, and is known to be gone when its `PendingIntent`
+  is.
+
 ## [2.9.0] - 2026-11-14
 
 A minor release that takes back a mistake: the motion gate was hiding real

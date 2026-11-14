@@ -131,6 +131,14 @@ class IntegrityMonitor(
         log(IntegrityEvent.ACTIVITY_CHANGED, mapOf("activity" to state.jsValue))
     }
 
+    /**
+     * What Activity Recognition said before this process started, put back
+     * without logging it as a change: it was logged when it happened.
+     */
+    fun restoreActivity(state: ActivityState) {
+        if (activity == ActivityState.UNKNOWN) activity = state
+    }
+
     /** Activity Recognition was stopped; a state it reported earlier no longer holds. */
     fun resetActivity() {
         activity = ActivityState.UNKNOWN
@@ -342,6 +350,7 @@ class IntegrityMonitor(
             "activityRecognition" to mapOf(
                 "requested" to (on && cfg.fraudActivityRecognition),
                 "available" to ActivityRecognitionBridge.isAvailable(),
+                "status" to ActivityRecognitionBridge.status,
                 "current" to if (today) activity.jsValue else ActivityState.UNKNOWN.jsValue
             ),
             "device" to DeviceSignals.collect(context)

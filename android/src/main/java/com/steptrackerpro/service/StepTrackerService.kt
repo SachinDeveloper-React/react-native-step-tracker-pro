@@ -121,6 +121,11 @@ class StepTrackerService : Service(), SensorEventListener {
                 core.integrity.maybeEvaluate()
                 pushNotification()
             }
+            // An Activity Recognition request Play Services refused, or one
+            // that waited on the permission, is made again: the motion gate
+            // holds nothing without it. On the main thread, where the
+            // signals live.
+            mainHandler.post { if (isAlive) integritySignals.retryActivityRecognition() }
             // A listener that could not be registered earlier - the sensor
             // service was not ready, a HAL hiccup - is retried here for as
             // long as the tracker is meant to be running, so a transient
@@ -224,6 +229,8 @@ class StepTrackerService : Service(), SensorEventListener {
 
     /** Held while the gate's registration is checked and changed. */
     private val gateSensorLock = Any()
+
+    private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
     private val motionTick = object : Runnable {
         override fun run() {

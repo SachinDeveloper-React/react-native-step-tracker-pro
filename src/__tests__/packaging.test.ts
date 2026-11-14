@@ -45,7 +45,7 @@ describe('Expo config plugin', () => {
     ).toEqual([
       'android.permission.health.WRITE_STEPS',
       'android.permission.health.WRITE_DISTANCE',
-      'android.permission.health.WRITE_TOTAL_CALORIES_BURNED',
+      'android.permission.health.WRITE_ACTIVE_CALORIES_BURNED',
     ]);
   });
 

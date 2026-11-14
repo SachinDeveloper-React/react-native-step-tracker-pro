@@ -159,13 +159,23 @@ function integrityReport(date = today()): IntegrityReport {
       flagWhileCharging: true,
     },
     charging: false,
-    activityRecognition: { requested: false, available: false, current: 'unknown' },
+    activityRecognition: {
+      requested: false,
+      available: false,
+      status: 'not_requested',
+      current: 'unknown',
+    },
     motionGate: {
       enabled: false,
       holding: false,
       verdict: 'unknown',
       gatedSteps: 0,
-      activityRecognition: { available: false, activity: 'unknown' },
+      activityRecognition: {
+        available: false,
+        status: 'not_requested',
+        error: null,
+        activity: 'unknown',
+      },
       rules: {
         windowSeconds: 3,
         stillVariance: 0.02,

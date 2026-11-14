@@ -730,19 +730,22 @@ class StepCounterEngine(
      * only the held share moves.
      *
      * The caller places them on the minute timeline itself, each in the
-     * span it was first reported with, which is why [onObserved] is not
-     * invoked from here.
+     * span it was first reported with, in [place] - which runs under this
+     * engine's lock, as [onObserved] does, so a commit never sees the held
+     * share lowered and the minutes not yet holding the steps. Keep it to
+     * in-memory appends.
      *
      * @return how many were given back: never more than the active day
      *   holds, so steps held on a day that has closed since stay with it.
      */
     @Synchronized
-    fun releaseGated(steps: Int): Int {
+    fun releaseGated(steps: Int, place: (released: Int) -> Unit = {}): Int {
         if (steps <= 0) return 0
         val released = steps.coerceAtMost(state.gatedToday)
         if (released <= 0) return 0
         state.gatedToday = state.gatedToday - released
         pendingCommit += released
+        place(released)
         return released
     }
 

@@ -331,12 +331,21 @@ export interface StepTrackerConfig {
  *   90 seconds when it then says "walking" or "running"; the ones taken in
  *   seconds the accelerometer saw a walking rhythm in when it says anything
  *   else that is not a vehicle; and all of the last minute as soon as the
- *   accelerometer confirms a walk by itself, which also ends the ride
- *   without waiting to be told. What is given back returns to `steps` and
- *   to the minutes it was taken in.
- * - **A ride cannot outlive its evidence.** Five minutes of a phone lying
- *   still ends it, and so do twelve hours, so a missed "left the vehicle"
- *   cannot hold a day's steps.
+ *   accelerometer confirms a walk by itself. What is given back returns to
+ *   `steps` and to the minutes it was taken in.
+ * - **Activity Recognition's word stands until it says otherwise** (2.10).
+ *   It reports only changes, so a ride is a ride until it reports
+ *   something else. A walk the accelerometer confirms - down a train, off a
+ *   bus it has not noticed leaving - pauses the holding; when the walk
+ *   stops, holding starts again. On a bicycle the accelerometer has no say
+ *   at all: pedalling reads as a stride.
+ * - **A ride cannot outlive its evidence.** Three minutes of unbroken
+ *   walking, half an hour of a phone lying still, or twelve hours end it,
+ *   so a missed "left the vehicle" cannot hold a day's steps. A ride and
+ *   its held steps survive the process being killed (2.10) - but not a
+ *   reboot, a force stop or an update, which end the request Activity
+ *   Recognition would have answered: then nothing saved is believed, and
+ *   every step counts.
  *
  * **What it needs.** `com.google.android.gms:play-services-location` in the
  * app's own `build.gradle` - this package declares it compile-only, so an
@@ -374,10 +383,11 @@ export interface StepTrackerConfig {
  * **It is not perfect, and it errs one way.** The first minute of a ride is
  * counted, before Activity Recognition has noticed it - its latency, and
  * the price of not guessing. So is the half-minute before "walking" is
- * reported. Pedalling a bicycle with the phone in a pocket reads as a
- * walking rhythm, and its steps are given back. A real step is not held
- * unless Activity Recognition is wrong for longer than it takes to walk for
- * half a minute.
+ * reported, and the quarter-minute after a walk inside a ride. Pedalling
+ * reads as a walking rhythm: a ride reported as a bicycle is held whole
+ * (2.10), one reported as a vehicle is counted while it does. A real step
+ * is not held unless Activity Recognition is wrong for longer than it takes
+ * to walk for half a minute.
  */
 export interface MotionGateConfig {
   /**
@@ -387,9 +397,10 @@ export interface MotionGateConfig {
   enabled?: boolean;
   /**
    * Variance of the accelerometer magnitude, in (m/s²)², below which the
-   * phone counts as still. Default 0.02, about 0.14 m/s² RMS; 0 to 1. Five
-   * minutes of stillness end a ride that Activity Recognition never
-   * reported the end of.
+   * phone counts as still. Default 0.02, about 0.14 m/s² RMS; 0 to 1. Half
+   * an hour of stillness ends a ride that Activity Recognition never
+   * reported the end of (five minutes before 2.10, which ended a train's
+   * journey at every long stop).
    */
   stillVariance?: number;
   /**
@@ -429,6 +440,22 @@ export interface MotionGateConfig {
  *   held, the gate is off, or the accelerometer is not delivering
  */
 export type MotionVerdict = 'gait' | 'vibration' | 'still' | 'unknown';
+
+/**
+ * Where the Activity Recognition registration stands (2.10).
+ *
+ * - `'not_requested'` — nothing asked for it: neither `motionGate` nor
+ *   `fraudDetection.activityRecognition` is on, or tracking is not running
+ * - `'unavailable'` — the app does not ship `play-services-location`
+ * - `'no_permission'` — `ACTIVITY_RECOGNITION` is not granted; asked again
+ *   once it is
+ * - `'pending'` — asked, Play Services has not answered yet
+ * - `'registered'` — Play Services took it
+ * - `'failed'` — Play Services refused it (outdated, disabled, ...); asked
+ *   again every five minutes
+ */
+export type ActivityRecognitionStatus =
+  'not_requested' | 'unavailable' | 'no_permission' | 'pending' | 'registered' | 'failed';
 
 /**
  * Integrity checks: every step this phone counts is bucketed by minute, and a
@@ -603,12 +630,19 @@ export type IntegrityEventType =
   | 'activity_changed'
   /**
    * The motion gate (2.8; `holding` and `released` from 2.9): turned on or
-   * off (`detail.enabled`); began or stopped holding steps
-   * (`detail.holding`, with `detail.reason` - the activity reported, or
-   * `'walking'`, `'still'`, `'expired'` or `'stopped'` for a ride that
-   * ended without a report); gave held steps back (`detail.released`, with
-   * `detail.reason` `'on_foot'`, `'left_vehicle'` or `'walking'`); or -
-   * while a ride is held - a new accelerometer verdict (`detail.verdict`).
+   * off (`detail.enabled`, logged when it changes); began or stopped
+   * holding steps (`detail.holding`, with `detail.reason`); gave held steps
+   * back (`detail.released`, with `detail.reason` `'on_foot'`,
+   * `'left_vehicle'` or `'walking'`); or - during a ride - a new
+   * accelerometer verdict (`detail.verdict`).
+   *
+   * `detail.reason` beside `holding` is the activity reported, or, for a
+   * change nothing reported: `'walking'` - a walk confirmed, holding
+   * paused, the ride goes on (2.10; it ended the ride in 2.9);
+   * `'resumed'` - that walk stopped, holding again (2.10);
+   * `'walked_away'` - three minutes of walking ended the ride (2.10);
+   * `'still'` - half an hour of stillness did; `'expired'` - twelve hours
+   * did; `'stopped'` - Activity Recognition was stopped.
    */
   | 'motion_gate'
   | 'service_recovered'
@@ -673,6 +707,8 @@ export interface IntegrityReport {
     requested: boolean;
     /** The host app ships Play Services' location library. */
     available: boolean;
+    /** Where the registration stands (2.10). See {@link ActivityRecognitionStatus}. */
+    status: ActivityRecognitionStatus;
     current: 'unknown' | 'still' | 'walking' | 'running' | 'on_bicycle' | 'in_vehicle';
   };
   /**
@@ -683,8 +719,9 @@ export interface IntegrityReport {
     enabled: boolean;
     /**
      * Steps are being held as this is read: Activity Recognition has
-     * reported a vehicle or a bicycle and nothing has ended the ride.
-     * Always false for a past day. From 2.9.0.
+     * reported a vehicle or a bicycle, nothing has ended the ride, and the
+     * accelerometer is not confirming a walk in the middle of it. Always
+     * false for a past day. From 2.9.0.
      */
     holding: boolean;
     /**
@@ -707,6 +744,15 @@ export interface IntegrityReport {
      */
     activityRecognition: {
       available: boolean;
+      /**
+       * Whether Play Services took the request (2.10): `'failed'` - with
+       * `error` - holds nothing as surely as a missing library, and is
+       * retried every five minutes; `'no_permission'` until
+       * `ACTIVITY_RECOGNITION` is granted.
+       */
+      status: ActivityRecognitionStatus;
+      /** Why the last request failed; null when it did not. */
+      error: string | null;
       activity: 'unknown' | 'still' | 'walking' | 'running' | 'on_bicycle' | 'in_vehicle';
     };
     /**
