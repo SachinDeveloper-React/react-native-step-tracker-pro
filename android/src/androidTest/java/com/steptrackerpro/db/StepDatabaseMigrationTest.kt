@@ -222,12 +222,16 @@ class StepDatabaseMigrationTest {
             val written = room.dailySummaryDao().findByDate("2026-09-03")!!
             assertEquals(300, written.recoveredSteps)
             assertEquals(40, written.gatedSteps)
-            // Neither share goes backwards: a snapshot of the live day racing
-            // a backfill must not undo the backfill's increment.
+            // The recovered share never goes backwards: a snapshot of the
+            // live day racing a backfill must not undo the backfill's
+            // increment. The gated share is written as given - from 2.9.0
+            // held steps are given back when they turn out to be the walk
+            // away from a ride, and a stored day kept at its highest would
+            // stay short of the live one by every step given back.
             room.dailySummaryDao().upsertKeepingRecovered(written.copy(recoveredSteps = 10, gatedSteps = 5))
             val held = room.dailySummaryDao().findByDate("2026-09-03")!!
             assertEquals(300, held.recoveredSteps)
-            assertEquals(40, held.gatedSteps)
+            assertEquals(5, held.gatedSteps)
             // The motion table takes a row and prunes to the bound.
             val dao = room.motionWindowDao()
             repeat(5) { i ->

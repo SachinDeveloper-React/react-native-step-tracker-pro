@@ -14,10 +14,11 @@ import kotlin.math.abs
 
 /**
  * The service-side inputs to the integrity layer: whether the phone is
- * plugged in, when the clock or zone is changed, and Activity Recognition.
- * Registered while the service runs and detection is on; every receiver is a
- * dynamic one, because none of these broadcasts reach a manifest receiver on
- * API 26+, and none is exported.
+ * plugged in, when the clock or zone is changed, and Activity Recognition -
+ * which the motion gate needs as well, and gets whether or not detection is
+ * on. Registered while the service runs; every receiver is a dynamic one,
+ * because none of these broadcasts reach a manifest receiver on API 26+,
+ * and none is exported.
  */
 class IntegritySignals(private val context: Context, private val core: StepTrackerCore) {
 
@@ -61,13 +62,15 @@ class IntegritySignals(private val context: Context, private val core: StepTrack
     fun apply() {
         val cfg = core.config()
         if (cfg.fraudDetectionEnabled) register() else unregister()
-        val wantActivity = cfg.fraudDetectionEnabled && cfg.fraudActivityRecognition
+        // For the integrity tags when the app asked for them, and for the
+        // motion gate whenever it is on: it holds nothing without this.
+        val wantActivity = cfg.wantsActivityRecognition
         if (wantActivity && !activityStarted) {
             activityStarted = ActivityRecognitionBridge.start(context)
         } else if (!wantActivity && activityStarted) {
             ActivityRecognitionBridge.stop(context)
             activityStarted = false
-            core.integrity.resetActivity()
+            core.onActivityStopped()
         }
     }
 
@@ -77,7 +80,7 @@ class IntegritySignals(private val context: Context, private val core: StepTrack
             ActivityRecognitionBridge.stop(context)
             activityStarted = false
         }
-        core.integrity.resetActivity()
+        core.onActivityStopped()
     }
 
     private fun register() {

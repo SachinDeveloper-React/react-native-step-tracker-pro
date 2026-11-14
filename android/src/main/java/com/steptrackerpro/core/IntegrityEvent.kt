@@ -39,9 +39,15 @@ data class IntegrityEvent(
         /** Activity Recognition reported a new state; `detail.activity`. */
         const val ACTIVITY_CHANGED = "activity_changed"
         /**
-         * The motion gate was turned on or off (`detail.enabled`), or
-         * reached a new verdict about what is moving the phone
-         * (`detail.verdict`, one of [MotionVerdict]'s values).
+         * The motion gate: turned on or off (`detail.enabled`); began or
+         * stopped holding steps (`detail.holding`, with `detail.reason` -
+         * the activity reported, or `walking`, `still`, `expired` or
+         * `stopped` for a ride that ended without a report); gave held
+         * steps back
+         * (`detail.released`, with `detail.reason` one of
+         * [VehicleGate]'s `REASON_` values); or, while a ride is held, a
+         * new accelerometer verdict (`detail.verdict`, one of
+         * [MotionVerdict]'s values).
          */
         const val MOTION_GATE = "motion_gate"
         /** Something other than the user restarted the service; `detail.reason`. */

@@ -123,10 +123,11 @@
             android:exported="false" />
 
         <!--
-          Activity Recognition transitions for the integrity checks. Only ever
-          fired by Play Services through an explicit PendingIntent this package
-          creates, and only when the host app ships play-services-location and
-          turns on fraudDetection.activityRecognition.
+          Activity Recognition transitions, for the motion gate and the
+          integrity checks. Only ever fired by Play Services through an
+          explicit PendingIntent this package creates, and only when the host
+          app ships play-services-location and turns on motionGate or
+          fraudDetection.activityRecognition.
         -->
         <receiver
             android:name="com.steptrackerpro.integrity.ActivityTransitionReceiver"

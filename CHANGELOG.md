@@ -5,6 +5,160 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-11-14
+
+A minor release that takes back a mistake: the motion gate was hiding real
+steps, and the way it decided could not be made not to. It now decides the
+way Google Fit does.
+
+### Changed
+
+- **The motion gate holds a step only on Activity Recognition's word.**
+  While Google's Activity Recognition says the phone is in a vehicle or on a
+  bicycle, the steps that arrive are held - in `deviceSteps`, out of
+  `steps`, reported as `gatedSteps`. Nothing else holds a step: not the
+  accelerometer, not a cadence, not a guess. This is what Google Fit says it
+  does - it "detects when users are doing activities that shouldn't
+  contribute to their step count (like cycling, driving or travelling via
+  public transport) and removes these from the final step count" - with the
+  same detector, a model trained on far more rides than anything that could
+  be tuned inside one package.
+
+  **It needs `com.google.android.gms:play-services-location` in the app**,
+  which this package declares compile-only. Without it - or on a phone
+  without Play Services, or without the `ACTIVITY_RECOGNITION` grant - the
+  gate holds nothing and the count is the hardware counter's, exactly what
+  the phone's own health app shows. `motionGate.enabled` starts Activity
+  Recognition by itself; `fraudDetection.activityRecognition` is not
+  needed, and without it no step is tagged or flagged because of it.
+
+- **Held is not gone.** Activity Recognition reports leaving a vehicle about
+  a minute late, and that minute is the walk away from the bus stop. So a
+  held step waits two minutes in a ledger and is given back - to `steps`,
+  and to the minutes it was taken in, with the span the counter first gave
+  it - when Activity Recognition says "walking" or "running" (everything
+  from the 90 seconds before); when it says anything else that is not a
+  vehicle (the steps taken in seconds the accelerometer saw a walking rhythm
+  in, the rest staying owed for a minute to a "walking" that follows); and
+  when the accelerometer confirms a walk by itself (everything from the last
+  minute, and the ride is over until a vehicle is reported afresh). A ride
+  cannot outlive its evidence either: five minutes of a phone lying still
+  ends it, and so do twelve hours. `gatedSteps` therefore goes down as well
+  as up.
+
+- **The accelerometer speaks only for the walker.** It is registered when a
+  ride begins and let go when it ends - where 2.8 kept it, and on many
+  phones a wake lock with it, for as long as tracking ran - and asked one
+  question: is this, beyond doubt, a person walking? A second passes when
+  the motion, smoothed to a step's frequencies, stops resembling itself and
+  then resembles itself again a step or a stride later; a walk is confirmed
+  by 24 such seconds in 30. Run over recordings, the shipped code confirmed
+  every one of 131 real walks about thirty seconds in - 27 people, phone in
+  a hand, typing, in a front and a back trouser pocket, a shirt pocket, a
+  backpack and a handbag, at three paces - and not one minute of 473 on
+  buses, 1,102 in taxis or 308 on trains. With a vehicle reported, wrongly,
+  for the whole of every one of those walks, it gave back all 10,197 steps.
+
+### Fixed
+
+- **Real steps were being held back as a vehicle's.** 2.8.0-2.8.2 let the
+  accelerometer hold steps on its own word: three seconds of movement with
+  no walking rhythm in them were called a machine's vibration. That cannot
+  be right, for two reasons no threshold fixes. The hardware counter is
+  itself an accelerometer gait detector, so the moments it is fooled are the
+  moments the signal looks like gait - a second, simpler classifier on the
+  same signal has little to add. And no rhythm is not a vehicle: it is also
+  a kitchen, a shop floor, a crowd and a phone in a back pocket. The
+  classifier was tuned on synthetic traces - sums of sinusoids, which
+  repeat exactly, standing in for roads, which do not - and met real walks
+  only in the field, where a user walked a thousand steps and was shown
+  five hundred. Replayed against the 131 recorded walks:
+
+  | | real steps thrown away | back trouser pocket | walks losing over 10% |
+  |---|---|---|---|
+  | 2.8.0 | 14.8% | 44.0%, worst walk 94% | 45 of 131 |
+  | 2.8.2 | 3.5% | 11.5%, worst walk 46% | 16 of 131 |
+  | 2.9.0, a vehicle reported throughout | 0.0% | 0.0% | 0 of 131 |
+
+  while against the recorded bus rides it held back about a third of the
+  steps a simple pedometer counts there. It is gone, not retuned.
+
+- **The gate went on holding after it was turned off, until the service was
+  next told.** The gate was built and dropped by the service; a config
+  change that reached the core alone left the old one in place. It now
+  follows `updateConfig()` wherever that is called from, exists from the
+  moment the process starts - an Activity Recognition broadcast can be what
+  starts it - and lets its accelerometer go when turned off in the middle
+  of a ride.
+
+- **Only the last Activity Recognition transition in a broadcast was read,
+  and without its time.** "Left the vehicle" and "entered walking" arrive
+  together, and it is the pair, in order, that says the user got off and
+  walked; the last alone reads the same whether a bus stopped at a light or
+  its passenger left. Every event is now applied in turn, at the time Play
+  Services says it happened, and an exit only ends the activity it names.
+
+- **`'motion_gate'` was missing from `IntegrityEventType`.** The events have
+  been logged since 2.8.0.
+
+- **The engine asked the gate about nothing.** An install's since-boot
+  claim and a gap recovered in one go leave no watched steps, and the gate
+  was called with zero of them. Harmless, and one of two things the
+  instrumented suite said on its first full run since 2.8.0; the other was
+  a test that expected 28 where the raw total is 128.
+
+### Deprecated
+
+- `motionGate.windowSeconds`, `minPeakRatio`, `maxZeroCrossingRate` and
+  `engageSeconds` do nothing. They tuned the classifier that is gone. They
+  are still accepted, validated and read back, so a stored config or one a
+  server sends keeps working unchanged. `stillVariance` is still used.
+
+### Added
+
+- `getIntegrityReport().motionGate.holding` - steps are being held as you
+  read it - and `.activityRecognition: { available, activity }`, which says
+  whether the gate can work at all and what was last reported.
+- `motion_gate` events for every time holding begins and ends
+  (`detail.holding`, `detail.reason`) and for every release
+  (`detail.released`, `detail.reason`).
+- `docs/INSTALLATION.md` §10, `docs/MIGRATING.md` "From 2.8 to 2.9", and
+  "The app shows fewer steps than the phone walked" in
+  `docs/TROUBLESHOOTING.md`.
+
+### Notes
+
+- **What gets through, by design.** The first minute of a ride, before
+  Activity Recognition has noticed it; the false steps of the half-minute
+  before a "walking"; a bus that sat at a light long enough to read as
+  still, until it is reported moving again; pedalling a bicycle with the
+  phone in a pocket, which is a rhythm nothing here can tell from a stride.
+  Each is a vehicle's step counted. None is a walker's step lost.
+- **Not verified in a vehicle.** The registration and everything done with
+  a transition are tested against real Play Services on an emulator, and a
+  transition was seen to arrive from it once. What Activity Recognition
+  reports on a given phone in a moving bus, and how soon, is the one thing
+  no test bench shows; `docs/TESTING.md` has the checklist, and
+  `getIntegrityEvents()` records what it takes to answer it.
+- The recordings are Brajdic & Harle's UbiComp 2013 walk set (GPL) and
+  Kaewunruen et al.'s transport vibration set (CC-BY, Zenodo 5140105).
+  Neither is in this repository.
+
+### Tests
+
+- JVM: `WalkWitnessTest` (17) and `VehicleGateTest` (25) replace
+  `GaitGateTest`; 336 tests. Vehicle traces are built the way roads are -
+  noise through a filter, a suspension's resonance at a walker's own
+  frequency, an engine's tone, a sway - not as sums of sinusoids.
+- Instrumented: the give-back path through the real engine, database and
+  core, and the whole suite run on an emulator.
+- `ActivityRecognitionGlueTest`, opt-in with `-PstpPlayServicesTests`: a
+  real `ActivityTransitionResult` through the real receiver, and this
+  package's registration put to real Play Services, which accepted it. In
+  a run by hand it then delivered "still" through the real `PendingIntent`
+  and the manifest's receiver a second later; on six other runs it sent
+  nothing within half a minute, so that is not a test.
+
 ## [2.8.2] - 2026-11-12
 
 A patch release: the motion gate was holding back real walks.

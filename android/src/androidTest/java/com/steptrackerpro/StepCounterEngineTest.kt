@@ -1036,7 +1036,9 @@ class StepCounterEngineTest {
         // integrity timeline nor the per-minute Health Connect mirror.
         assertEquals(listOf(10, 4), observed.map { it.third })
         assertEquals(14, engine.snapshot().gatedSteps)
-        assertEquals(28, engine.snapshot().steps)
+        // The raw total keeps all of it: the hundred before the gate, and
+        // both deltas whole.
+        assertEquals(128, engine.snapshot().steps)
     }
 
     @Test
@@ -1080,6 +1082,53 @@ class StepCounterEngineTest {
         state.activeDate = DateKeys.yesterday()
         assertTrue(engine.rollIfNeeded())
         assertEquals(closed, rollovers.single().first.gatedSteps)
+        assertEquals(0, state.gatedToday)
+    }
+
+    @Test
+    fun heldStepsGivenBackComeOutOfTheHeldShareAndNothingElse() {
+        engine.onCounterSample(100f, now())
+        gateEverything()
+        engine.onCounterSample(160f, now() + 5_000L)
+        assertEquals(60, state.gatedToday)
+        engine.consumeCommit()
+        observed.clear()
+
+        // The walk away from the bus stop: forty of the sixty were steps.
+        assertEquals(40, engine.releaseGated(40))
+        assertEquals(20, state.gatedToday)
+        // The raw count never moved - they were in it all along - and the
+        // day is owed a write, so storage hears about the smaller share.
+        assertEquals(160, engine.snapshot().steps)
+        assertEquals(20, engine.snapshot().gatedSteps)
+        assertTrue(engine.shouldCommit(1))
+        assertEquals(20, engine.consumeCommit().gatedSteps)
+        // The engine does not place them on the minutes; the caller does,
+        // each in the span it was first reported with.
+        assertTrue(observed.isEmpty())
+
+        // Never more than is held, and never below nothing.
+        assertEquals(20, engine.releaseGated(500))
+        assertEquals(0, state.gatedToday)
+        assertEquals(0, engine.releaseGated(5))
+        assertEquals(0, engine.releaseGated(0))
+        assertEquals(0, engine.releaseGated(-3))
+        assertEquals(160, engine.snapshot().steps)
+    }
+
+    @Test
+    fun stepsHeldOnADayThatHasClosedStayWithIt() {
+        engine.onCounterSample(100f, now())
+        gateEverything()
+        engine.onCounterSample(130f, now() + 5_000L)
+        assertEquals(30, state.gatedToday)
+        // Midnight passes with them held.
+        state.activeDate = DateKeys.yesterday()
+        assertTrue(engine.rollIfNeeded())
+        assertEquals(30, rollovers.single().first.gatedSteps)
+        // Giving them back now would take them out of a day that never
+        // held them: there is nothing here to give.
+        assertEquals(0, engine.releaseGated(30))
         assertEquals(0, state.gatedToday)
     }
 

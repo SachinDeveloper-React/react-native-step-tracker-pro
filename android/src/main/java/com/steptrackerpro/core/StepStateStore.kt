@@ -82,11 +82,12 @@ class StepStateStore(context: Context) {
         set(value) = prefs.edit().putInt(KEY_RECOVERED_TODAY, value.coerceAtLeast(0)).apply()
 
     /**
-     * Of [stepsToday], how many the motion gate held back as a machine's
-     * vibration - see [GaitGate]. They are in the raw total, which is what
-     * `deviceSteps` reports, and out of every number shown. Written with the
-     * counter state so the two cannot drift, zeroed with it at rollover and
-     * reset, and stored into `daily_summary.gatedSteps` with every commit.
+     * Of [stepsToday], how many the motion gate is holding back as a
+     * vehicle's - see [VehicleGate]. They are in the raw total, which is
+     * what `deviceSteps` reports, and out of every number shown. Written
+     * with the counter state so the two cannot drift, lowered when held
+     * steps are given back, zeroed at rollover and reset, and stored into
+     * `daily_summary.gatedSteps` with every commit.
      */
     var gatedToday: Int
         get() = prefs.getInt(KEY_GATED_TODAY, 0)

@@ -136,19 +136,35 @@ class IntegrityConfigTest {
     }
 
     @Test
-    fun `the motion gate is off by default and its rules follow the window`() {
+    fun `the motion gate is off by default and its one rule is the still variance`() {
         val config = StepTrackerConfig()
         assertFalse(config.motionGateEnabled)
-        assertEquals(GateDefaults.WINDOW_SECONDS, config.motionGateWindowSeconds)
-        val rules = config.motionGateRules()
-        assertEquals(3_000L, rules.windowMs)
-        assertEquals(2_000L, rules.engageMs)
-        assertEquals(GaitGateRules.DEFAULT_STILL_VARIANCE, rules.stillVariance, 0.0)
-        // A verdict stays usable for a window past the samples it came from,
-        // and never for less than the default, so a one-second window does
-        // not expire between two step samples.
-        assertEquals(GaitGateRules.DEFAULT_STALE_MS, rules.staleMs)
-        assertEquals(16_000L, StepTrackerConfig(motionGateWindowSeconds = 15).motionGateRules().staleMs)
+        assertEquals(WitnessRules.DEFAULT_STILL_VARIANCE, config.motionGateRules().stillVariance, 0.0)
+        assertEquals(0.05, StepTrackerConfig(motionGateStillVariance = 0.05).motionGateRules().stillVariance, 0.0)
+        // The 2.8 classifier's thresholds are still accepted and read back,
+        // and none of them reaches the witness: it has no such knobs.
+        assertEquals(
+            config.motionGateRules(),
+            StepTrackerConfig(
+                motionGateWindowSeconds = 9,
+                motionGateMinPeakRatio = 0.5,
+                motionGateMaxZeroCrossingRate = 30.0,
+                motionGateEngageSeconds = 60
+            ).motionGateRules()
+        )
+    }
+
+    @Test
+    fun `the motion gate asks for Activity Recognition on its own`() {
+        // Without it the gate holds nothing, so turning the gate on is
+        // asking for it - whatever the integrity tags' own switch says.
+        assertFalse(StepTrackerConfig().wantsActivityRecognition)
+        assertTrue(StepTrackerConfig(motionGateEnabled = true).wantsActivityRecognition)
+        assertTrue(
+            StepTrackerConfig(fraudDetectionEnabled = true, fraudActivityRecognition = true).wantsActivityRecognition
+        )
+        // The tags' switch means nothing with detection off, as before.
+        assertFalse(StepTrackerConfig(fraudActivityRecognition = true).wantsActivityRecognition)
     }
 
     @Test
@@ -174,8 +190,8 @@ class IntegrityConfigTest {
             motionGateEngageSeconds = -5
         ).sanitised()
         assertEquals(GateDefaults.MAX_WINDOW_SECONDS, wild.motionGateWindowSeconds)
-        // A still floor of 50 would call a sprint still and gate nothing; a
-        // peak share of 1 wants a pure tone and would gate every walk.
+        // A still floor of 50 would call a sprint still. The rest are held
+        // to the ranges JS documents, though nothing reads them from 2.9.0.
         assertEquals(1.0, wild.motionGateStillVariance, 0.0)
         assertEquals(0.9, wild.motionGateMinPeakRatio, 0.0)
         assertEquals(1.0, wild.motionGateMaxZeroCrossingRate, 0.0)
@@ -191,11 +207,9 @@ class IntegrityConfigTest {
             motionGateMinPeakRatio = Double.NaN,
             motionGateMaxZeroCrossingRate = Double.POSITIVE_INFINITY
         ).sanitised()
-        assertEquals(GaitGateRules.DEFAULT_STILL_VARIANCE, nan.motionGateStillVariance, 0.0)
-        assertEquals(GaitGateRules.DEFAULT_MIN_PEAK_RATIO, nan.motionGateMinPeakRatio, 0.0)
-        assertEquals(
-            GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE, nan.motionGateMaxZeroCrossingRate, 0.0
-        )
+        assertEquals(WitnessRules.DEFAULT_STILL_VARIANCE, nan.motionGateStillVariance, 0.0)
+        assertEquals(GateDefaults.MIN_PEAK_RATIO, nan.motionGateMinPeakRatio, 0.0)
+        assertEquals(GateDefaults.MAX_ZERO_CROSSING_RATE, nan.motionGateMaxZeroCrossingRate, 0.0)
     }
 
     @Test

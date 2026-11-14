@@ -164,9 +164,10 @@ internal data class SpectralPeak(val hz: Double, val ratio: Double)
  * does not matter whether the hub delivered 20 Hz, 50 Hz, or a second's batch
  * all at once.
  *
- * Shared by [MotionWindowSampler], which scans the whole motion band for a
- * signature a server can judge, and by [GaitGate], which scans the gait band
- * for a rhythm the device can judge on the spot.
+ * Used by [MotionWindowSampler], which scans the whole motion band for a
+ * signature a server can judge. (The 2.8 motion gate scanned the gait band
+ * with it too; [WalkWitness], which replaced that classifier, compares the
+ * signal with itself instead.)
  */
 internal object MotionBand {
 

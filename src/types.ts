@@ -293,111 +293,140 @@ export interface StepTrackerConfig {
    */
   fraudDetection?: FraudDetectionConfig;
   /**
-   * Keep steps counted while the phone is being shaken by a vehicle out of
-   * every number. Default disabled. See {@link MotionGateConfig}.
+   * Hold back the steps counted while Activity Recognition says the phone
+   * is in a vehicle or on a bicycle. Default disabled, and it needs
+   * `play-services-location` in the app. See {@link MotionGateConfig}.
    */
   motionGate?: MotionGateConfig;
 }
 
 /**
- * The fix for "I sat in a bus for an hour and it counted two thousand steps".
+ * The fix for "I sat in a bus for an hour and it counted two thousand steps",
+ * done the way Google Fit does it.
  *
- * Android's hardware step counter is a pedometer in the sensor hub, and on
- * most phones a bus seat, a car's floor or a bicycle's frame feeds it a
- * rhythm it reports as walking. Nothing this package does afterwards can
- * invent the information to tell those steps apart, so with the gate on it
- * watches the accelerometer while tracking runs and judges, every second,
- * whether the last few seconds look like a person walking or like a machine
- * vibrating. Steps that arrive during vibration stay in the raw count -
- * `deviceSteps`, and `getIntegrityReport().deviceSteps` - and are reported as
- * `gatedSteps`, out of every number this package shows, syncs to Health
- * Connect or uploads.
+ * Android's hardware step counter is a pedometer in the sensor hub. Android
+ * asks that it not trigger "when the user is biking, driving, or in other
+ * vehicles"; on many phones it does anyway, and the phone's own health app
+ * shows those steps too. Google Fit's answer is the one this gate uses: it
+ * *"detects when users are doing activities that shouldn't contribute to
+ * their step count (like cycling, driving or travelling via public
+ * transport) and removes these from the final step count."* The detector is
+ * Google's Activity Recognition, trained on far more rides than anything
+ * that could be tuned inside one package.
  *
- * It is deliberately lopsided. A still phone is never gated: holding a phone
- * steady gives the counter no vibration to mistake for a step, and an
- * accelerometer that stopped delivering looks exactly like a still one. Nor
- * is anything whose timing is unknown - a screen-off walk arriving in one
- * batch - nor a stretch no fresh verdict covers. Vibration has to hold for
- * `engageSeconds` before a step is held back, while a single walking verdict
- * starts counting again at once. Losing a real step is worse than keeping a
- * false one.
+ * With the gate on:
  *
- * With `fraudDetection.activityRecognition` also on and Play Services in the
- * app, Activity Recognition's own "in a vehicle" and "on a bicycle" are taken
- * as proof and skip the accelerometer's verdict: it has watched minutes of
- * movement where the gate sees seconds. Until the accelerometer has read as
- * walking for ten seconds straight (from 2.8.2): Activity Recognition says
- * the phone left a vehicle a minute or more after it did, and on some phones
- * not at all, and every step of the walk away was being held back.
+ * - **While Activity Recognition says "in a vehicle" or "on a bicycle", the
+ *   steps that arrive are held.** They stay in the raw count - `deviceSteps`
+ *   - and are reported as `gatedSteps`, out of every number this package
+ *   shows, syncs to Health Connect or uploads.
+ * - **Nothing else holds a step.** Not the accelerometer, not a cadence,
+ *   not a guess. Without Activity Recognition - an app that does not ship
+ *   `play-services-location`, a phone without Play Services - the gate
+ *   holds nothing and the count is the hardware counter's, exactly what the
+ *   phone's own health app shows.
+ * - **Held is not gone.** Activity Recognition reports leaving a vehicle
+ *   about a minute late, and that minute is the walk away from the bus
+ *   stop. So held steps wait two minutes to be given back: all of the last
+ *   90 seconds when it then says "walking" or "running"; the ones taken in
+ *   seconds the accelerometer saw a walking rhythm in when it says anything
+ *   else that is not a vehicle; and all of the last minute as soon as the
+ *   accelerometer confirms a walk by itself, which also ends the ride
+ *   without waiting to be told. What is given back returns to `steps` and
+ *   to the minutes it was taken in.
+ * - **A ride cannot outlive its evidence.** Five minutes of a phone lying
+ *   still ends it, and so do twelve hours, so a missed "left the vehicle"
+ *   cannot hold a day's steps.
  *
- * **The cost.** On a phone with a hardware step counter - almost every phone
- * - the gate needs the accelerometer registered for as long as tracking runs,
- * at 25 Hz, batched a second at a time where the hub allows it. On a phone
- * whose accelerometer is not a wake-up sensor that also means a partial wake
- * lock, as `accelerometerWakeLock` governs; without one the gate goes blind
- * with the screen off and counts everything, which is the case it exists for.
- * On a phone already counting over the accelerometer (`source:
- * 'accelerometer'`) the gate rides along for free.
+ * **What it needs.** `com.google.android.gms:play-services-location` in the
+ * app's own `build.gradle` - this package declares it compile-only, so an
+ * app that does not want Play Services never gets it - and the
+ * `ACTIVITY_RECOGNITION` permission step counting already holds. Turning the
+ * gate on starts Activity Recognition by itself; `fraudDetection` does not
+ * have to be on. `getIntegrityReport().motionGate.activityRecognition`
+ * says whether it is `available`, and what it last reported.
  *
- * **It is not perfect.** A smooth ride whose vibration happens to land at a
- * walking cadence will still leak some steps, and the first second or two of
- * a ride is counted before the gate engages. Tune the thresholds on your own
- * users' devices with `getIntegrityReport().motionGate.verdict`, which says
- * what the gate thinks right now.
+ * **What the accelerometer is for.** Only to speak for the walker. It is
+ * registered when a ride begins and let go when it ends - minutes a day,
+ * where 2.8 kept it for as long as tracking ran - and asked one question:
+ * is this, beyond doubt, a person walking? A second passes when the motion
+ * repeats itself a step or a stride later; a walk is confirmed by 24 such
+ * seconds in 30. Measured on recorded walks and rides, every one of 131
+ * real walks (27 people, phone in a hand, a trouser, shirt or back pocket,
+ * a backpack and a handbag, at three paces) was confirmed thirty seconds
+ * in, and not one minute of 473 on buses, 1,102 in taxis or 308 on trains
+ * was. On a phone whose accelerometer is not a wake-up sensor this takes a
+ * partial wake lock for the length of the ride, as `accelerometerWakeLock`
+ * governs; without one the ride is still held and only the early word that
+ * the user has walked away is lost.
+ *
+ * **What 2.8 did, and why it is gone.** 2.8.0-2.8.2 let the accelerometer
+ * hold steps back on its own: movement with no walking rhythm in it was
+ * called a vehicle. But no rhythm is also what cooking, shopping, sport and
+ * a phone in a back pocket look like, and the hardware counter is itself an
+ * accelerometer gait detector, so the moments it is fooled are the moments
+ * the signal *does* look like gait. Replayed against the same recorded
+ * walks, 2.8.0 threw away 15% of real steps on average and 44% for a phone
+ * in a back pocket, 2.8.2 still 3.5% and 12% - while holding back only
+ * about a third of the steps a simple pedometer counts on recorded bus
+ * rides. From 2.9.0 the accelerometer never holds a step.
+ *
+ * **It is not perfect, and it errs one way.** The first minute of a ride is
+ * counted, before Activity Recognition has noticed it - its latency, and
+ * the price of not guessing. So is the half-minute before "walking" is
+ * reported. Pedalling a bicycle with the phone in a pocket reads as a
+ * walking rhythm, and its steps are given back. A real step is not held
+ * unless Activity Recognition is wrong for longer than it takes to walk for
+ * half a minute.
  */
 export interface MotionGateConfig {
   /**
    * Default false. Like every key here, one a patch leaves out keeps its
-   * current value: `updateConfig({ motionGate: { engageSeconds: 5 } })`
-   * changes the wait alone.
+   * current value.
    */
   enabled?: boolean;
   /**
-   * How many seconds of accelerometer one verdict is formed from. Default 3;
-   * 1 to 15. Longer is steadier and slower to notice a ride starting.
-   */
-  windowSeconds?: number;
-  /**
-   * Variance of the gravity-removed accelerometer magnitude, in (m/s²)²,
-   * below which the phone counts as still - and a still phone is never
-   * gated. Default 0.02, about 0.14 m/s² RMS; 0 to 1. Lower it if a user
-   * reports steps while the phone sits in a seat pocket barely moving.
+   * Variance of the accelerometer magnitude, in (m/s²)², below which the
+   * phone counts as still. Default 0.02, about 0.14 m/s² RMS; 0 to 1. Five
+   * minutes of stillness end a ride that Activity Recognition never
+   * reported the end of.
    */
   stillVariance?: number;
   /**
-   * Share of the motion's energy, 0..1, that a walking rhythm must hold for
-   * it to count as gait - the step rate, its stride (half of it) and its
-   * first harmonic (twice it) together. Default 0.12; up to 0.9. A walk
-   * keeps its energy in that family, broadband buzz has no peak worth the
-   * name. Raising it gates more, and eventually gates walks.
+   * @deprecated Not used from 2.9.0: it tuned the accelerometer classifier
+   * of 2.8, which no longer holds steps. Still accepted (1 to 15) and read
+   * back, so a stored or server-sent config keeps working.
+   */
+  windowSeconds?: number;
+  /**
+   * @deprecated Not used from 2.9.0, as `windowSeconds`. Accepted from 0
+   * to 0.9.
    */
   minPeakRatio?: number;
   /**
-   * Mean crossings a second above which the signal is buzz rather than gait.
-   * Default 9; 1 to 100. A clean oscillation crosses twice a cycle, so even
-   * a 3 Hz sprint sits near 6; road and engine buzz runs far higher. A
-   * crossing is a swing through a band around the mean, not every flicker
-   * of sensor noise across it.
+   * @deprecated Not used from 2.9.0, as `windowSeconds`. Accepted from 1
+   * to 100.
    */
   maxZeroCrossingRate?: number;
   /**
-   * Seconds of unbroken vibration before the gate starts holding steps
-   * back. Default 2; 0 to 120. It is what keeps the first steps of a walk
-   * out of a vehicle from being thrown away, so 0 trades those for catching
-   * the start of a ride.
+   * @deprecated Not used from 2.9.0, as `windowSeconds`. Accepted from 0
+   * to 120.
    */
   engageSeconds?: number;
 }
 
 /**
- * What the motion gate says is moving the phone.
+ * What the accelerometer says is moving the phone, while a ride is being
+ * held - the only time it is watched. None of these holds a step back;
+ * `'gait'` is how the accelerometer argues for giving steps back.
  *
- * - `'gait'` — a walking or running rhythm
- * - `'vibration'` — movement with no gait in it: a bus, a car, a bicycle, a
- *   train. The one verdict steps are held back on
- * - `'still'` — movement under the noise floor; never gated
- * - `'unknown'` — no verdict recent enough to speak for now: the gate is off,
- *   the accelerometer is not delivering, or a window has yet to fill
+ * - `'gait'` — a walking or running rhythm: the motion repeats itself a step
+ *   or a stride later
+ * - `'vibration'` — movement with no such rhythm in it. Says nothing about
+ *   what causes it
+ * - `'still'` — movement under the noise floor
+ * - `'unknown'` — nothing recent enough to speak for now: no ride is being
+ *   held, the gate is off, or the accelerometer is not delivering
  */
 export type MotionVerdict = 'gait' | 'vibration' | 'still' | 'unknown';
 
@@ -572,6 +601,16 @@ export type IntegrityEventType =
   | 'charging_started'
   | 'charging_stopped'
   | 'activity_changed'
+  /**
+   * The motion gate (2.8; `holding` and `released` from 2.9): turned on or
+   * off (`detail.enabled`); began or stopped holding steps
+   * (`detail.holding`, with `detail.reason` - the activity reported, or
+   * `'walking'`, `'still'`, `'expired'` or `'stopped'` for a ride that
+   * ended without a report); gave held steps back (`detail.released`, with
+   * `detail.reason` `'on_foot'`, `'left_vehicle'` or `'walking'`); or -
+   * while a ride is held - a new accelerometer verdict (`detail.verdict`).
+   */
+  | 'motion_gate'
   | 'service_recovered'
   | 'device_attested';
 
@@ -643,14 +682,37 @@ export interface IntegrityReport {
   motionGate: {
     enabled: boolean;
     /**
-     * What the gate makes of the phone's movement right now. `'unknown'`
-     * for a past day, and whenever no verdict is recent enough. Watch this
-     * while you sit in a bus to tune the thresholds.
+     * Steps are being held as this is read: Activity Recognition has
+     * reported a vehicle or a bicycle and nothing has ended the ride.
+     * Always false for a past day. From 2.9.0.
+     */
+    holding: boolean;
+    /**
+     * What the accelerometer makes of the phone's movement right now.
+     * `'unknown'` for a past day, and whenever no ride is being held: it is
+     * only watched during one.
      */
     verdict: MotionVerdict;
-    /** Of `deviceSteps`, how many the gate held back on this day. */
+    /**
+     * Of `deviceSteps`, how many are held back on this day. It goes down
+     * as well as up: held steps are given back when they turn out to be
+     * the walk away from a ride.
+     */
     gatedSteps: number;
-    /** The thresholds in force, after clamping. */
+    /**
+     * What the gate depends on. With `available` false - the app does not
+     * ship `play-services-location` - it holds nothing, whatever `enabled`
+     * says. `activity` is what was last reported, `'unknown'` for a past
+     * day and until the first report. From 2.9.0.
+     */
+    activityRecognition: {
+      available: boolean;
+      activity: 'unknown' | 'still' | 'walking' | 'running' | 'on_bicycle' | 'in_vehicle';
+    };
+    /**
+     * The thresholds as stored, after clamping. Only `stillVariance` is
+     * used from 2.9.0; the rest are the deprecated options, read back.
+     */
     rules: {
       windowSeconds: number;
       stillVariance: number;
@@ -1200,13 +1262,17 @@ export interface StepSnapshot {
    */
   suspectSteps: number;
   /**
-   * Of this device's raw count for the day, how many the motion gate held
-   * back as a vehicle's vibration rather than steps. `0` unless
+   * Of this device's raw count for the day, how many the motion gate is
+   * holding back as a vehicle's rather than the user's - counted while
+   * Activity Recognition reported a vehicle or a bicycle. `0` unless
    * `motionGate.enabled`. **Already out of `steps`**, always and whatever
-   * `fraudDetection.mode` says - unlike a flag, this is the device saying it
-   * never saw a step. `steps + gatedSteps` is what the hardware counter
-   * reported. Always sent from 2.8, optional in the type for snapshots built
-   * by hand. See {@link MotionGateConfig}.
+   * `fraudDetection.mode` says. `steps + gatedSteps` is what the hardware
+   * counter reported, so an app that wants Sweatcoin's two figures - every
+   * step the phone registered, and the ones that count - has both here.
+   * It can go down between two snapshots: held steps are given back when
+   * they turn out to be the walk away from a ride. Always sent from 2.8,
+   * optional in the type for snapshots built by hand. See
+   * {@link MotionGateConfig}.
    */
   gatedSteps?: number;
   /**
@@ -1251,9 +1317,10 @@ export interface DayRecord {
   suspectSteps: number;
   /**
    * Of this device's raw count for the day, how many the motion gate held
-   * back as a vehicle's vibration. `0` unless `motionGate.enabled`, and for
-   * every day stored before 2.8.0. **Already out of `steps`** everywhere,
-   * `getHistory()` included: a gated step is not a step, so there is no mode
+   * back as a vehicle's - counted while Activity Recognition reported a
+   * vehicle or a bicycle, and not given back since. `0` unless
+   * `motionGate.enabled`, and for every day stored before 2.8.0. **Already
+   * out of `steps`** everywhere, `getHistory()` included: there is no mode
    * that leaves it in. Always this device's figure. From 2.8.
    */
   gatedSteps?: number;
@@ -1317,11 +1384,12 @@ export interface VerificationSnapshot {
   /** Of `deviceSteps`, how many gap recovery credited in one go. See {@link DayRecord.recoveredSteps}. */
   recoveredSteps: number;
   /**
-   * Of `deviceSteps`, how many the motion gate held back as a machine's
-   * vibration - already out of `resolved`, and signed with it, so a server
-   * reads the device's own judgement instead of inferring it from a
-   * difference. `0` unless `motionGate.enabled`. From 2.8; a snapshot
-   * without it came from an earlier release.
+   * Of `deviceSteps`, how many the motion gate held back as a vehicle's -
+   * counted while Activity Recognition reported a vehicle or a bicycle -
+   * already out of `resolved`, and signed with it, so a server reads the
+   * device's own judgement instead of inferring it from a difference. `0`
+   * unless `motionGate.enabled`. From 2.8; a snapshot without it came from
+   * an earlier release.
    */
   gatedSteps?: number;
   /** This device's sensor. `'accelerometer'` and `'step_detector'` lose steps while the process is dead. */

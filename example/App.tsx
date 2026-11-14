@@ -137,13 +137,14 @@ export default function App() {
     fraudDetection: { enabled: true, mode: 'flag' },
     // Short accelerometer windows, so the detector can tell a shake from a walk.
     motionSampling: { enabled: true },
-    // The fix for steps counted while sitting in a bus or riding a bike:
-    // the accelerometer is watched while tracking runs, and steps that
-    // arrive while the phone is being shaken by a machine rather than
-    // walked with stay out of every number - reported as `gatedSteps`,
-    // with the raw reading still in `deviceSteps`. Costs battery: the
-    // accelerometer stays registered. Watch
-    // getIntegrityReport().motionGate.verdict to tune it on your devices.
+    // The fix for steps counted while sitting in a bus or riding a bike,
+    // done the way Google Fit does it: while Activity Recognition says "in
+    // a vehicle" or "on a bicycle", the steps that arrive are held -
+    // reported as `gatedSteps`, with the raw reading still in
+    // `deviceSteps` - and the walk away from the ride is given back.
+    // Needs `com.google.android.gms:play-services-location` in
+    // android/app/build.gradle; without it nothing is ever held, and
+    // getIntegrityReport().motionGate.activityRecognition.available says so.
     motionGate: { enabled: true },
     onGoalReached: (event) =>
       Alert.alert('Goal reached', `${event.goal.toLocaleString()} steps done.`),
@@ -326,7 +327,7 @@ export default function App() {
         )}
         {gatedSteps > 0 && (
           <Text style={styles.laneLabel}>
-            {gatedSteps.toLocaleString()} held back as vehicle vibration
+            {gatedSteps.toLocaleString()} held back while in a vehicle
           </Text>
         )}
         {(recoveredSteps > 0 || manualSteps > 0) && (
@@ -541,13 +542,20 @@ export default function App() {
               {deviceHints.length > 0 ? ` · ${deviceHints.join(', ')}` : ''}
             </Text>
             {/*
-              The gate's live verdict. Sit in a bus with this on screen and
-              it should read "vibration" within a few seconds; walk and it
-              should read "gait" again by the next second.
+              The gate, live. On a bus this should read "holding" about a
+              minute after it sets off, and stop holding within a minute of
+              getting off and walking - sooner when the accelerometer
+              confirms the walk first. "No Play Services" means the app
+              does not ship play-services-location and nothing is held.
             */}
             {integrity.motionGate.enabled && (
               <Text style={styles.cardMeta}>
-                Motion gate: {integrity.motionGate.verdict}
+                Motion gate:{' '}
+                {!integrity.motionGate.activityRecognition.available
+                  ? 'no Play Services, holding nothing'
+                  : integrity.motionGate.holding
+                    ? `holding (${integrity.motionGate.activityRecognition.activity}, accelerometer says ${integrity.motionGate.verdict})`
+                    : `counting (${integrity.motionGate.activityRecognition.activity})`}
                 {integrity.motionGate.gatedSteps > 0
                   ? ` · ${integrity.motionGate.gatedSteps.toLocaleString()} steps held back`
                   : ' · nothing held back'}

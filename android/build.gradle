@@ -224,6 +224,15 @@ android {
             if (project.hasProperty("stpHealthConnectTests")) {
                 manifest.srcFile "src/androidTest/healthconnect/AndroidManifest.xml"
             }
+            // Play Services' own classes, for the one test that hands the
+            // Activity Recognition glue a real transition result and a real
+            // registration. Only when asked to: every other instrumented
+            // test runs as an app that does not ship Play Services, which
+            // is the case most of them are about. See docs/TESTING.md.
+            if (project.hasProperty("stpPlayServicesTests")) {
+                java.srcDirs += "src/androidTest/playservices/java"
+                kotlin.srcDirs += "src/androidTest/playservices/java"
+            }
         }
     }
 
@@ -295,4 +304,7 @@ dependencies {
     androidTestImplementation "androidx.test:runner:1.6.2"
     androidTestImplementation "androidx.test.ext:junit:1.2.1"
     androidTestImplementation "androidx.room:room-testing:$roomVersion"
+    if (project.hasProperty("stpPlayServicesTests")) {
+        androidTestImplementation "com.google.android.gms:play-services-location:21.3.0"
+    }
 }

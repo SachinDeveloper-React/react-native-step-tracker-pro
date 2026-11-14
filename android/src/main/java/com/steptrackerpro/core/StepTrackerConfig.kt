@@ -235,29 +235,35 @@ data class StepTrackerConfig(
      */
     val fraudActivityRecognition: Boolean = false,
     /**
-     * Keep steps the hardware counter reports while the accelerometer says
-     * the phone is being shaken by a machine - a bus, a car, a train, a
-     * bicycle's frame - out of every number this package shows, syncs and
-     * resolves. The raw reading is kept and reported as `deviceSteps`, with
-     * what was held back as `gatedSteps`; see [GaitGate].
+     * Hold back the steps the hardware counter reports while Google's
+     * Activity Recognition says the phone is in a vehicle or on a bicycle -
+     * what Google Fit does - so a bus ride adds nothing to any number this
+     * package shows, syncs and resolves. The raw reading is kept and
+     * reported as `deviceSteps`, with what was held as `gatedSteps`; see
+     * [VehicleGate].
      *
-     * Off by default: it registers the accelerometer for as long as tracking
-     * runs, which costs battery, and it is a judgement about the user's
-     * steps that an app should opt into rather than inherit. With
-     * `fraudDetection.activityRecognition` also on, Activity Recognition's
-     * own "in a vehicle" and "on a bicycle" are taken as proof and skip the
-     * accelerometer's verdict. JS presents these as `motionGate`.
+     * Only takes effect when the host app ships
+     * `com.google.android.gms:play-services-location`, which this package
+     * declares compile-only: without it nothing is ever held, and every
+     * step the counter reports is counted. Turning this on starts Activity
+     * Recognition by itself, whatever `fraudDetection.activityRecognition`
+     * says.
+     *
+     * Off by default: it is a judgement about the user's steps that an app
+     * should opt into rather than inherit. The accelerometer is registered
+     * only for the length of a ride, to notice the user walking away from
+     * it before Activity Recognition does. JS presents these as `motionGate`.
      */
     val motionGateEnabled: Boolean = false,
-    /** How many seconds of accelerometer one verdict is formed from. */
+    /** Not used from 2.9.0; kept so a stored or pushed config still parses. */
     val motionGateWindowSeconds: Int = GateDefaults.WINDOW_SECONDS,
-    /** Variance of the mean-removed magnitude, (m/s²)², below which the phone is still. */
-    val motionGateStillVariance: Double = GaitGateRules.DEFAULT_STILL_VARIANCE,
-    /** Share of the gait band's energy a rhythm must hold to be gait, 0..1. */
-    val motionGateMinPeakRatio: Double = GaitGateRules.DEFAULT_MIN_PEAK_RATIO,
-    /** Mean crossings a second above which the signal is buzz, not gait. */
-    val motionGateMaxZeroCrossingRate: Double = GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE,
-    /** Seconds of unbroken vibration before the gate starts holding steps back. */
+    /** Variance of the accelerometer magnitude, (m/s²)², below which the phone is still. */
+    val motionGateStillVariance: Double = WitnessRules.DEFAULT_STILL_VARIANCE,
+    /** Not used from 2.9.0; kept so a stored or pushed config still parses. */
+    val motionGateMinPeakRatio: Double = GateDefaults.MIN_PEAK_RATIO,
+    /** Not used from 2.9.0; kept so a stored or pushed config still parses. */
+    val motionGateMaxZeroCrossingRate: Double = GateDefaults.MAX_ZERO_CROSSING_RATE,
+    /** Not used from 2.9.0; kept so a stored or pushed config still parses. */
     val motionGateEngageSeconds: Int = GateDefaults.ENGAGE_SECONDS
 ) {
 
@@ -267,22 +273,19 @@ data class StepTrackerConfig(
     val excludeSuspect: Boolean get() = fraudDetectionEnabled && integrityMode == IntegrityMode.EXCLUDE
 
     /**
-     * The gate's thresholds, with the stale horizon derived from the window:
-     * a verdict stays usable for one window past the samples it was formed
-     * from, and never less than [GaitGateRules.DEFAULT_STALE_MS], so a
-     * one-second window does not expire between two step samples.
+     * What the walking witness judges by. One threshold: the rest of what
+     * JS still accepts under `motionGate` belonged to the accelerometer
+     * classifier of 2.8, which no longer exists.
      */
-    fun motionGateRules(): GaitGateRules {
-        val windowMs = motionGateWindowSeconds * 1_000L
-        return GaitGateRules(
-            windowMs = windowMs,
-            stillVariance = motionGateStillVariance,
-            minPeakRatio = motionGateMinPeakRatio,
-            maxZeroCrossingRate = motionGateMaxZeroCrossingRate,
-            engageMs = motionGateEngageSeconds * 1_000L,
-            staleMs = maxOf(GaitGateRules.DEFAULT_STALE_MS, windowMs + 1_000L)
-        )
-    }
+    fun motionGateRules(): WitnessRules = WitnessRules(stillVariance = motionGateStillVariance)
+
+    /**
+     * Whether Activity Recognition is wanted: for the integrity layer's
+     * tags, when the app asked for them, or for [VehicleGate], which cannot
+     * hold a step without it.
+     */
+    val wantsActivityRecognition: Boolean
+        get() = motionGateEnabled || (fraudDetectionEnabled && fraudActivityRecognition)
 
     fun integrityRules(): IntegrityRules = IntegrityRules(
         maxCadenceSpm = fraudMaxCadenceSpm,
@@ -360,21 +363,21 @@ data class StepTrackerConfig(
         fraudSteadyCadenceMinutes = offOr(fraudSteadyCadenceMinutes) { it.coerceIn(5, 24 * 60) },
         fraudMaxContinuousMinutes = offOr(fraudMaxContinuousMinutes) { it.coerceIn(30, 24 * 60) },
         fraudMaxDailySteps = offOr(fraudMaxDailySteps) { it.coerceAtLeast(1_000) },
-        // Every gate threshold is held inside a range where the verdict
-        // still means something. A still variance of 100 would call a sprint
-        // still and gate nothing; a peak ratio of 1 wants a pure tone and
-        // would gate every walk.
+        // The one gate threshold still in use is held where "still" means
+        // something: a still variance of 100 would call a sprint still. The
+        // others are clamped as they always were, so a config that round
+        // trips through this class reads back what JS was promised.
         motionGateWindowSeconds = motionGateWindowSeconds.coerceIn(
             GateDefaults.MIN_WINDOW_SECONDS, GateDefaults.MAX_WINDOW_SECONDS
         ),
         motionGateStillVariance = finiteOr(
-            motionGateStillVariance, GaitGateRules.DEFAULT_STILL_VARIANCE
+            motionGateStillVariance, WitnessRules.DEFAULT_STILL_VARIANCE
         ) { it.coerceIn(0.0, 1.0) },
         motionGateMinPeakRatio = finiteOr(
-            motionGateMinPeakRatio, GaitGateRules.DEFAULT_MIN_PEAK_RATIO
+            motionGateMinPeakRatio, GateDefaults.MIN_PEAK_RATIO
         ) { it.coerceIn(0.0, 0.9) },
         motionGateMaxZeroCrossingRate = finiteOr(
-            motionGateMaxZeroCrossingRate, GaitGateRules.DEFAULT_MAX_ZERO_CROSSING_RATE
+            motionGateMaxZeroCrossingRate, GateDefaults.MAX_ZERO_CROSSING_RATE
         ) { it.coerceIn(1.0, 100.0) },
         motionGateEngageSeconds = motionGateEngageSeconds.coerceIn(
             0, GateDefaults.MAX_ENGAGE_SECONDS
@@ -726,17 +729,15 @@ object RemoteSyncAuth {
 /** Defaults for motion signature windows, shared by config and the TypeScript layer's docs. */
 /** The motion gate's shape, as [StepTrackerConfig.sanitised] holds it. */
 object GateDefaults {
+    // Every value here but the still variance (see [WitnessRules]) is from
+    // the accelerometer classifier of 2.8, which is gone: they are the
+    // defaults and bounds of options JS still accepts and nothing reads.
     const val WINDOW_SECONDS = 3
-
-    /** A window under a second holds too little of a stride to find one. */
     const val MIN_WINDOW_SECONDS = 1
-
-    /** Past this the verdict lags the ride it is meant to catch. */
     const val MAX_WINDOW_SECONDS = 15
-
+    const val MIN_PEAK_RATIO = 0.12
+    const val MAX_ZERO_CROSSING_RATE = 9.0
     const val ENGAGE_SECONDS = 2
-
-    /** Longer than this and a whole bus ride is over before the gate engages. */
     const val MAX_ENGAGE_SECONDS = 120
 }
 

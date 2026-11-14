@@ -46,7 +46,11 @@ class IntegrityMonitor(
     var charging: Boolean = false
         private set
 
-    /** Activity Recognition's last state; [ActivityState.UNKNOWN] without Play Services. */
+    /**
+     * Activity Recognition's last state; [ActivityState.UNKNOWN] without
+     * Play Services. Set through [com.steptrackerpro.core.StepTrackerCore.onActivityEvents],
+     * which also tells the motion gate.
+     */
     @Volatile
     var activity: ActivityState = ActivityState.UNKNOWN
         private set
@@ -89,10 +93,26 @@ class IntegrityMonitor(
 
     // ---- inputs ----------------------------------------------------------------
 
-    /** From the engine, under its lock: keep it to an in-memory append. */
-    fun onObserved(fromMs: Long, toMs: Long, steps: Int, timed: Boolean = true) {
+    /**
+     * From the engine, under its lock: keep it to an in-memory append.
+     *
+     * @param walked the steps were held as a vehicle's and given back as a
+     *   walk - see [com.steptrackerpro.core.VehicleGate] - so whatever
+     *   Activity Recognition said when they were taken, they are tagged as
+     *   walked: tagged "in a vehicle", they would be flagged as the very
+     *   thing they were just cleared of.
+     */
+    fun onObserved(fromMs: Long, toMs: Long, steps: Int, timed: Boolean = true, walked: Boolean = false) {
         if (!enabled) return
-        timeline.record(fromMs, toMs, steps, charging, activity, timed)
+        val tag = when {
+            // The tags are the app's to ask for. Activity Recognition also
+            // runs for the motion gate alone, and an app that turned only
+            // that on did not ask for "still" and "in a vehicle" findings.
+            !config().fraudActivityRecognition -> ActivityState.UNKNOWN
+            walked -> ActivityState.WALKING
+            else -> activity
+        }
+        timeline.record(fromMs, toMs, steps, charging, tag, timed)
     }
 
     /**

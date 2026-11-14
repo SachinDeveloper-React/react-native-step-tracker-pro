@@ -50,7 +50,7 @@ Permissions in one place: [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 | Health Connect | availability and features, permissions scoped to config, read, write - per day, or per minute as Health Connect's guidance asks (opt-in) - idempotent batched sync, deletes, opt-in vitals; spends little of Health Connect's rate limits and backs off when they run out |
 | Watches        | reads a paired watch through Health Connect and never double-counts |
 | Continuity     | Health Connect says 6,000 → the phone keeps it moving: 6,001, 6,005, 6,010 |
-| Vehicles       | opt-in `motionGate`: watches the accelerometer and keeps steps the hardware counter reports while a bus, car or bicycle shakes the phone out of every number |
+| Vehicles       | opt-in `motionGate`: holds back the steps counted while Google's Activity Recognition says "in a vehicle" or "on a bicycle", as Google Fit does, and gives the walk away from the ride back |
 | Fraud checks   | opt-in: flags shaken phones, swing gadgets, charging, vehicles and implausible totals; event log; Keystore attestation and signed snapshots |
 | Offline        | everything works with no network; remote sync is queued           |
 | Bridge         | Turbo Module with an old-architecture shim, full TypeScript types |
@@ -147,30 +147,38 @@ server. See [docs/API.md](docs/API.md#integrity-checks).
 
 ### Steps counted in a bus
 
-Android's hardware step counter is a pedometer inside the sensor hub, and on
-most phones a bus seat, a car's floor or a bicycle's frame feeds it a rhythm
-it reports as walking. The integrity checks above can *flag* that, but only
-with Play Services and only after the fact. `motionGate` stops it being
-counted in the first place:
+Android's hardware step counter is a pedometer inside the sensor hub. It is
+not meant to trigger "when the user is biking, driving, or in other
+vehicles"; on many phones it does, and the phone's own health app shows
+those steps too. `motionGate` keeps them out the way Google Fit does - by
+asking Google's Activity Recognition, not by guessing:
 
 ```ts
+// android/app/build.gradle:
+//   implementation "com.google.android.gms:play-services-location:21.3.0"
 await StepTracker.initialize({ motionGate: { enabled: true } });
-// snapshot.steps excludes it; snapshot.gatedSteps says how much
-// getIntegrityReport().motionGate.verdict — "gait" | "vibration" | "still"
+// snapshot.steps excludes a ride; snapshot.gatedSteps says how much
+// getIntegrityReport().motionGate — { holding, activityRecognition, ... }
 ```
 
-On, the accelerometer is watched for as long as tracking runs and judged
-once a second: gait is a 1–3.3 Hz peak that holds a real share of the band's
-energy, with a crossing rate consistent with it. Steps arriving during
-vibration stay in the raw count — `deviceSteps`, the verification snapshot —
-and come out of everything shown, synced and uploaded, as `gatedSteps`.
+While Activity Recognition says "in a vehicle" or "on a bicycle", the steps
+that arrive are held: they stay in the raw count - `deviceSteps` - and come
+out of everything shown, synced and uploaded, as `gatedSteps`. **Nothing
+else holds a step.** Without Activity Recognition - no
+`play-services-location` in the app, no Play Services on the phone - the
+count is the hardware counter's, to the step.
 
-It is built to leak rather than eat: a still phone is never gated, vibration
-has to hold two seconds before a step is, a single walking verdict counts
-again at once, and nothing untimed or batched is judged at all. The cost is
-the accelerometer registered for the whole session (and a wake lock on phones
-whose accelerometer is not a wake-up sensor), which is why it is off by
-default. Every threshold is tunable; see
+Held is not gone. Activity Recognition reports leaving a vehicle about a
+minute late, and that minute is the walk away from the bus stop, so held
+steps are given back when it says "walking", and sooner when the
+accelerometer - watched only for the length of a ride - confirms the walk
+itself. On recorded walks and rides that confirmation fired for every one
+of 131 real walks, thirty seconds in, and for no minute of 473 on buses,
+1,102 in taxis or 308 on trains.
+
+What gets through is the first minute of a ride, before Activity
+Recognition has noticed it. What 2.8 did instead - letting the
+accelerometer hold steps on its own - lost real walks, and is gone: see
 [docs/API.md](docs/API.md#the-motion-gate).
 
 Stride length defaults to `height × 0.415` (male) / `0.413` (female) /
@@ -415,11 +423,12 @@ and the remote payload — chiefly that a phone and a watch are never added toge
 phone-side app cannot inflate a covered day, that a typed-in number never
 becomes the day's number, that a car is not a walk, that a swing gadget is
 flagged while a treadmill is not, and that a walk delivered late in one batch
-with the screen off is not a shake. Eighty-six instrumented tests cover the
+with the screen off is not a shake, and that the motion gate holds a ride and
+never a walk. A hundred and one instrumented tests cover the
 reboot, midnight, late-batch, overnight-kill, capped-recovery, sensor-jitter,
 pause, stop-and-start, countFrom and counter-reset paths by feeding samples
 to the engine directly, the
-Room migrations against real rows, and the integrity layer, sync
+Room migrations against real rows, and the integrity layer, the motion gate, sync
 bookkeeping and other devices' steps end to end through the real core,
 database and Keystore, the sealed remote-sync headers and the reboot log, so
 they run on an emulator with no step hardware; three more run the Health
@@ -431,12 +440,14 @@ Connect, OEM battery managers — is in [docs/TESTING.md](docs/TESTING.md).
 
 ## Changelog
 
-[CHANGELOG.md](CHANGELOG.md). Latest release **2.8.2** — the motion gate no
-longer takes a walk for a vehicle: a phone in a trouser pocket (strongest at
-the stride) and a hard heel strike (strongest at the harmonic) read as gait,
-sensor noise at 100 Hz is not counted as buzz, a sensor delivering past
-100 Hz is judged rather than ignored, and ten seconds of walking outvotes
-Activity Recognition's late word on leaving a vehicle. **2.8.1** made the npm
+[CHANGELOG.md](CHANGELOG.md). Latest release **2.9.0** — the motion gate no
+longer hides real steps. It holds steps back only while Google's Activity
+Recognition reports a vehicle or a bicycle, which is how Google Fit does it,
+and gives the walk away from a ride back; the accelerometer classifier of
+2.8, which threw away 3-15% of real steps on recorded walks and most of a
+walk for a phone in a back pocket, no longer holds anything. It needs
+`play-services-location` in the app. **2.8.2** taught that classifier about
+trouser pockets and heel strikes, which was not enough. **2.8.1** made the npm
 package a third smaller (378 KB packed), exported `MotionGateConfig` and
 `MotionVerdict` from the index, and shipped `react-native.config.js`. **2.8.0** added
 `motionGate`, which keeps steps the hardware counter reports while a bus, a

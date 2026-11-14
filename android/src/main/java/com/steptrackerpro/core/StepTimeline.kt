@@ -16,11 +16,61 @@ enum class ActivityState(val jsValue: String) {
     ON_BICYCLE("on_bicycle"),
     IN_VEHICLE("in_vehicle");
 
+    /** A machine is carrying the phone: the two states steps are held back in. See [VehicleGate]. */
+    val carried: Boolean get() = this == IN_VEHICLE || this == ON_BICYCLE
+
+    /** The user is walking or running. */
+    val onFoot: Boolean get() = this == WALKING || this == RUNNING
+
+    /**
+     * The state once [event] has happened. Entering an activity is that
+     * activity; leaving one is [UNKNOWN] only when it is the one the phone
+     * was in - so "left the vehicle, entered walking" and "entered walking,
+     * left the vehicle" both land on walking, and a late "left still" does
+     * not wipe out the ride that began after it.
+     */
+    fun after(event: ActivityEvent): ActivityState = when {
+        event.enter -> event.state
+        this == event.state -> UNKNOWN
+        else -> this
+    }
+
+    /**
+     * The states [events], oldest first, lead through from this one, each
+     * with when it began.
+     *
+     * "Left one activity, entered another" is one transition sent as two
+     * events, and the state between them is nobody's: an exit followed at
+     * once by an entry yields only the entry. Acting on the gap would end a
+     * ride that merely changed its name - a bus read as a bicycle in slow
+     * traffic - and would give back by halves what "walking" gives back
+     * whole. An exit with nothing after it does yield [UNKNOWN]: that is
+     * all that is known.
+     */
+    fun through(events: List<ActivityEvent>): List<Pair<ActivityState, Long>> {
+        val out = ArrayList<Pair<ActivityState, Long>>(events.size)
+        var state = this
+        for ((index, event) in events.withIndex()) {
+            val next = state.after(event)
+            val pairedWithEntry = !event.enter && events.getOrNull(index + 1)?.enter == true
+            if (!pairedWithEntry && next != state) out.add(next to event.atMillis)
+            state = next
+        }
+        return out
+    }
+
     companion object {
         fun from(value: String?): ActivityState =
             entries.firstOrNull { it.jsValue == value } ?: UNKNOWN
     }
 }
+
+/**
+ * One Activity Recognition transition: the user began ([enter]) or stopped
+ * [state] at [atMillis], epoch ms - when Play Services says it happened,
+ * which can be some seconds before the broadcast carrying it arrives.
+ */
+data class ActivityEvent(val state: ActivityState, val enter: Boolean, val atMillis: Long)
 
 /**
  * One minute of this device's own steps, as stored in `step_minute`. Only

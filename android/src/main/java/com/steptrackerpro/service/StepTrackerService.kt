@@ -167,6 +167,21 @@ class StepTrackerService : Service(), SensorEventListener {
      */
     private val shownChanged: () -> Unit = dayEnded
 
+    /**
+     * A ride began or ended, or held steps were given back: the gate's
+     * accelerometer is taken up or let go, and the shade redrawn. Posted,
+     * because this is called from inside a sensor callback as often as not
+     * and the registration it changes is that callback's own.
+     */
+    private val gateChanged: () -> Unit = {
+        sensorHandler?.post {
+            if (isAlive) {
+                syncMotionGateSensor()
+                if (core.shouldBeRunning()) pushNotification(force = true)
+            }
+        }
+    }
+
     /** Short retries after a failed registration, before the heartbeat takes over. */
     private var registerRetries = 0
 
@@ -199,12 +214,16 @@ class StepTrackerService : Service(), SensorEventListener {
     private var motionWakeLock: PowerManager.WakeLock? = null
 
     /**
-     * True while the accelerometer is registered for the motion gate rather
-     * than for counting, so a signature window closing does not take it down
+     * True while the accelerometer is registered for the motion gate's
+     * walking witness rather than for counting - which is only while a ride
+     * is being held - so a signature window closing does not take it down
      * with it and the registration is released exactly once.
      */
     @Volatile
     private var gateListening = false
+
+    /** Held while the gate's registration is checked and changed. */
+    private val gateSensorLock = Any()
 
     private val motionTick = object : Runnable {
         override fun run() {
@@ -244,6 +263,7 @@ class StepTrackerService : Service(), SensorEventListener {
         }
         core.onDayEnded = dayEnded
         core.onShownChanged = shownChanged
+        core.onGateChanged = gateChanged
         ContextCompat.registerReceiver(
             this,
             dayBoundary,
@@ -621,10 +641,10 @@ class StepTrackerService : Service(), SensorEventListener {
         // that will not come.
         if (motionSampler != null) closeMotionWindow(store = false)
         // The bare unregister below takes the gate's registration with it, so
-        // the gate is told first rather than left waiting for samples that
-        // will not come.
+        // the witness is told first rather than left holding seconds that
+        // will have no successors.
         gateListening = false
-        core.resetMotionGate()
+        core.resetMotionWitness()
         if (!listening) return
         runCatching { sensorManager?.unregisterListener(this) }
         listening = false
@@ -635,52 +655,61 @@ class StepTrackerService : Service(), SensorEventListener {
     // ---- motion gate -----------------------------------------------------
 
     /**
-     * Brings the motion gate and the accelerometer it judges by in line with
-     * the config and the tracker's state.
+     * Brings the motion gate and its accelerometer in line with the config,
+     * the tracker's state, and whether a ride is being held.
      *
-     * On a phone counting over the accelerometer the gate rides along on
-     * samples that are already arriving. Anywhere else - which is every
-     * phone with a hardware counter, so almost every phone - it needs its
-     * own registration for as long as tracking runs. That is the battery the
-     * gate costs, and the reason `motionGate.enabled` is off by default.
+     * The gate holds steps on Activity Recognition's word and needs no
+     * sensor for that. The accelerometer is its second opinion in the
+     * user's favour - it notices a walk away from the ride before Activity
+     * Recognition does - so it is registered when a ride begins and let go
+     * when it ends: minutes a day, where 2.8 kept it for as long as
+     * tracking ran. A phone counting over the accelerometer already has the
+     * samples.
      */
-    private fun syncMotionGateSensor() {
+    private fun syncMotionGateSensor() = synchronized(gateSensorLock) {
+        // One at a time: this runs on the main thread for a command and on
+        // the sensor thread for a ride beginning or ending, and each has to
+        // see the registration the other left.
         core.syncMotionGate()
-        val wanted = core.motionGateRunning() && listening && core.shouldBeRunning() &&
+        val wanted = core.motionWitnessWanted() && listening && core.shouldBeRunning() &&
             !core.engine.paused && core.state.source != SensorSource.ACCELEROMETER
         if (!wanted) {
             releaseGateSensor()
-            return
+            return@synchronized
         }
-        if (gateListening) return
-        val sensor = accelerometerSensor ?: return
-        val manager = sensorManager ?: return
-        val handler = sensorHandler ?: return
+        if (gateListening) return@synchronized
+        val sensor = accelerometerSensor ?: return@synchronized
+        val manager = sensorManager ?: return@synchronized
+        val handler = sensorHandler ?: return@synchronized
+        // Batched five seconds at a time where the hub has a FIFO: the
+        // witness places every sample by its own timestamp and is in no
+        // hurry, so a ride wakes the CPU a fifth as often as a pedometer
+        // counting over the same sensor would.
         val ok = manager.registerListener(
-            this, sensor, ACCELEROMETER_PERIOD_US, ACCELEROMETER_MAX_LATENCY_US, handler
+            this, sensor, ACCELEROMETER_PERIOD_US, GATE_MAX_LATENCY_US, handler
         )
-        if (!ok) return
+        if (!ok) return@synchronized
         gateListening = true
         // Same policy as the fallback pedometer: a non-wake-up accelerometer
-        // stops delivering when the CPU sleeps, and a gate that goes blind
-        // with the screen off is a gate that misses the whole bus ride.
+        // stops delivering when the CPU sleeps. Without it the ride is still
+        // held - that is Activity Recognition's doing - and only the early
+        // word that the user has walked away is lost.
         if (!sensor.isWakeUpSensor && core.config().accelerometerWakeLock) acquireWakeLock()
     }
 
     /** Lets the gate's accelerometer go, if it is the one holding it. */
     private fun releaseGateSensor() {
-        if (gateListening) {
-            gateListening = false
-            // Not while a signature window is filling: that window owns the
-            // registration until it closes, and closing it releases it.
-            if (motionSampler == null) {
-                accelerometerSensor?.let { runCatching { sensorManager?.unregisterListener(this, it) } }
-                // Held for the gate only; the hardware counter never needs it,
-                // and a phone counting over the accelerometer never got here.
-                if (core.state.source != SensorSource.ACCELEROMETER) releaseWakeLock()
-            }
+        if (!gateListening) return
+        gateListening = false
+        // Not while a signature window is filling: that window owns the
+        // registration until it closes, and closing it releases it.
+        if (motionSampler == null) {
+            accelerometerSensor?.let { runCatching { sensorManager?.unregisterListener(this, it) } }
+            // Held for the gate only; the hardware counter never needs it,
+            // and a phone counting over the accelerometer never got here.
+            if (core.state.source != SensorSource.ACCELEROMETER) releaseWakeLock()
         }
-        core.resetMotionGate()
+        core.resetMotionWitness()
     }
 
     // ---- motion signature windows ----------------------------------------
@@ -812,10 +841,10 @@ class StepTrackerService : Service(), SensorEventListener {
                     closeMotionWindow(store = true)
                 }
             }
-            // The gate is placed on the same clock the step samples are, so a
-            // verdict can be matched to the steps it covers; the sensor's own
-            // base would not line up with them.
-            if (core.motionGateRunning()) {
+            // The witness is placed on the same clock the step samples are,
+            // so a second it vouches for can be matched to the steps taken
+            // in it; the sensor's own base would not line up with them.
+            if (core.motionWitnessWanted()) {
                 core.onMotionSample(values[0], values[1], values[2], eventTime(sensorEvent).atMillis)
             }
         }
@@ -973,6 +1002,7 @@ class StepTrackerService : Service(), SensorEventListener {
         isAlive = false
         if (core.onDayEnded === dayEnded) core.onDayEnded = null
         if (core.onShownChanged === shownChanged) core.onShownChanged = null
+        if (core.onGateChanged === gateChanged) core.onGateChanged = null
         runCatching { unregisterReceiver(dayBoundary) }
         sensorHandler?.removeCallbacksAndMessages(null)
         unregisterSensors()
@@ -1010,6 +1040,9 @@ class StepTrackerService : Service(), SensorEventListener {
 
         /** 25 Hz. Gait is 1–3 Hz; this is eight samples per step at a run. */
         private const val ACCELEROMETER_PERIOD_US = 40_000
+
+        /** How long the hub may hold the motion gate's samples before waking the CPU with them. */
+        private const val GATE_MAX_LATENCY_US = 5_000_000
 
         /** One second of FIFO batching where the hub supports it. */
         private const val ACCELEROMETER_MAX_LATENCY_US = 1_000_000

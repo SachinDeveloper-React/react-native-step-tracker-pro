@@ -3,6 +3,8 @@ package com.steptrackerpro
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.steptrackerpro.core.ActivityEvent
+import com.steptrackerpro.core.ActivityState
 import com.steptrackerpro.core.ConfigStore
 import com.steptrackerpro.core.DateKeys
 import com.steptrackerpro.core.DayTotals
@@ -57,6 +59,9 @@ class IntegrityPipelineTest {
         context.getSharedPreferences(ConfigStore.PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
         core = StepTrackerCore.get(context)
         core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true))
+        // The core outlives a test: whatever the last one told it Activity
+        // Recognition had said is forgotten with its config.
+        core.onActivityStopped()
         // A tracker that never started keeps its background jobs, and a
         // retention pass running under a test would delete its old rows.
         androidx.work.WorkManager.getInstance(context).cancelAllWork().await()
@@ -868,5 +873,146 @@ class IntegrityPipelineTest {
         assertEquals(false, report["enabled"])
         assertEquals(0, report["suspectSteps"])
         assertEquals(core.engine.snapshot().steps, core.resolveDay(today).totals.steps)
+    }
+
+    /**
+     * The motion gate through the real core, engine and database: a ride
+     * Activity Recognition reports is held, the walk away from it comes
+     * back when "walking" arrives, and the minutes say the same thing the
+     * total does.
+     */
+    @Test
+    fun aRideIsHeldAndTheWalkAwayFromItIsGivenBack() = runBlocking {
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        val start = now - 20 * 60_000L
+        assumeTrue(DateKeys.of(start) == today)
+        core.updateConfig(
+            StepTrackerConfig(
+                fraudDetectionEnabled = true, fraudActivityRecognition = true, motionGateEnabled = true
+            )
+        )
+        assertFalse(core.motionWitnessWanted())
+
+        // An install's first reading is credited in one go, by how long the
+        // phone has been up; everything below is measured from there.
+        var raw = 1_000f
+        core.engine.onCounterSample(raw, start)
+        val before = core.engine.snapshot().steps
+        // A hundred steps of walking.
+        raw += 100f
+        core.engine.onCounterSample(raw, start + 40_000L)
+        assertEquals(0, core.engine.snapshot().gatedSteps)
+
+        // On the bus: Activity Recognition says so, and the accelerometer
+        // is wanted for as long as it does.
+        core.onActivityEvents(listOf(ActivityEvent(ActivityState.IN_VEHICLE, true, start + 120_000L)))
+        assertTrue(core.motionWitnessWanted())
+        raw += 4f
+        core.engine.onCounterSample(raw, start + 300_000L)
+        raw += 4f
+        core.engine.onCounterSample(raw, start + 500_000L)
+        assertEquals(8, core.engine.snapshot().gatedSteps)
+
+        // Off the bus and walking: sixty steps before anyone says so.
+        for (i in 1..6) {
+            raw += 10f
+            core.engine.onCounterSample(raw, start + 700_000L + i * 6_000L)
+        }
+        assertEquals(68, core.engine.snapshot().gatedSteps)
+        assertEquals(before + 100, core.resolveDay(today).totals.steps)
+
+        // "Left the vehicle, entered walking", a minute late as it is.
+        val told = start + 745_000L
+        core.onActivityEvents(
+            listOf(
+                ActivityEvent(ActivityState.IN_VEHICLE, false, told),
+                ActivityEvent(ActivityState.WALKING, true, told)
+            )
+        )
+        assertFalse(core.motionWitnessWanted())
+        // The walk is back; the bus's eight are not.
+        val live = core.engine.snapshot()
+        assertEquals(before + 168, live.steps)
+        assertEquals(8, live.gatedSteps)
+        assertEquals(before + 160, core.resolveDay(today).totals.steps)
+        // And storage agrees, though it once held sixty-eight.
+        eventually { core.resolveDay(today).totals.gatedSteps == 8 }
+        eventually { (core.history(today, today).singleOrNull()?.steps ?: 0) == before + 160 }
+
+        // The minutes hold what was counted as steps - the first walk and
+        // the one given back - and none of it is tagged as a vehicle's,
+        // which would flag it as the very thing it was cleared of.
+        val minutes = core.stepMinutes(today, today)
+        assertEquals(160, minutes.sumOf { it.totalSteps })
+        assertEquals(0, minutes.sumOf { it.vehicleSteps })
+
+        @Suppress("UNCHECKED_CAST")
+        val gate = core.integrityReport(today)["motionGate"] as Map<String, Any?>
+        assertEquals(true, gate["enabled"])
+        assertEquals(false, gate["holding"])
+        assertEquals(8, gate["gatedSteps"])
+        @Suppress("UNCHECKED_CAST")
+        val recognition = gate["activityRecognition"] as Map<String, Any?>
+        // This package's own test APK ships no Play Services.
+        assertEquals(false, recognition["available"])
+        assertEquals("walking", recognition["activity"])
+
+        // The log says what was held, and what was given back and why.
+        @Suppress("UNCHECKED_CAST")
+        val events = (core.integrityReport(today)["events"] as List<Map<String, Any?>>)
+            .filter { it["type"] == IntegrityEvent.MOTION_GATE }
+            .map { it["detail"] as Map<String, Any?> }
+        assertTrue("$events", events.any { it["holding"] == true && it["reason"] == "in_vehicle" })
+        assertTrue("$events", events.any { it["released"] == 60 && it["reason"] == "on_foot" })
+        assertTrue("$events", events.any { it["holding"] == false && it["reason"] == "walking" })
+    }
+
+    @Test
+    fun theGateHoldsNothingWithoutActivityRecognitionAndTagsNothingItWasNotAskedTo() = runBlocking {
+        val today = DateKeys.today()
+        val now = System.currentTimeMillis()
+        val start = now - 20 * 60_000L
+        assumeTrue(DateKeys.of(start) == today)
+        // The gate alone: integrity checks on, their activity tags not asked for.
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
+
+        // No report of a vehicle, so every step counts, however it arrives.
+        var raw = 1_000f
+        core.engine.onCounterSample(raw, start)
+        val before = core.engine.snapshot().steps
+        for (i in 1..10) {
+            raw += 7f
+            core.engine.onCounterSample(raw, start + i * 20_000L)
+        }
+        assertEquals(0, core.engine.snapshot().gatedSteps)
+        assertEquals(before + 70, core.resolveDay(today).totals.steps)
+
+        // "Still" arrives - Activity Recognition is running for the gate -
+        // and the steps that follow are not tagged with it: the app did
+        // not ask for those findings.
+        core.onActivityEvents(listOf(ActivityEvent(ActivityState.STILL, true, start + 300_000L)))
+        raw += 12f
+        core.engine.onCounterSample(raw, start + 320_000L)
+        val minutes = core.stepMinutes(today, today)
+        assertEquals(82, minutes.sumOf { it.totalSteps })
+        assertEquals(0, minutes.sumOf { it.stillSteps })
+
+        // Turning the gate off mid-ride lets go of the ride, with no
+        // service there to be told.
+        core.onActivityEvents(listOf(ActivityEvent(ActivityState.IN_VEHICLE, true, start + 400_000L)))
+        assertTrue(core.motionWitnessWanted())
+        raw += 3f
+        core.engine.onCounterSample(raw, start + 410_000L)
+        assertEquals(3, core.engine.snapshot().gatedSteps)
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = false))
+        assertFalse(core.motionWitnessWanted())
+        raw += 5f
+        core.engine.onCounterSample(raw, start + 420_000L)
+        assertEquals(3, core.engine.snapshot().gatedSteps)
+        // And turning it on in the middle of one picks the ride up: it is
+        // still what Activity Recognition last said.
+        core.updateConfig(StepTrackerConfig(fraudDetectionEnabled = true, motionGateEnabled = true))
+        assertTrue(core.motionWitnessWanted())
     }
 }

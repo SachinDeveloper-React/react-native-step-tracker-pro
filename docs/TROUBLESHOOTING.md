@@ -29,52 +29,98 @@ all on that hardware. Options, in order of how much they give up:
 ## Steps counted in a car, on a bus or on a bicycle
 
 This affects the hardware counter too, not only the accelerometer fallback.
-`TYPE_STEP_COUNTER` is a pedometer inside the sensor hub, and whatever
-vehicle rejection its vendor implemented is the vendor's business: on a great
-many phones a bus seat, a car's floor or a bicycle's frame feeds it a rhythm
-it reports as walking, hundreds of steps an hour. Google Fit and Samsung
-Health on the same phone show it too, which is how to confirm it is the
-sensor and not this package.
+`TYPE_STEP_COUNTER` is a pedometer inside the sensor hub. Android asks that
+it not trigger "when the user is biking, driving, or in other vehicles", and
+whether it does is its vendor's business: on a great many phones a bus seat,
+a car's floor or a motorbike feeds it a rhythm it reports as walking,
+hundreds of steps an hour. The phone's own health app, and Health Connect's
+platform entry, show them too, which is how to confirm it is the sensor and
+not this package.
 
-Turn the motion gate on (2.8.0):
+Turn the motion gate on, and give it what it needs:
+
+```gradle
+// android/app/build.gradle
+implementation "com.google.android.gms:play-services-location:21.3.0"
+```
 
 ```ts
 await StepTracker.initialize({ motionGate: { enabled: true } });
 ```
 
-The accelerometer is then watched for as long as tracking runs and judged
-once a second, and steps that arrive while the phone is being shaken by a
-machine rather than walked with are held back: still in `deviceSteps`, out of
-`steps`, reported as `gatedSteps`. See
-[API.md](API.md#the-motion-gate) for every threshold.
+While Google's Activity Recognition says "in a vehicle" or "on a bicycle",
+the steps that arrive are held: still in `deviceSteps`, out of `steps`,
+reported as `gatedSteps`. This is how Google Fit removes them. See
+[API.md](API.md#the-motion-gate).
 
-To check it on a device, put `getIntegrityReport().motionGate.verdict` on
-screen - the example app does - and watch it:
+To check it on a device, put `getIntegrityReport().motionGate` on screen -
+the example app does - and ride:
 
-- sitting in a bus it should read `vibration` within about five seconds of
-  the ride settling, and `gatedSteps` should stop rising;
-- walking it should read `gait` within a second or two;
-- holding the phone dead still it reads `still`, which is **not** gated on
-  purpose: a steady phone gives the counter no vibration to mistake for a
-  step, and an accelerometer that stopped delivering looks identical.
+- `activityRecognition.available` must be `true`. `false` means the app
+  does not ship `play-services-location`, and nothing will ever be held;
+- about a minute after a bus sets off, `activityRecognition.activity` reads
+  `in_vehicle`, `holding` turns `true`, and the count on screen stops
+  moving while `gatedSteps` rises;
+- get off and walk: within a minute `holding` turns `false` and the steps
+  of the walk so far appear at once. Usually sooner - the accelerometer
+  confirms a walk in about thirty seconds, and `verdict` reads `gait`
+  throughout.
 
-If a ride still leaks steps, it is a smooth one whose vibration lands at a
-walking cadence. Lower `stillVariance` toward 0.005 if the phone barely
-moves, or `maxZeroCrossingRate` toward 6 if the road is smooth; both gate
-more, and eventually start gating gentle walks, so change one at a time and
-check `gatedSteps` against a day you walked normally. If the app ships
-`play-services-location`, also set
-`fraudDetection: { enabled: true, activityRecognition: true }`: Activity
-Recognition's "in a vehicle" and "on a bicycle" are then taken as proof and
-skip the accelerometer's verdict.
+**If a ride still counts steps:**
+
+- *Its first minute always does.* Activity Recognition takes that long to
+  notice a ride, and nothing is held on a guess.
+- *`activity` never reads `in_vehicle`.* Then Activity Recognition is not
+  reporting. Check the `ACTIVITY_RECOGNITION` permission is granted, that
+  Play Services is up to date, and that the phone's battery manager is not
+  restricting the app or Play Services; the `motion_gate` rows in
+  `getIntegrityEvents()` say when holding began and ended, and
+  `activity_changed` rows (with `fraudDetection.enabled`) everything that
+  was reported.
+- *It reads `still` at every stop.* A bus that waits long enough at a light
+  is reported still, holding ends, and the next minute of the ride is
+  counted before `in_vehicle` comes back.
+- *It is a bicycle and the phone is in a pocket.* Pedalling is a rhythm the
+  accelerometer cannot tell from walking, so it is confirmed as a walk and
+  its steps are counted.
+
+**If steps are held that were walked**, that is a bug in this package or a
+wrong report from Activity Recognition, and the log has it: a `motion_gate`
+row with `holding: true`, the steps held after it in `gatedSteps`, and no
+`released` row. Until 2.9.0 it was a different matter - see
+[the next section](#the-app-shows-fewer-steps-than-the-phone-walked).
 
 On a phone with **no** step sensor, counting over the accelerometer
 (`getDeviceCapabilities().bestSensor === 'accelerometer'`), the software
 pedometer ignores vibration above 3 Hz and rocking below 0.8 Hz, but a rough
 road at walking cadence looks like walking there too. The gate applies to it
-as well, for free - the samples are already arriving - and raising
-`accelerometerThreshold` (default 0.9 m/s²) toward 1.5 is the other lever;
-gentle walks with the phone in a bag start being missed above that.
+as well, and raising `accelerometerThreshold` (default 0.9 m/s²) toward 1.5
+is the other lever; gentle walks with the phone in a bag start being missed
+above that.
+
+## The app shows fewer steps than the phone walked
+
+Compare with what the phone itself counted: its own health app, or Health
+Connect's platform entry (`getStepSources()` → `isPlatform`), which read the
+same hardware counter. Then look at `gatedSteps` on the snapshot.
+
+- **`gatedSteps` accounts for the difference, on 2.8.0-2.8.2.** That was
+  the motion gate's accelerometer classifier calling a walk a vehicle. It
+  held steps whenever it saw no walking rhythm, and measured against
+  recorded walks that lost 15% of real steps on 2.8.0 - 44% for a phone in
+  a back trouser pocket, and most of a walk for some people - and 3.5% on
+  2.8.2. Upgrade to 2.9.0, where the accelerometer holds nothing; or, on
+  the old release, turn `motionGate` off. Steps already held on past days
+  stay held: the raw count is `steps + gatedSteps`.
+- **`gatedSteps` accounts for it, on 2.9.0.** Then Activity Recognition
+  reported a vehicle. If the user was in one, this is the gate working;
+  `getIntegrityEvents()` shows each `motion_gate` row with when holding
+  began, when it ended and what was given back.
+- **`gatedSteps` is 0.** It is not the gate. The usual causes are steps
+  taken while the service was dead that could not be recovered
+  ([Steps counted while the app was dead did not show up](#steps-counted-while-the-app-was-dead-did-not-show-up)),
+  `setCountFrom()` ([The count went to zero after `setCountFrom()`](#the-count-went-to-zero-after-setcountfrom)),
+  or `fraudDetection.mode: 'exclude'` taking `suspectSteps` out.
 
 ## Counting stops when the screen goes off
 
@@ -273,11 +319,11 @@ adb shell dumpsys package <applicationId> | grep -A3 PERMISSIONS_RATIONALE
 In order of likelihood:
 
 1. **The hardware counter itself.** `TYPE_STEP_COUNTER` false-counts in a
-   moving vehicle and when the phone is shaken; Google Fit and Samsung
-   Health show the same on that device. Compare with the phone's own
+   moving vehicle and when the phone is shaken; the phone's own health app
+   shows the same on that device. Compare with the phone's own
    Health Connect count (`getStepSources()` → `isPlatform`), which comes
    from the same sensor: if both climb, it is the sensor. `motionGate`
-   (2.8.0) is the fix for the vehicle half of this - see
+   is the fix for the vehicle half of this - see
    [Steps counted in a car, on a bus or on a bicycle](#steps-counted-in-a-car-on-a-bus-or-on-a-bicycle).
 2. **A HAL that jitters backwards.** A reading below the previous one used to
    be treated as a restart and the dip added back on the next sample. 1.3

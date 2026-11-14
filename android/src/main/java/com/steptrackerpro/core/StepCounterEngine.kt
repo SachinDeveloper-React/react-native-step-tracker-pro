@@ -103,13 +103,13 @@ class StepCounterEngine(
     var onLate: (() -> Unit)? = null
 
     /**
-     * Asked how many of the steps this sample watched being taken are a
-     * machine's vibration rather than walking - see [MotionGate]. What it
-     * returns stays in the day's raw total, which is what `deviceSteps`
-     * reports, and is added to [StepStateStore.gatedToday] so every number
-     * shown goes without it. Runs under this engine's lock on the sensor
-     * thread; keep it cheap. Null counts every step, which is what
-     * `motionGate.enabled` off means.
+     * Asked how many of the steps this sample watched being taken are held
+     * back as a vehicle's - see [VehicleGate]. What it returns stays in the
+     * day's raw total, which is what `deviceSteps` reports, and is added to
+     * [StepStateStore.gatedToday] so every number shown goes without it,
+     * until [releaseGated] gives it back. Runs under this engine's lock on
+     * the sensor thread; keep it cheap. Null counts every step, which is
+     * what `motionGate.enabled` off means.
      */
     var gate: ((fromMillis: Long, toMillis: Long, steps: Int, timed: Boolean) -> Int)? = null
 
@@ -593,9 +593,11 @@ class StepCounterEngine(
             }
         }
         // The gate judges only what stayed on the active day: steps handed
-        // to a day that has closed are counted there, and a verdict about
-        // what is moving the phone now says nothing about a day that ended.
-        val gatedNow = if (closedDay == null) {
+        // to a day that has closed are counted there, and a ride in
+        // progress now says nothing about a day that ended. And only what
+        // was watched being taken: an install's since-boot claim, a gap
+        // recovered in one go and a paused sample leave nothing to ask about.
+        val gatedNow = if (closedDay == null && observed > 0) {
             (gate?.invoke(observedFrom, eventAtMillis, observed, timed) ?: 0).coerceIn(0, observed)
         } else {
             0
@@ -686,7 +688,7 @@ class StepCounterEngine(
                 }
             }
         }
-        val gatedNow = if (closedDay == null) {
+        val gatedNow = if (closedDay == null && observed > 0) {
             (gate?.invoke(previousEventAt, eventAtMillis, observed, timed) ?: 0).coerceIn(0, observed)
         } else {
             0
@@ -719,6 +721,29 @@ class StepCounterEngine(
         if (counted == 0) return null
         pendingCommit += counted
         return snapshot()
+    }
+
+    /**
+     * Gives back steps [gate] held: they turned out to be a walk - the one
+     * away from a bus stop, in the minute before Activity Recognition
+     * noticed the ride was over. They were in the raw total all along, so
+     * only the held share moves.
+     *
+     * The caller places them on the minute timeline itself, each in the
+     * span it was first reported with, which is why [onObserved] is not
+     * invoked from here.
+     *
+     * @return how many were given back: never more than the active day
+     *   holds, so steps held on a day that has closed since stay with it.
+     */
+    @Synchronized
+    fun releaseGated(steps: Int): Int {
+        if (steps <= 0) return 0
+        val released = steps.coerceAtMost(state.gatedToday)
+        if (released <= 0) return 0
+        state.gatedToday = state.gatedToday - released
+        pendingCommit += released
+        return released
     }
 
     /**

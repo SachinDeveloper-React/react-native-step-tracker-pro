@@ -164,7 +164,7 @@ abstract class StepDatabase : RoomDatabase() {
 
         /**
          * `daily_summary.gatedSteps`: how many of a day's steps the motion
-         * gate held back as a vehicle's vibration. Existing rows get 0 -
+         * gate held back as a vehicle's. Existing rows get 0 -
          * nothing was held back on a day the gate did not run - so every
          * stored day keeps showing exactly the total it showed before the
          * upgrade. Same ALTER as version 3, and for the same reason: this

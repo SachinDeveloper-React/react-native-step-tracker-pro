@@ -148,21 +148,22 @@ interface DailySummaryDao {
     suspend fun upsert(entity: DailySummaryEntity)
 
     /**
-     * Upsert that never lets the recovered or gated share go backwards. A
-     * snapshot written for the live day carries the engine's running
-     * figures, which only grow within a day; a stale write racing a backfill
-     * for the same row must not undo the backfill's increment. Mirrors
+     * Upsert that never lets the recovered share go backwards. A snapshot
+     * written for the live day carries the engine's running figure, which
+     * only grows within a day; a stale write racing a backfill for the same
+     * row must not undo the backfill's increment. Mirrors
      * [StepHistoryDao.upsert]'s refusal to lower the step count.
+     *
+     * The gated share is written as given. It is the engine's alone - no
+     * backfill touches it - and from 2.9.0 it goes down as well as up: held
+     * steps are given back when they turn out to be the walk away from a
+     * ride. Kept at its highest, a day's stored total would stay short of
+     * the live one by every step ever given back.
      */
     @Transaction
     suspend fun upsertKeepingRecovered(entity: DailySummaryEntity) {
         val existing = findByDate(entity.date) ?: return upsert(entity)
-        upsert(
-            entity.copy(
-                recoveredSteps = maxOf(entity.recoveredSteps, existing.recoveredSteps),
-                gatedSteps = maxOf(entity.gatedSteps, existing.gatedSteps)
-            )
-        )
+        upsert(entity.copy(recoveredSteps = maxOf(entity.recoveredSteps, existing.recoveredSteps)))
     }
 
     @Query("DELETE FROM daily_summary WHERE date < :cutoff")

@@ -227,11 +227,12 @@ charging, resets). It reads no location and needs no new permission.
   integrity report includes device hints (emulator, root indicators, ADB).
   If you send these to your server, declare them under "Device or other
   IDs" for fraud prevention and security.
-- **Activity Recognition.** `activityRecognition: true` uses Google's
-  Activity Recognition API through Play Services, which your app adds. It
-  runs under the `ACTIVITY_RECOGNITION` permission the package already needs
-  (section 4); say in your privacy policy that activity types are used to
-  check step counts.
+- **Activity Recognition.** `motionGate.enabled` and
+  `fraudDetection.activityRecognition` use Google's Activity Recognition API
+  through Play Services, which your app adds. It runs under the
+  `ACTIVITY_RECOGNITION` permission the package already needs (section 4);
+  say in your privacy policy that activity types - walking, in a vehicle -
+  are used to decide which steps count.
 - **Fraud prevention is a stated purpose.** The data safety form lets you
   mark data as collected for "Fraud prevention, security, and compliance";
   use it for the integrity data rather than "App functionality" alone.

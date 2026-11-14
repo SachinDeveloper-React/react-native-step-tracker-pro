@@ -162,8 +162,10 @@ function integrityReport(date = today()): IntegrityReport {
     activityRecognition: { requested: false, available: false, current: 'unknown' },
     motionGate: {
       enabled: false,
+      holding: false,
       verdict: 'unknown',
       gatedSteps: 0,
+      activityRecognition: { available: false, activity: 'unknown' },
       rules: {
         windowSeconds: 3,
         stillVariance: 0.02,

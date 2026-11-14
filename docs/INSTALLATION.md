@@ -327,6 +327,33 @@ sums the phone and the watch — see
 The `useHealthConnect()` hook wraps this whole flow if you would rather not
 drive it by hand.
 
+## 10. Keeping vehicles out of the count
+
+Optional. The hardware step counter counts on many phones while a bus, a
+car or a motorbike shakes them. `motionGate` holds those steps back the way
+Google Fit does - by asking Google's Activity Recognition - and for that the
+app has to ship Play Services' location library, which this package declares
+compile-only so that an app that does not want it never gets it:
+
+```gradle
+// android/app/build.gradle
+dependencies {
+  implementation "com.google.android.gms:play-services-location:21.3.0"
+}
+```
+
+```ts
+await StepTracker.initialize({ motionGate: { enabled: true } });
+
+const { motionGate } = await StepTracker.getIntegrityReport(today);
+motionGate.activityRecognition.available; // false: the dependency is missing
+```
+
+No new permission - it runs under the `ACTIVITY_RECOGNITION` step counting
+already holds - and nothing about location is read. Without the dependency
+the gate holds nothing and every step the counter reports is counted. See
+[the motion gate](./API.md#the-motion-gate).
+
 ## ProGuard / R8
 
 `consumer-rules.pro` ships with the library and is applied automatically. No

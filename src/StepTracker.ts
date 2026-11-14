@@ -243,7 +243,12 @@ function assertFraudDetection(config: StepTrackerConfig): void {
   assertThreshold('maxDailySteps', fraud.maxDailySteps, 1000);
 }
 
-/** A gate threshold the native side would silently move is a mistake worth reporting. */
+/**
+ * A gate threshold the native side would silently move is a mistake worth
+ * reporting. Only `stillVariance` is used from 2.9.0; the other four are
+ * deprecated, and held to the ranges they always had so that a config
+ * written for 2.8 is accepted or refused exactly as it was.
+ */
 function assertMotionGate(config: StepTrackerConfig): void {
   const gate = config.motionGate;
   if (gate == null) return;
@@ -287,8 +292,8 @@ function assertMotionGate(config: StepTrackerConfig): void {
       'motionGate.engageSeconds must be an integer 0–120'
     );
   }
-  // A still floor high enough to call a sprint still would gate nothing; a
-  // peak share of 1 wants a pure tone and would gate every walk.
+  // A still floor high enough to call a sprint still would end every ride
+  // five minutes in.
   range('stillVariance', gate.stillVariance, 0, 1);
   range('minPeakRatio', gate.minPeakRatio, 0, 0.9);
   range('maxZeroCrossingRate', gate.maxZeroCrossingRate, 1, 100);

@@ -1,5 +1,54 @@
 # Migrating
 
+## From 2.8 to 2.9
+
+One thing to do if you use `motionGate`; nothing otherwise.
+
+- **`motionGate` now needs `play-services-location` in your app.** It holds
+  steps back only while Google's Activity Recognition reports a vehicle or
+  a bicycle - what Google Fit does - and no longer on the accelerometer's
+  own word, which lost real walks (see below). Add
+
+  ```gradle
+  // android/app/build.gradle
+  implementation "com.google.android.gms:play-services-location:21.3.0"
+  ```
+
+  and check `getIntegrityReport().motionGate.activityRecognition.available`.
+  **Without it the gate holds nothing**: the count is the hardware
+  counter's, as it was before 2.8, vehicles included. Nothing else needs
+  setting - turning the gate on starts Activity Recognition by itself,
+  whatever `fraudDetection.activityRecognition` says, and the
+  `ACTIVITY_RECOGNITION` permission is the one step counting already holds.
+- **Expect daily numbers to come back up.** 2.8.0-2.8.2 held steps whenever
+  the accelerometer saw no walking rhythm. Replayed against 131 recorded
+  walks that threw away 14.8% of real steps on 2.8.0 and 3.5% on 2.8.2 -
+  44% and 11.5% for a phone in a back trouser pocket - and anything walked
+  without a rhythm, indoors or in a crowd, on top. Those steps are counted
+  again. Days already stored keep the `gatedSteps` they were given; the raw
+  count for any of them is `steps + gatedSteps`.
+- **`windowSeconds`, `minPeakRatio`, `maxZeroCrossingRate` and
+  `engageSeconds` are deprecated and do nothing.** They tuned the
+  classifier that is gone. They are still accepted, validated and read
+  back, so a stored config or one a server sends keeps working unchanged.
+  `stillVariance` is still used.
+- **`gatedSteps` goes down as well as up.** Steps held at the end of a ride
+  are given back when they turn out to be the walk away from it, so a
+  snapshot can show a smaller `gatedSteps` than the one before. A server
+  that treats it as a counter that only grows should stop.
+- **The first minute of a ride is counted.** Activity Recognition takes
+  about that long to report one, and nothing is held on a guess. 2.8 engaged
+  in two seconds - by guessing.
+- **`getIntegrityReport().motionGate` has two new fields**, `holding` and
+  `activityRecognition: { available, activity }`, and `'motion_gate'` is
+  now in the `IntegrityEventType` union - the events have been logged since
+  2.8.0 and the type did not list them. `verdict` is `'unknown'` except
+  during a ride: the accelerometer is only watched then.
+- **Battery.** The accelerometer is registered for the length of a ride
+  instead of for as long as tracking runs, and so is the wake lock a
+  non-wake-up accelerometer needs.
+- **No database change.** The schema stays at version 7.
+
 ## From 2.7 to 2.8
 
 Nothing to change in code, and no number moves until you opt in.

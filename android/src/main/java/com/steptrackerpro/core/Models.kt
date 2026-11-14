@@ -87,13 +87,13 @@ data class DayTotals(
      */
     val suspectSteps: Int = 0,
     /**
-     * Of this device's raw count, how many the motion gate held back as a
-     * machine's vibration rather than steps - a bus, a car, a bicycle. 0
-     * unless `motionGate.enabled`. Already out of `steps`, always and
-     * whatever `fraudDetection.mode` says: unlike a flag, which is evidence
-     * for a policy to weigh, this is the device saying it did not see a
-     * step. `steps + gatedSteps` is what the hardware counter reported, and
-     * is what `deviceSteps` carries. See [GaitGate].
+     * Of this device's raw count, how many the motion gate is holding back
+     * as a vehicle's rather than the user's: counted while Activity
+     * Recognition reported a vehicle or a bicycle, and not given back
+     * since. 0 unless `motionGate.enabled`. Already out of `steps`, always
+     * and whatever `fraudDetection.mode` says. `steps + gatedSteps` is what
+     * the hardware counter reported, and is what `deviceSteps` carries. See
+     * [VehicleGate].
      */
     val gatedSteps: Int = 0
 )

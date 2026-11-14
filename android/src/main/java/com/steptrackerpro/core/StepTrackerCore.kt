@@ -101,22 +101,27 @@ class StepTrackerCore private constructor(context: Context) {
             if (writesMinutes()) mirrorMinutes.record(from, to, steps, timed)
         }
         onLate = { scheduleLateSteps() }
-        gate = { from, to, steps, timed ->
-            val gate = motionGate
-            if (gate == null) 0 else MotionGate.gated(gate, inVehicle(), from, to, steps, timed)
-        }
+        gate = { from, to, steps, timed -> heldByGate(from, to, steps, timed) }
         gapRecovery = StepCounterEngine.GapRecovery.from(configStore.get().gapRecovery)
         gapRecoveryMaxSteps = configStore.get().gapRecoveryMaxSteps
     }
 
     /**
-     * Tells a walk from a vehicle's vibration, while `motionGate.enabled`;
-     * null when it is off, which is what leaves every step counted. Replaced
-     * rather than reconfigured when the thresholds change, so a verdict is
-     * never half from one set of rules and half from another.
+     * Holds back the steps of a ride Activity Recognition reports, while
+     * `motionGate.enabled`; null when it is off, which is what leaves every
+     * step counted.
      */
     @Volatile
-    private var motionGate: GaitGate? = null
+    private var vehicleGate: VehicleGate? = null
+
+    /**
+     * Told when the gate starts or stops wanting the accelerometer - a ride
+     * began, or ended - and when held steps were given back. The service
+     * sets it, registers or releases the sensor, and redraws the
+     * notification; called from the sensor thread and from the main one.
+     */
+    @Volatile
+    var onGateChanged: (() -> Unit)? = null
 
     /** The verdict last logged, so the event log gets one row per change. */
     @Volatile
@@ -171,6 +176,10 @@ class StepTrackerCore private constructor(context: Context) {
         // Exclude mode: a verdict that moved today's flagged total moved the
         // shown number too, and JS hears about it without waiting for a step.
         integrity.onLiveChanged = { emitLiveSteps() }
+        // The gate exists from the first moment config says it should: an
+        // Activity Recognition broadcast can be what starts this process,
+        // before any service has had the chance to build it.
+        syncMotionGate()
     }
 
     /**
@@ -191,67 +200,168 @@ class StepTrackerCore private constructor(context: Context) {
     // ---- motion gate -----------------------------------------------------
 
     /**
-     * Builds, rebuilds or drops the gate to match the config. Called when
-     * tracking starts and whenever config changes; the service decides
-     * separately whether it has an accelerometer to feed it with.
+     * Builds or drops the gate to match the config. Called when tracking
+     * starts and whenever config changes; the service decides separately
+     * whether it has an accelerometer to feed it with.
      */
     fun syncMotionGate() {
         val config = config()
+        val current = vehicleGate
         if (!config.motionGateEnabled) {
-            if (motionGate != null) {
-                motionGate = null
+            if (current != null) {
+                vehicleGate = null
                 lastMotionVerdict = MotionVerdict.UNKNOWN
                 integrity.log(IntegrityEvent.MOTION_GATE, mapOf("enabled" to false))
+                // Turned off in the middle of a ride: the accelerometer it
+                // was watching with is no longer wanted.
+                if (current.holding) onGateChanged?.invoke()
             }
             return
         }
-        // Rebuilt only when the thresholds actually moved, so a config change
-        // about something else does not throw away the seconds of window a
-        // verdict rests on - and so no verdict is ever half from one set of
-        // rules and half from another.
-        val rules = config.motionGateRules()
-        if (motionGate?.rules == rules) return
-        motionGate = GaitGate(rules)
+        if (current != null) {
+            current.setRules(config.motionGateRules())
+            return
+        }
+        val gate = VehicleGate(config.motionGateRules())
+        // Turned on in the middle of a ride Activity Recognition has
+        // already reported - it was running for the integrity tags.
+        if (integrity.activity.carried) gate.onActivity(integrity.activity, System.currentTimeMillis())
+        vehicleGate = gate
         lastMotionVerdict = MotionVerdict.UNKNOWN
         integrity.log(IntegrityEvent.MOTION_GATE, mapOf("enabled" to true))
+        if (gate.holding) onGateChanged?.invoke()
     }
 
-    /** True while the gate is on, for the service's sensor bookkeeping. */
-    fun motionGateRunning(): Boolean = motionGate != null
+    /**
+     * True while the gate is holding steps, which is exactly how long it
+     * wants the accelerometer: to notice the user walking away from the
+     * ride before Activity Recognition says so.
+     */
+    fun motionWitnessWanted(): Boolean = vehicleGate?.holding == true
 
-    /** The gate's current verdict, for the integrity report. */
+    /** Whether steps are being held back right now, for the integrity report. */
+    fun motionGateHolding(): Boolean = vehicleGate?.holding == true
+
+    /**
+     * The accelerometer's current verdict, for the integrity report. The
+     * samples behind it arrive up to five seconds late - the hub batches
+     * them - so "current" allows for that and a little more.
+     */
     fun motionVerdict(): MotionVerdict =
-        motionGate?.verdictFor(System.currentTimeMillis()) ?: MotionVerdict.UNKNOWN
+        vehicleGate?.witness?.verdictFor(System.currentTimeMillis(), REPORT_VERDICT_STALE_MS)
+            ?: MotionVerdict.UNKNOWN
 
     /**
      * One accelerometer sample from the service, on the sensor thread.
      *
      * @param atMillis when the sample was taken, epoch ms - the same base
-     *   the step samples carry, so a verdict can be matched to the steps it
-     *   covers.
+     *   the step samples carry, so a second here is a second there.
      */
     fun onMotionSample(x: Float, y: Float, z: Float, atMillis: Long) {
-        val fresh = motionGate?.onSample(x, y, z, atMillis) ?: return
-        if (fresh == lastMotionVerdict) return
-        lastMotionVerdict = fresh
-        integrity.log(IntegrityEvent.MOTION_GATE, mapOf("verdict" to fresh.jsValue))
+        val outcome = vehicleGate?.onSample(x, y, z, atMillis) ?: return
+        outcome.verdict?.let { fresh ->
+            if (fresh != lastMotionVerdict) {
+                lastMotionVerdict = fresh
+                integrity.log(IntegrityEvent.MOTION_GATE, mapOf("verdict" to fresh.jsValue))
+            }
+        }
+        outcome.ended?.let { reason ->
+            integrity.log(IntegrityEvent.MOTION_GATE, mapOf("holding" to false, "reason" to reason))
+        }
+        outcome.release?.let { giveBack(it) }
+        if (outcome.ended != null) onGateChanged?.invoke()
     }
 
-    /** Forgets the window and verdict: a pause or a stop makes both moot. */
-    fun resetMotionGate() {
-        motionGate?.reset()
+    /**
+     * The engine's question, under its lock on the sensor thread: how many
+     * of these steps does the gate hold? The gate can also let a ride go
+     * while answering - one that has outlived twelve hours - and then the
+     * accelerometer watching it is no longer wanted, which the service has
+     * to be told: nothing else would release it.
+     */
+    private fun heldByGate(fromMs: Long, toMs: Long, steps: Int, timed: Boolean): Int {
+        val gate = vehicleGate ?: return 0
+        val wasHolding = gate.holding
+        val held = gate.gated(fromMs, toMs, steps, timed)
+        if (wasHolding && !gate.holding) {
+            integrity.log(IntegrityEvent.MOTION_GATE, mapOf("holding" to false, "reason" to "expired"))
+            onGateChanged?.invoke()
+        }
+        return held
+    }
+
+    /** Forgets what the accelerometer has seen: a pause or a stop makes it moot. */
+    fun resetMotionWitness() {
+        vehicleGate?.resetWitness()
         lastMotionVerdict = MotionVerdict.UNKNOWN
     }
 
     /**
-     * True when Activity Recognition says the phone is being carried by a
-     * machine. Proof enough on its own - it watches minutes of movement,
-     * where the gate sees seconds - and silent unless the host app ships
-     * Play Services and `fraudDetection.activityRecognition` is on.
+     * Activity Recognition's transitions, oldest first, from its receiver
+     * on the main thread. Each state they lead through is applied in turn
+     * and at its own time - see [ActivityState.through] for why "left the
+     * vehicle, entered walking" is one step and not two.
      */
-    private fun inVehicle(): Boolean = when (integrity.activity) {
-        ActivityState.IN_VEHICLE, ActivityState.ON_BICYCLE -> true
-        else -> false
+    fun onActivityEvents(events: List<ActivityEvent>) {
+        val states = integrity.activity.through(events)
+        if (states.isEmpty()) return
+        val gate = vehicleGate
+        val wasHolding = gate?.holding == true
+        var released = false
+        for ((state, at) in states) {
+            integrity.onActivity(state)
+            gate?.onActivity(state, at)?.let {
+                giveBack(it)
+                released = true
+            }
+        }
+        val holding = gate?.holding == true
+        if (holding != wasHolding) {
+            integrity.log(
+                IntegrityEvent.MOTION_GATE,
+                mapOf("holding" to holding, "reason" to states.last().first.jsValue)
+            )
+        }
+        if (holding != wasHolding || released) onGateChanged?.invoke()
+    }
+
+    /** Activity Recognition was stopped: nothing it said holds, and nothing is held on it. */
+    fun onActivityStopped() {
+        integrity.resetActivity()
+        val gate = vehicleGate ?: return
+        if (!gate.holding) return
+        gate.onActivityStopped()
+        integrity.log(IntegrityEvent.MOTION_GATE, mapOf("holding" to false, "reason" to "stopped"))
+        onGateChanged?.invoke()
+    }
+
+    /**
+     * Held steps turned out to be a walk: back into today's count, and onto
+     * the minutes they were taken in, each with the span the counter first
+     * reported it over - as though they had never been held.
+     */
+    private fun giveBack(release: VehicleGate.Release) {
+        // Only what was held today. A step held before midnight belongs to
+        // a day that has closed with it held; today owes it nothing.
+        val today = engine.snapshot().date
+        val mine = release.held.filter { DateKeys.of(it.toMs) == today }
+        var left = engine.releaseGated(mine.sumOf { it.steps })
+        if (left <= 0) return
+        val given = left
+        for (held in mine) {
+            if (left <= 0) break
+            val steps = minOf(held.steps, left)
+            left -= steps
+            // These were walked, whatever Activity Recognition said at the
+            // time; tagged as its "in a vehicle" they would be flagged as
+            // the very thing they were just cleared of.
+            integrity.onObserved(held.fromMs, held.toMs, steps, timed = true, walked = true)
+            if (writesMinutes()) mirrorMinutes.record(held.fromMs, held.toMs, steps, true)
+        }
+        integrity.log(
+            IntegrityEvent.MOTION_GATE, mapOf("released" to given, "reason" to release.reason)
+        )
+        onStepsChanged(engine.snapshot(), force = true)
     }
 
     // ---- other devices ---------------------------------------------------
@@ -348,6 +458,10 @@ class StepTrackerCore private constructor(context: Context) {
         healthConnect.needsRecordingMethods = saved.healthConnectIgnoreManualEntries
         engine.gapRecovery = StepCounterEngine.GapRecovery.from(saved.gapRecovery)
         engine.gapRecoveryMaxSteps = saved.gapRecoveryMaxSteps
+        // The gate follows config here, and not only when the service is
+        // told: a gate left holding after `motionGate.enabled` went off
+        // would go on holding for as long as nothing restarted the service.
+        syncMotionGate()
         // A different policy or pin changes what the baseline means, so it is
         // taken again from the next read rather than carried across. So does
         // the manual-entry rule: a baseline taken from a typed-in total would
@@ -773,6 +887,9 @@ class StepTrackerCore private constructor(context: Context) {
      */
     private suspend fun restartToday(log: suspend (String) -> Unit): DayTotals {
         engine.resetToday()
+        // Steps held on a ride in progress were part of the count that just
+        // went; nothing of it is owed to the one that starts here.
+        vehicleGate?.forgetHeld()
         state.clearContinuity()
         goals.reset()
         sourceCache.invalidate()
@@ -1028,19 +1145,28 @@ class StepTrackerCore private constructor(context: Context) {
      */
     private suspend fun motionGateReport(date: String): Map<String, Any?> {
         val config = config()
+        val today = date == DateKeys.today()
         return mapOf(
             "enabled" to config.motionGateEnabled,
+            // Steps are being held as this is read: a ride is in progress.
+            "holding" to (today && motionGateHolding()),
             "verdict" to motionVerdict().jsValue,
             "gatedSteps" to dayTotals(date).gatedSteps,
-            "rules" to config.motionGateRules().let { rules ->
-                mapOf(
-                    "windowSeconds" to config.motionGateWindowSeconds,
-                    "stillVariance" to rules.stillVariance,
-                    "minPeakRatio" to rules.minPeakRatio,
-                    "maxZeroCrossingRate" to rules.maxZeroCrossingRate,
-                    "engageSeconds" to config.motionGateEngageSeconds
-                )
-            }
+            // The gate holds nothing without it, so the two things that can
+            // keep it from working are said here, next to what it held:
+            // `available` is false when the app does not ship
+            // play-services-location.
+            "activityRecognition" to mapOf(
+                "available" to com.steptrackerpro.integrity.ActivityRecognitionBridge.isAvailable(),
+                "activity" to if (today) integrity.activity.jsValue else ActivityState.UNKNOWN.jsValue
+            ),
+            "rules" to mapOf(
+                "windowSeconds" to config.motionGateWindowSeconds,
+                "stillVariance" to config.motionGateStillVariance,
+                "minPeakRatio" to config.motionGateMinPeakRatio,
+                "maxZeroCrossingRate" to config.motionGateMaxZeroCrossingRate,
+                "engageSeconds" to config.motionGateEngageSeconds
+            )
         )
     }
 
@@ -1098,8 +1224,8 @@ class StepTrackerCore private constructor(context: Context) {
     suspend fun mirrorTotals(day: DayTotals): DayTotals {
         val suspect = integrity.suspect(day.date, day.steps)
         val excluded = integrity.excluded(suspect)
-        // A vehicle's vibration is not handed on to every other app reading
-        // Health Connect, mode or no mode.
+        // What a ride shook out of the counter is not handed on to every
+        // other app reading Health Connect, mode or no mode.
         return if (excluded > 0 || day.gatedSteps > 0) adjusted(day, suspect, excluded) else day
     }
 
@@ -1310,10 +1436,10 @@ class StepTrackerCore private constructor(context: Context) {
             // This phone's own sensor, before any policy. Never Health Connect.
             "deviceSteps" to device.steps,
             "recoveredSteps" to device.recoveredSteps,
-            // Of `deviceSteps`, what the motion gate held back as a machine's
-            // vibration - already out of `resolved`, and signed with it, so a
-            // server can see the device's own judgement rather than guess at
-            // the difference. See GaitGate.
+            // Of `deviceSteps`, what the motion gate held back as a
+            // vehicle's - already out of `resolved`, and signed with it, so
+            // a server can see the device's own judgement rather than guess
+            // at the difference. See VehicleGate.
             "gatedSteps" to device.gatedSteps,
             "sensor" to state.source.jsValue,
             // Only today's coverage is known; a past day reads 0, which is
@@ -2538,6 +2664,9 @@ class StepTrackerCore private constructor(context: Context) {
          * phone's own count is the answer, and the read is retried next time.
          */
         const val HC_READ_TIMEOUT_MS = 4_000L
+
+        /** How old the accelerometer's last verdict may be and still be reported as current. */
+        private const val REPORT_VERDICT_STALE_MS = 10_000L
 
         /** "Never happened" for an uptime-clock marker, far enough back that no interval holds it. */
         const val NEVER = Long.MIN_VALUE / 4

@@ -228,11 +228,11 @@ missing grant, stops the service, and emits `error` with
 Play data safety: *Health and fitness → Fitness info*, collected, "app
 functionality".
 
-The same grant covers Google's Activity Recognition API, which the
-integrity checks use when `fraudDetection.activityRecognition` is on and your
-app ships `play-services-location`. The integrity checks need no other
-permission: charging state and clock changes come from system broadcasts,
-and nothing reads location.
+The same grant covers Google's Activity Recognition API, which the motion
+gate uses when `motionGate.enabled` is on, and the integrity checks when
+`fraudDetection.activityRecognition` is - both only in an app that ships
+`play-services-location`. Neither needs any other permission: charging state
+and clock changes come from system broadcasts, and nothing reads location.
 
 ## 2. `POST_NOTIFICATIONS`
 

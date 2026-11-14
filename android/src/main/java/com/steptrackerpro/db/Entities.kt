@@ -74,8 +74,8 @@ data class DailySummaryEntity(
     @ColumnInfo(name = "recoveredSteps", defaultValue = "0")
     val recoveredSteps: Int = 0,
     /**
-     * Of `totalSteps`, how many the motion gate held back as a machine's
-     * vibration rather than steps - see GaitGate. They stay in `totalSteps`,
+     * Of `totalSteps`, how many the motion gate held back as a vehicle's
+     * rather than the user's - see VehicleGate. They stay in `totalSteps`,
      * which is the raw reading `deviceSteps` reports, and are taken out of
      * every number shown. Added in version 7 with a default of 0: a day
      * recorded before the gate existed had nothing held back, which is the

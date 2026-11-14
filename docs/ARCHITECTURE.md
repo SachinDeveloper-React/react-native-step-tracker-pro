@@ -380,83 +380,151 @@ transaction, and out on `motionWindow`. JVM tests feed synthetic walking at
 1.8 Hz and shaking at 4 Hz and assert the two separate on frequency,
 variance, crossing rate and purity, at 20 and 50 Hz alike.
 
-The band scan itself lives in `MotionBand.peak`, shared with the motion gate:
-a direct Fourier evaluation at the samples' own timestamps, one bin at a
-time across a band, returning the strongest frequency and its share of that
-band's energy.
+The band scan itself lives in `MotionBand.peak`: a direct Fourier evaluation
+at the samples' own timestamps, one bin at a time across a band, returning
+the strongest frequency and its share of that band's energy.
 
 ### The motion gate
 
 Opt-in (`motionGate.enabled`), and the only thing in this package that takes
 steps out of a count without a server or a mode saying so. What it catches is
 not a user cheating but the sensor being wrong: `TYPE_STEP_COUNTER` is a
-pedometer inside the sensor hub, and on a great many phones a bus seat, a
-car's floor or a bicycle's frame feeds it a rhythm it reports as walking.
-By the time a step reaches this package the evidence is gone - the counter
-hands over a number, not a waveform - so the only way to tell those steps
-apart is to be watching the accelerometer at the time.
+pedometer inside the sensor hub, Android asks that it not trigger in
+vehicles, and on a great many phones it does.
 
-`GaitGate` is a sliding window: `windowSeconds` of accelerometer magnitude,
-re-judged at most once a second, with samples older than the window dropped
-from a ring buffer sized for 100 Hz. Samples closer together than 8 ms are
-let go: Android delivers at the fastest rate any app on the phone asked for,
-and at 200 Hz the buffer held less than half a window and never judged
-anything. Per verdict, from the mean-removed magnitude (so gravity and
-orientation drop out):
+**Who may hold a step.** One witness only: Google's Activity Recognition,
+through the Transition API, saying the phone is in a vehicle or on a
+bicycle. This is what Google Fit documents doing, and the reason is
+structural, not a matter of tuning. The hardware counter is itself an
+accelerometer gait classifier, so the moments it is fooled are exactly the
+moments the signal looks like gait: a second, simpler classifier on the same
+signal has little independent to say about them. And "not recognisably
+gait" is not "vehicle" - it is also a kitchen, a shop floor, a badminton
+court and a phone in a back pocket. 2.8.0-2.8.2 shipped that second
+classifier (`GaitGate`: variance, crossing rate and a spectral family over
+three seconds, holding steps on `vibration`) and it was tuned on synthetic
+traces: sums of sinusoids, which repeat exactly, standing in for roads,
+which do not. Replayed against recorded walks it threw away 14.8% of real
+steps (2.8.0) and 3.5% (2.8.2), 44% and 11.5% for a phone in a back trouser
+pocket, and against recorded bus rides it held back about a third of what a
+simple pedometer counts there. It is gone.
 
-- variance under `stillVariance` → `still`;
-- crossing rate over `maxZeroCrossingRate` → `vibration`. A crossing is a
-  swing from below -0.15 RMS to above +0.15 RMS or back, so the chatter of
-  sensor noise on a gentle walk's slow slopes is not counted as buzz;
-- otherwise `MotionBand.spectrum` over 0.3-6.6 Hz, deliberately wider than
-  the gait band: scanned only across 1-3.3 Hz, a coach's half-hertz sway
-  leaks over the band's edge and reports as a strong 1 Hz peak, which read
-  as a slow walk. Scanned wide, the peak lands where it is. It is `gait`
-  when the strongest line is a step rate in 1-3.3 Hz, **or the stride (half
-  of one) or its first harmonic (twice one)** - provided that step rate
-  stands at a quarter of the strongest line in its own right, and the step,
-  stride and harmonic together hold `minPeakRatio` of the energy. Anything
-  else is `vibration`. Before 2.8.2 only the first case was gait, which
-  called a phone in a trouser pocket (strongest at the stride, 0.75-0.9 Hz)
-  and a hard heel strike (strongest at the harmonic) a vehicle and held back
-  the walk. The quarter-strength rule is what keeps a sway from passing as
-  the stride of a walk: a sway has nothing at twice its rate but leakage.
+**`VehicleGate`** is pure Kotlin and owns three things:
 
-The service feeds it in `onSensorChanged`, stamped with
-`SensorEventTime.resolve` rather than the sensor's own base, so a verdict can
-be matched to the step samples it covers. On a phone counting over the
-accelerometer the gate rides along on samples already arriving; otherwise the
-accelerometer is registered for as long as tracking runs - `gateListening`
-tracks who owns the registration, so a signature window closing does not take
-it down - with a wake lock on a non-wake-up sensor under the same
-`accelerometerWakeLock` policy. Paused, stopped or unregistered, the gate is
-reset.
+- *the ride* - `vehicleSince`, set when Activity Recognition reports
+  in-vehicle or on-bicycle (at the event's own time, not the broadcast's
+  arrival) and cleared by any report that is not one of the two, by the
+  witness confirming a walk, by five minutes of stillness, and by twelve
+  hours;
+- *the ledger* - every held delta with the span the counter gave it, kept
+  two minutes;
+- *the witness* - a `WalkWitness`, below.
 
-`StepCounterEngine` asks through `MotionGate.gated`, under its own lock, for
-the steps one sample *observed* - never for a recovered share, a paused
-sample, or steps handed to a day that has closed. What comes back is added to
-`StepStateStore.gatedToday`, written in the same atomic write as the counter
-state, zeroed with it at rollover and reset, and stored in
-`daily_summary.gatedSteps` (schema version 7). `stepsToday` keeps the raw
-reading, which is what `deviceSteps` reports; `adjusted()` takes the gated
-share out of every number on the way out, alongside the flagged share under
-exclude mode. The two cannot overlap: the engine passes `observed - gated` to
-`onObserved`, so what the gate held back reaches neither the integrity
-minutes nor the per-minute Health Connect mirror, and no flag can cover it.
+`StepCounterEngine` asks it through `gate`, under the engine's lock, for the
+steps one sample *observed* - never for a recovered share, a paused sample,
+steps handed to a day that has closed, or nothing at all. `gated()` holds
+all of a delta or none: none when no ride is reported, when the sample is
+untimed, when it was taken before the ride began, or when it is a lump (over
+20 steps after over a minute's silence) reaching back past the ride's
+start. What it holds is added to `StepStateStore.gatedToday`, written in the
+same atomic write as the counter state, zeroed with it at rollover and
+reset, and stored in `daily_summary.gatedSteps` (schema version 7).
+`stepsToday` keeps the raw reading, which is what `deviceSteps` reports;
+`adjusted()` takes the gated share out of every number on the way out,
+alongside the flagged share under exclude mode. The two cannot overlap: the
+engine passes `observed - gated` to `onObserved`, so what is held reaches
+neither the integrity minutes nor the per-minute Health Connect mirror, and
+no flag can cover it.
 
-Every uncertainty counts the steps: an untimed sample, a delta spanning more
-than one verdict's reach, a verdict older than a window, a window that never
-filled, a still phone. Vibration must hold for `engageSeconds` before
-anything is held back, and one `gait` verdict ends it at once. Activity
-Recognition's in-vehicle or on-bicycle state gates on its own, without the
-accelerometer, until the gate has read `gait` for ten unbroken seconds
-(`GaitGate.sustainedGait`): Activity Recognition's state is not aged, and
-its exit from a vehicle comes late or, on some phones, never. JVM tests feed
-synthetic walks (brisk, gentle, strolling, running, with noise, sampled at
-25 to 200 Hz, a phone in a trouser pocket, a heel strike, and down the
-aisle of a moving bus) against bus seats, car floors, bicycles, a coach's
-sway, a train and broadband hiss, and assert each rule catches the case it
-exists for.
+**Giving back.** Activity Recognition is late - about a minute, measured
+independently; "might vary by device", says its guide - and the minute it
+is late by is the walk away from the ride. So holding is provisional:
+
+| What ends the ride | What comes back from the ledger |
+|---|---|
+| Activity Recognition: walking, running | everything from the 90 s before the report |
+| Activity Recognition: still, or a bare exit | what the witness vouches for in those 90 s (`gaitAround`); the rest stays owed for 60 s to a "walking" that follows |
+| the witness confirms a walk | everything from the last 60 s; no ride until a vehicle is reported afresh |
+| five minutes still, twelve hours, Activity Recognition stopped | nothing |
+
+`StepTrackerCore.giveBack` takes the release to the engine
+(`releaseGated`, which lowers `gatedToday` by no more than the active day
+holds, so steps held before midnight stay with the day that closed) and
+replays each held delta onto the minute timeline and the Health Connect
+minute mirror with its original span and `walked = true` - tagged as
+walking whatever Activity Recognition said when it was taken, or the
+`in_vehicle` flag would cover the very steps just cleared of it. Because
+the gated share now goes down, `DailySummaryDao.upsertKeepingRecovered`
+writes it as given and keeps its maximum rule for the recovered share
+alone. Every start, stop and release is a `motion_gate` row in the event
+log.
+
+**`WalkWitness`** answers one question in one direction - is this, beyond
+doubt, a person walking? - and is never asked whether something is a
+vehicle.
+
+- *The grid.* Samples are averaged into 40 ms bins, whatever rate the hub
+  delivers: one sample to a bin at the 25 Hz asked for, eight at the 200 Hz
+  another app's request forces - which is where 2.8.2's window never
+  filled. A bin or five with nothing in them is bridged by the last value
+  (jitter, a hub slower than asked); a longer hole clears the series, and
+  nothing is judged across it.
+- *A second.* Every 25 bins, with three seconds behind it: variance under
+  `stillVariance` is `still`. Otherwise the series is smoothed over four
+  bins - 0.16 s, which passes 3 Hz at half strength and 12 Hz at a twelfth,
+  because an engine's 8-15 Hz tone repeats as perfectly as any walk and on
+  a real bus read as one for most of a minute - and compared with itself at
+  every lag from 0.32 to 1.6 s. It is `gait` when the smoothed variance is
+  at least 0.15 (m/s²)² and some lag, *after the resemblance has first
+  fallen below 0.2*, brings it back to 0.6. The falling-away is what keeps
+  anything slow out: a coach leaning into a bend resembles itself a third
+  of a second later without repeating at all. A step, a stride and a heel
+  strike's harmonic all repeat somewhere in that range, and it does not
+  matter where - which is the whole difference from asking for a spectral
+  line in a band.
+- *A walk.* `confirmedWalking` is 24 `gait` seconds in the last 30. One
+  second proves nothing; 2% of the seconds on a recorded bus pass.
+
+The numbers were chosen against recordings, with the Kotlin above run over
+them, and the JVM tests pin the behaviour with traces built the way roads
+are - noise through a filter, a suspension's resonance at a walker's own
+frequency, a tone, a sway - not with sums of sinusoids:
+
+| Recorded | Minutes | Seconds read as `gait` | Walks confirmed |
+|---|---|---|---|
+| walking: hand, typing, front and back trouser pocket, shirt pocket, backpack, handbag; 27 people, three paces | 101 | 94-100% by placement | 131 of 131, at 30 s |
+| bus | 473 | 2.0% | 0 |
+| taxi | 1,102 | 1.7% | 0 |
+| train | 308 | 0.0% | 0 |
+| bicycle | 265 | 32% | constantly: pedalling is a rhythm |
+
+Walking is [Brajdic & Harle's UbiComp 2013 set](https://www.repository.cam.ac.uk/handle/1810/266947)
+(raw accelerometer at 100 Hz, steps counted from video); the rides are
+[Kaewunruen et al.](https://zenodo.org/records/5140105) (gravity already
+removed, so each was replayed with gravity along each phone axis in turn,
+and "0" is zero on all three). Both were also replayed as bare 25 Hz point
+samples, with aliasing left in, and the table did not move. With a vehicle
+reported for the whole of every walk, the gate gave back all 10,197 steps.
+Neither set is in this repository: one is GPL, and neither is ours to ship.
+
+**The sensor.** The gate needs none to hold a ride. The witness's
+accelerometer is registered when `VehicleGate.holding` turns true and
+released when it turns false - `StepTrackerCore.onGateChanged` tells the
+service, which posts to its sensor thread and syncs under a lock, because
+the news arrives from the sensor thread (a walk confirmed) and the main one
+(a broadcast) alike. 25 Hz, batched five seconds where the hub has a FIFO,
+stamped with `SensorEventTime.resolve` so a second there is a second on the
+step samples' clock; a wake lock on a non-wake-up sensor under
+`accelerometerWakeLock`. On a phone counting over the accelerometer the
+witness rides along on samples already arriving. `gateListening` tracks who
+owns the registration, so a signature window closing does not take it down.
+
+**What gets through, by design.** The first minute of a ride; the false
+steps of the half-minute before a "walking"; a bus that sat long enough at
+a light to read as still, until it is reported moving again; pedalling,
+with the phone on the rider. Every one is a vehicle's step counted. None
+is a walker's step lost, which takes Activity Recognition being wrong for
+longer than it takes to walk for half a minute.
 
 ### Integrity checks
 
@@ -529,8 +597,11 @@ clears the continuity baseline, like a policy change. The engine's own count,
 connected/disconnected (the sticky battery broadcast seeds the state), clock
 and zone changes (the jump is measured as the boot id's move, since a clock
 edit moves the wall clock and not uptime), and — when the host app ships
-`play-services-location` — Activity Recognition transitions through an
-explicit mutable `PendingIntent` to an unexported receiver. Play Services is
+`play-services-location`, and either `fraudDetection.activityRecognition` or
+`motionGate.enabled` asks for it — Activity Recognition transitions through
+an explicit mutable `PendingIntent` to an unexported receiver, which hands
+every event in a broadcast to `StepTrackerCore.onActivityEvents` in order,
+each with its own time. Play Services is
 compile-only: `ActivityRecognitionBridge` probes for the class before any
 reference to it runs, and consumer ProGuard rules keep R8's missing-class
 check quiet for apps without it. Reboots are logged by `BootReceiver`,
@@ -563,8 +634,9 @@ Seven Room tables:
   `step_history`, plus the recovered share (schema version 3) and what the
   motion gate held back (schema version 7); earlier rows migrate with `0` in
   both, which is the only honest value for a day neither was recorded for.
-  Neither share is ever lowered by an upsert. Reads join it back onto the
-  history row.
+  The recovered share is never lowered by an upsert; the gated share is
+  written as the engine has it, because held steps are given back. Reads
+  join it back onto the history row.
 - `motion_window` — `id`, `date`, `startedAt` (indexed), `durationMs`,
   `sampleCount`, `dominantFrequencyHz`, `variance`, `zeroCrossingRate`,
   `peakRatio`, `stepsDuringWindow` (schema version 4). Bounded to

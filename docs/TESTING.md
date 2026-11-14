@@ -45,8 +45,8 @@ npx react-native run-android
 ## 2. Run the automated tests
 
 ```sh
-npm test                 # Jest, JS layer, Jest mock, Expo plugin (191 tests, no device)
-npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days, countFrom shares and the motion gate (317 tests, no device)
+npm test                 # Jest, JS layer, Jest mock, Expo plugin (212 tests, no device)
+npm run test:android     # JVM: resolver, continuity, gap splitting, pedometer, motion signatures, remote payload, fraud detector, minute and hour attribution, sensor timestamps, owed late steps, integrity config, notification distance unit, background reads, Health Connect rate limits and the grants check, range reads, features, vitals, per-minute records, a snapshot's records, other devices' days, countFrom shares, the motion gate and its walking witness (336 tests, no device)
 npm run test:android:device   # instrumented engine, Room migration and integrity pipeline tests
 ```
 
@@ -59,16 +59,20 @@ with the screen off and delivers them in one late batch, as a sleeping phone
 does: judged on the minutes they were walked in, nothing is flagged.
 
 The instrumented tests run fine on an emulator — they never touch the
-sensor. Eighty-six cases: forty-seven drive the engine, four build the Room
-database as an older version from the exported schema, migrate real rows to
-the current version and check every one survived, twenty-eight run the
-integrity layer, sync bookkeeping, Health Connect reads, the notification,
-other devices' steps, countFrom and background work end to end through the real core,
-database and Keystore, four check that remote-sync headers are
-sealed, read back and migrated from 1.x, and three pin when `goalReached`
-fires. Three more, against Health Connect itself, are opt-in - see
-[Health Connect on a device](#health-connect-on-a-device); without the
-property they are skipped. Among them:
+sensor. A hundred and one cases: fifty-nine drive the engine, five build the
+Room database as an older version from the exported schema, migrate real
+rows to the current version and check every one survived, thirty run the
+integrity layer, the motion gate, sync bookkeeping, Health Connect reads, the
+notification, other devices' steps, countFrom and background work end to end
+through the real core, database and Keystore, four check that remote-sync
+headers are sealed, read back and migrated from 1.x, and three pin when
+`goalReached` fires. Three more, against Health Connect itself, are opt-in -
+see [Health Connect on a device](#health-connect-on-a-device); without the
+property they are skipped. Three more, against Play Services' own classes,
+are opt-in too - see
+[Activity Recognition on a device](#activity-recognition-on-a-device).
+Run the whole suite before a release: 2.8.0's additions to it were never
+run until 2.9.0, and two of them were wrong. Among them:
 
 | Test | What breaks if it fails |
 |---|---|
@@ -141,6 +145,36 @@ cd android && ./gradlew connectedDebugAndroidTest -PstpHealthConnectTests \
 | `aSnapshotWithItsRecordsReadsTheDayOnce` | a snapshot that asks for its raw records reads the day twice against Health Connect's rate limits |
 | `aRecordTypeTheSourcesDoNotReadIsReadOnItsOwn` | records of a type the sources do not read go missing, or everything is read twice |
 | `recordsBeforeCountFromAreNotCountedButKeptAsEvidence` | a watch's steps from before countFrom are counted, or the snapshot's raw records lose them |
+
+### Activity Recognition on a device
+
+`ActivityRecognitionGlueTest` is the one place Play Services' own classes
+are used in a test: a real `ActivityTransitionResult`, serialised into an
+intent the way Play Services does it, goes through the real receiver to the
+motion gate, and the registration this package makes is put to the Play
+Services on the device. It needs `play-services-location` on the test APK,
+which every other instrumented test checks is not there, so it is compiled
+and run only when asked, on its own, on an emulator with Google Play or a
+phone:
+
+```sh
+cd android && ./gradlew connectedDebugAndroidTest -PstpPlayServicesTests \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.steptrackerpro.ActivityRecognitionGlueTest
+```
+
+| Test | What breaks if it fails |
+|---|---|
+| `aRealTransitionResultGoesThroughTheReceiverToTheGate` | a ride Activity Recognition reports is not held, the walk away from it is not given back, or a bus read as a bicycle ends the ride |
+| `anIntentWithNoResultInItChangesNothing` | a stray broadcast moves the state |
+| `playServicesAcceptsTheRegistrationThisPackageMakes` | Play Services refuses the request or its `PendingIntent`, and the gate never hears of a ride - silently, but for a log line |
+
+It does not wait for Play Services to send a transition of its own. On an
+emulator lying still one arrived a second after registering on one run -
+"still", through the real `PendingIntent` and the manifest's receiver, which
+is the whole path proven once - and not within half a minute on six others,
+so a test of it would mostly be skipped. And it cannot show what Activity
+Recognition reports in a moving vehicle. That takes a vehicle - see
+[the motion gate](#the-motion-gate).
 
 ### Compatibility builds
 
@@ -504,43 +538,60 @@ adb shell dumpsys battery reset
 
 ### The motion gate
 
-Turn on `motionGate: { enabled: true }` and put
-`getIntegrityReport(today).motionGate.verdict` on screen - the example app
-does, in the integrity card. This one needs a real vehicle; an emulator's
-synthetic accelerometer cannot produce road buzz.
+Add `com.google.android.gms:play-services-location` to the app, turn on
+`motionGate: { enabled: true }`, and put `getIntegrityReport(today)
+.motionGate` on screen - the example app does, in the integrity card. This
+one needs a real vehicle: an emulator has Play Services and reports "still"
+all day.
 
-- [ ] walk 5 minutes: the verdict reads `gait` within a second or two, and
-      `gatedSteps` stays 0 - **this is the test that matters**, because a
-      gate that eats real steps is worse than no gate. Do it three times:
-      phone in hand, in a front trouser pocket, and in a back pocket or bag.
-      The pocket is where 2.8.0 and 2.8.1 read a walk as `vibration`, and
-      the gap shows as this phone's count falling behind the platform's own
-      pedometer in Health Connect
-- [ ] hold the phone dead still for a minute: `still`, and `gatedSteps`
-      stays 0. Not gated on purpose
+What the automated tests already cover, so a device run need not: the
+gate's rules and the witness, on the JVM, against built traces; the engine,
+the database and the give-back path, instrumented; and the witness's
+numbers against recorded walks and rides (see
+[ARCHITECTURE.md](ARCHITECTURE.md#the-motion-gate)). What only a device can
+show is what Activity Recognition reports on that phone, and when.
+
+- [ ] before anything: `activityRecognition.available` is `true`. If it is
+      `false` the dependency is missing and every box below will fail
+- [ ] walk 5 minutes, three times - phone in hand, in a front trouser
+      pocket, in a back pocket or bag: `holding` stays `false`, `gatedSteps`
+      stays 0, and the count matches the platform's own pedometer in Health
+      Connect. **This is the test that matters.** 2.8.0-2.8.2 failed it
+- [ ] potter about indoors for 5 minutes - a few steps, stop, turn, a few
+      more: the same. No rhythm is not a vehicle
 - [ ] sit in a bus or a car for 10 minutes with the phone in hand or pocket:
-      the verdict settles on `vibration` within about five seconds, the
-      step count on screen stops moving, and `gatedSteps` climbs by what the
-      hardware counter was reporting. Compare with Google Fit on the same
-      phone, which has no gate: it should be the one climbing
-- [ ] ride a bicycle for 10 minutes with the phone in a pocket: `vibration`,
-      same as above
-- [ ] get off the bus and walk: the verdict is `gait` within a second or
-      two, and the count moves again with no further delay. With
-      `fraudDetection.activityRecognition` on, the count moves after ten
-      seconds of walking at the latest, whatever Activity Recognition says
-- [ ] walk down the aisle of a moving bus: `gait`, and the steps count. The
-      gait peak outweighs the ride
-- [ ] with the screen off for 10 minutes of a ride, then on: on a phone whose
-      accelerometer is a wake-up sensor (`getIntegrityReport().device
-      .stepCounter` aside, most modern phones) the ride is still gated; on
-      one where it is not, with `accelerometerWakeLock: false`, the steps are
-      counted - the gate goes blind with the CPU asleep, and counts rather
-      than guesses
+      about a minute in, `activityRecognition.activity` reads `in_vehicle`
+      and `holding` turns `true`; from then on the count on screen stops
+      moving and `gatedSteps` climbs by what the hardware counter reports.
+      Note how long the first report took, and whether a long stop turned
+      `holding` off - both are Activity Recognition's, and worth knowing
+      for the phones you ship to
+- [ ] ride a motorbike or scooter for 10 minutes: as the bus
+- [ ] get off and walk for two minutes: `holding` turns `false` within a
+      minute - on `walking` from Activity Recognition, or about thirty
+      seconds in when the accelerometer confirms the walk first - and the
+      steps of the walk so far appear at once. Count them: none of the walk
+      is missing
+- [ ] get off, take ten steps to a bench and sit: when `holding` turns
+      `false` the ten are back, or most of them
+- [ ] ride a bicycle with the phone in a pocket: `holding` turns `true` and
+      then `false` again about thirty seconds later, and the ride counts.
+      Expected - pedalling reads as a walking rhythm
+- [ ] with the screen off for 10 minutes of a ride, then on: the ride is
+      held either way. On a phone whose accelerometer is not a wake-up
+      sensor, with `accelerometerWakeLock: false`, only the early
+      confirmation of a walk is lost; "walking" from Activity Recognition
+      still gives the walk back
+- [ ] `getIntegrityEvents(today, today)`: a `motion_gate` row for every
+      time holding began and ended, with its `reason`, and one for every
+      release with `released`
 - [ ] `getHistory()` for the day: `steps` excludes `gatedSteps`, and
       `getVerificationSnapshot(today).deviceSteps` still has them in
-- [ ] turn the gate off again: `getIntegrityEvents()` carries `motion_gate`
-      with `enabled: false`, and the day keeps the `gatedSteps` it already had
+- [ ] remove `play-services-location` and rebuild: `available` is `false`,
+      nothing is ever held, and the count is the hardware counter's
+- [ ] turn the gate off in the middle of a ride: `holding` is `false` at
+      once, `motion_gate` carries `enabled: false`, and the day keeps the
+      `gatedSteps` it already had
 
 ### Retention
 
